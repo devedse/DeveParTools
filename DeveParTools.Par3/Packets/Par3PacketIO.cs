@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Text;
 using DeveParTools.Core.Hashing;
+using DeveParTools.Core.IO;
 using Microsoft.Win32.SafeHandles;
 
 namespace DeveParTools.Par3.Packets;
@@ -169,6 +170,7 @@ public static class Par3PacketWriter
         return Build(setId, Par3PacketTypes.File, body.ToArray());
     }
 
+    /// <summary>Directory packet; options and children are written in numerical order (see <see cref="Fingerprint.SortKey"/>).</summary>
     public static byte[] Directory(InputSetId setId, string name, IReadOnlyList<Fingerprint> options, IReadOnlyList<Fingerprint> children)
     {
         var nameBytes = Encoding.UTF8.GetBytes(name);
@@ -179,12 +181,12 @@ public static class Par3PacketWriter
         body.AddRange(nameBytes);
         BinaryPrimitives.WriteUInt32LittleEndian(b, (uint)options.Count);
         body.AddRange(b.ToArray());
-        foreach (var o in options.OrderBy(o => o.Value))
+        foreach (var o in options.OrderBy(o => o.SortKey))
         {
             body.AddRange(o.ToArray());
         }
 
-        foreach (var c in children.OrderBy(c => c.Value))
+        foreach (var c in children.OrderBy(c => c.SortKey))
         {
             body.AddRange(c.ToArray());
         }
@@ -192,6 +194,7 @@ public static class Par3PacketWriter
         return Build(setId, Par3PacketTypes.Directory, body.ToArray());
     }
 
+    /// <summary>Root packet; options and children are written in numerical order (see <see cref="Fingerprint.SortKey"/>).</summary>
     public static byte[] Root(InputSetId setId, ulong lowestUnused, bool absolute, IReadOnlyList<Fingerprint> options, IReadOnlyList<Fingerprint> children)
     {
         var body = new List<byte>();
@@ -201,12 +204,12 @@ public static class Par3PacketWriter
         body.Add(absolute ? (byte)1 : (byte)0);
         BinaryPrimitives.WriteUInt32LittleEndian(b, (uint)options.Count);
         body.AddRange(b[..4].ToArray());
-        foreach (var o in options.OrderBy(o => o.Value))
+        foreach (var o in options.OrderBy(o => o.SortKey))
         {
             body.AddRange(o.ToArray());
         }
 
-        foreach (var c in children.OrderBy(c => c.Value))
+        foreach (var c in children.OrderBy(c => c.SortKey))
         {
             body.AddRange(c.ToArray());
         }
@@ -293,9 +296,36 @@ public sealed class Par3FileReadResult
 }
 
 /// <summary>Reads PAR3 packets from any file (also from inside other files, e.g. "PAR inside ZIP").</summary>
+/// <remarks>
+/// <para>The file is walked packet by packet. A packet whose checksum matches is trusted, including its length
+/// field, so the walk jumps over its whole body: packets of unknown types are ignored that way, as the
+/// specification requires, and so is a packet with a known type whose body cannot be parsed (it is counted in
+/// <see cref="Par3FileReadResult.DamagedPackets"/>).</para>
+/// <para>Anything else (garbage, a damaged packet, a truncated packet at the end) is skipped by searching for the
+/// next magic sequence from the following byte on:</para>
+/// <code>
+/// [packet A ok][packet B, damaged    ][junk][packet C ok]
+///  ^ jump      ^ checksum fails → search from B+1 ... ^ found magic
+/// </code>
+/// </remarks>
 public static class Par3PacketReader
 {
     private const long MaxMetadataPacket = 256L << 20;
+
+    private enum ReadOutcome
+    {
+        /// <summary>Checksum ok and parsed.</summary>
+        Packet,
+
+        /// <summary>Checksum ok, but the type is unknown: skipped.</summary>
+        Unknown,
+
+        /// <summary>Checksum ok, but the body does not fit the type's layout.</summary>
+        Malformed,
+
+        /// <summary>Checksum mismatch, or too large to be a metadata packet.</summary>
+        Damaged,
+    }
 
     public static Par3FileReadResult ReadFile(string path, CancellationToken cancellationToken = default)
     {
@@ -307,22 +337,30 @@ public static class Par3PacketReader
         while (pos + Par3PacketTypes.HeaderSize <= fileLen)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            ReadExactly(handle, pos, header);
+            FileHandleCache.ReadPadded(handle, pos, header);
             if (header[..8].SequenceEqual(Par3PacketTypes.Magic))
             {
                 ulong length = BinaryPrimitives.ReadUInt64LittleEndian(header[24..]);
-                if (length >= Par3PacketTypes.HeaderSize && (long)length <= fileLen - pos)
+                Par3Packet? packet = null;
+                // Compared as unsigned: a damaged length of 2^63 or more must not turn negative.
+                var outcome = length >= Par3PacketTypes.HeaderSize && length <= (ulong)(fileLen - pos)
+                    ? TryRead(handle, path, pos, (long)length, header, out packet)
+                    : ReadOutcome.Damaged;
+                if (packet != null)
                 {
-                    var packet = TryRead(handle, path, pos, (long)length, header);
-                    if (packet != null)
-                    {
-                        result.Packets.Add(packet);
-                        pos += (long)length;
-                        continue;
-                    }
+                    result.Packets.Add(packet);
                 }
 
-                result.DamagedPackets++;
+                if (outcome is ReadOutcome.Malformed or ReadOutcome.Damaged)
+                {
+                    result.DamagedPackets++;
+                }
+
+                if (outcome != ReadOutcome.Damaged)
+                {
+                    pos += (long)length;
+                    continue;
+                }
             }
 
             long next = FindMagic(handle, pos + 1, fileLen);
@@ -337,14 +375,15 @@ public static class Par3PacketReader
         return result;
     }
 
-    private static Par3Packet? TryRead(SafeFileHandle handle, string path, long pos, long length, ReadOnlySpan<byte> header)
+    private static ReadOutcome TryRead(SafeFileHandle handle, string path, long pos, long length, ReadOnlySpan<byte> header, out Par3Packet? packet)
     {
+        packet = null;
         ulong type = BinaryPrimitives.ReadUInt64LittleEndian(header[40..]);
         bool isBulk = type == Par3PacketTypes.Data || type == Par3PacketTypes.RecoveryData;
         long bodyLen = length - Par3PacketTypes.HeaderSize;
         if (!isBulk && bodyLen > MaxMetadataPacket)
         {
-            return null;
+            return ReadOutcome.Damaged;
         }
 
         var hasher = new Blake3Hasher();
@@ -352,25 +391,23 @@ public static class Par3PacketReader
         byte[] body;
         if (isBulk)
         {
+            // Only the fixed fields are kept; the data stays in the file and is only hashed here.
             int fixedLen = type == Par3PacketTypes.Data ? 8 : 40;
             if (bodyLen < fixedLen)
             {
-                return null;
+                return ReadOutcome.Damaged;
             }
 
             body = new byte[fixedLen];
             var buf = new byte[(int)Math.Min(bodyLen, 1 << 20)];
             long off = pos + Par3PacketTypes.HeaderSize;
-            long left = bodyLen;
-            bool first = true;
-            while (left > 0)
+            for (long left = bodyLen; left > 0;)
             {
                 int n = (int)Math.Min(left, buf.Length);
-                ReadExactly(handle, off, buf.AsSpan(0, n));
-                if (first)
+                FileHandleCache.ReadPadded(handle, off, buf.AsSpan(0, n));
+                if (off == pos + Par3PacketTypes.HeaderSize)
                 {
                     buf.AsSpan(0, fixedLen).CopyTo(body);
-                    first = false;
                 }
 
                 hasher.Update(buf.AsSpan(0, n));
@@ -381,36 +418,52 @@ public static class Par3PacketReader
         else
         {
             body = new byte[bodyLen];
-            ReadExactly(handle, pos + Par3PacketTypes.HeaderSize, body);
+            FileHandleCache.ReadPadded(handle, pos + Par3PacketTypes.HeaderSize, body);
             hasher.Update(body);
         }
 
-        Span<byte> actual = stackalloc byte[16];
-        hasher.Finalize(actual);
-        if (!actual.SequenceEqual(header.Slice(8, 16)))
+        if (!VerifyChecksum(hasher, header))
         {
-            return null;
+            return ReadOutcome.Damaged;
         }
 
         try
         {
-            var packet = Parse(type, body, pos + Par3PacketTypes.HeaderSize, bodyLen);
-            return packet == null ? null : packet with
+            var parsed = Parse(type, body, pos + Par3PacketTypes.HeaderSize, bodyLen, InputSetId.FromBytes(header[32..]));
+            if (parsed == null)
+            {
+                return ReadOutcome.Unknown;
+            }
+
+            packet = parsed with
             {
                 SetId = InputSetId.FromBytes(header[32..]),
                 Checksum = Fingerprint.FromBytes(header[8..]),
                 SourceFile = path,
                 SourceOffset = pos,
             };
+            return ReadOutcome.Packet;
         }
-        catch (Exception e) when (e is InvalidDataException or ArgumentOutOfRangeException or IndexOutOfRangeException)
+        catch (InvalidDataException)
         {
-            return null;
+            return ReadOutcome.Malformed;
         }
     }
 
-    /// <summary>Parse a body. <paramref name="bodyOffset"/>/<paramref name="bodyLength"/> locate bulk data in the file.</summary>
-    internal static Par3Packet? Parse(ulong type, byte[] body, long bodyOffset, long bodyLength)
+    private static bool VerifyChecksum(Blake3Hasher hasher, ReadOnlySpan<byte> header)
+    {
+        Span<byte> actual = stackalloc byte[16];
+        hasher.Finalize(actual);
+        return actual.SequenceEqual(header.Slice(8, 16));
+    }
+
+    /// <summary>
+    /// Parse a body. <paramref name="bodyOffset"/>/<paramref name="bodyLength"/> locate bulk data in the file;
+    /// <paramref name="setId"/> is the header's InputSetID (it tells the two Start packet layouts apart).
+    /// Returns null for an unknown packet type; throws <see cref="InvalidDataException"/> when the body does not fit
+    /// the layout of its (known) type.
+    /// </summary>
+    internal static Par3Packet? Parse(ulong type, byte[] body, long bodyOffset, long bodyLength, InputSetId setId = default)
     {
         ReadOnlySpan<byte> s = body;
         switch (type)
@@ -421,36 +474,28 @@ public static class Par3PacketReader
                 return new Par3CommentPacket(Encoding.UTF8.GetString(s));
             case Par3PacketTypes.Start:
             {
-                // Current layout (par3cmdline): parent (8) + parent root (16) + block size (8) + gf size (1) + generator.
-                if (s.Length >= 33 && s.Length == 33 + s[32])
-                {
-                    return new Par3StartPacket(0, new InputSetId(U64(s, 0)), Fingerprint.FromBytes(s[8..]), U64(s, 24), s.Slice(33, s[32]).ToArray());
-                }
-
-                // Older draft layout with the unique number first.
-                Need(s, 41);
-                int gf = s[40];
-                if (s.Length != 41 + gf)
-                {
-                    return null;
-                }
-
-                return new Par3StartPacket(U64(s, 0), new InputSetId(U64(s, 8)), Fingerprint.FromBytes(s[16..]), U64(s, 32), s.Slice(41, gf).ToArray());
+                // Two layouts exist, recognised by where the field size byte sits:
+                //   par3cmdline:   parent (8) + parent root (16) + block size (8) + gf size (1 @ 32) + generator
+                //   specification: unique number (8) + the same fields, so gf size @ 40
+                // A body can fit both, e.g. a specification body with GF(2^16) (43 bytes) whose block size ends in
+                // byte 10 (266, 522, ...). Then the InputSetID decides: in the specification layout it is the first
+                // 8 bytes of BLAKE3(body); par3cmdline hashes the unique number with the body, so it never matches.
+                bool cmdline = s.Length >= 33 && s.Length == 33 + s[32];
+                bool spec = s.Length >= 41 && s.Length == 41 + s[40];
+                Expect(cmdline || spec, "Start packet length does not match its Galois field size.");
+                var start = spec && (!cmdline || InputSetId.FromBytes(Blake3.Hash(s)) == setId)
+                    ? new Par3StartPacket(U64(s, 0), new InputSetId(U64(s, 8)), Fingerprint.FromBytes(s[16..]), U64(s, 32), s.Slice(41, s[40]).ToArray())
+                    : new Par3StartPacket(0, new InputSetId(U64(s, 0)), Fingerprint.FromBytes(s[8..]), U64(s, 24), s.Slice(33, s[32]).ToArray());
+                Expect(start.BlockSize > 0, "Block size 0.");
+                return start;
             }
 
             case Par3PacketTypes.Data:
                 return new Par3DataPacket(U64(s, 0), bodyOffset + 8, bodyLength - 8);
             case Par3PacketTypes.ExternalData:
-            {
                 Need(s, 8);
-                if ((s.Length - 8) % 24 != 0)
-                {
-                    return null;
-                }
-
+                Expect((s.Length - 8) % 24 == 0, "External Data packet length is not 8 + 24·n.");
                 return new Par3ExternalDataPacket(U64(s, 0), ReadChecksums(s[8..]));
-            }
-
             case Par3PacketTypes.CauchyMatrix:
                 Need(s, 24);
                 return new Par3CauchyMatrixPacket(U64(s, 0), U64(s, 8), U64(s, 16));
@@ -461,6 +506,7 @@ public static class Par3PacketReader
                 return new Par3ExplicitMatrixPacket(body);
             case Par3PacketTypes.FftMatrix:
             {
+                // Interleave: 0 to 4 bytes after the fixed 17 (par3cmdline writes as few as possible).
                 Need(s, 17);
                 uint inter = 0;
                 for (int i = 17; i < s.Length && i < 21; i++)
@@ -474,16 +520,9 @@ public static class Par3PacketReader
             case Par3PacketTypes.RecoveryData:
                 return new Par3RecoveryDataPacket(Fingerprint.FromBytes(s), Fingerprint.FromBytes(s[16..]), U64(s, 32), bodyOffset + 40, bodyLength - 40);
             case Par3PacketTypes.RecoveryExternalData:
-            {
                 Need(s, 40);
-                if ((s.Length - 40) % 24 != 0)
-                {
-                    return null;
-                }
-
+                Expect((s.Length - 40) % 24 == 0, "Recovery External Data packet length is not 40 + 24·n.");
                 return new Par3RecoveryExternalDataPacket(Fingerprint.FromBytes(s), Fingerprint.FromBytes(s[16..]), U64(s, 32), ReadChecksums(s[40..]));
-            }
-
             case Par3PacketTypes.File:
             {
                 Need(s, 2);
@@ -507,44 +546,33 @@ public static class Par3PacketReader
                 int nameLen = BinaryPrimitives.ReadUInt16LittleEndian(s);
                 Need(s, 2 + nameLen + 4);
                 string name = Encoding.UTF8.GetString(s.Slice(2, nameLen));
-                int p = 2 + nameLen;
-                int optCount = (int)BinaryPrimitives.ReadUInt32LittleEndian(s[p..]);
-                p += 4;
-                Need(s, p + 16 * optCount);
-                if ((s.Length - p - 16 * optCount) % 16 != 0)
-                {
-                    return null;
-                }
-
-                return new Par3DirectoryPacket(name, ReadFingerprints(s.Slice(p, 16 * optCount)), ReadFingerprints(s[(p + 16 * optCount)..]));
+                int p = 2 + nameLen + 4;
+                int optBytes = CheckedLength(s, p, BinaryPrimitives.ReadUInt32LittleEndian(s[(p - 4)..]), 16);
+                Expect((s.Length - p - optBytes) % 16 == 0, "Directory packet children are not 16-byte checksums.");
+                return new Par3DirectoryPacket(name, ReadFingerprints(s.Slice(p, optBytes)), ReadFingerprints(s[(p + optBytes)..]));
             }
 
             case Par3PacketTypes.Root:
             {
                 Need(s, 13);
-                int optCount = (int)BinaryPrimitives.ReadUInt32LittleEndian(s[9..]);
-                Need(s, 13 + 16 * optCount);
-                if ((s.Length - 13 - 16 * optCount) % 16 != 0)
-                {
-                    return null;
-                }
-
-                return new Par3RootPacket(U64(s, 0), s[8], ReadFingerprints(s.Slice(13, 16 * optCount)), ReadFingerprints(s[(13 + 16 * optCount)..]));
+                int optBytes = CheckedLength(s, 13, BinaryPrimitives.ReadUInt32LittleEndian(s[9..]), 16);
+                Expect((s.Length - 13 - optBytes) % 16 == 0, "Root packet children are not 16-byte checksums.");
+                return new Par3RootPacket(U64(s, 0), s[8], ReadFingerprints(s.Slice(13, optBytes)), ReadFingerprints(s[(13 + optBytes)..]));
             }
 
             case Par3PacketTypes.Link:
             {
+                // attributes (1) + name length (2) + name + path length (4) + NUL-separated path + option count (1) + options.
                 Need(s, 3);
                 bool symbolic = (s[0] & 1) != 0;
                 int nameLen = BinaryPrimitives.ReadUInt16LittleEndian(s[1..]);
                 Need(s, 3 + nameLen + 4);
                 string name = Encoding.UTF8.GetString(s.Slice(3, nameLen));
-                int p = 3 + nameLen;
-                int pathLen = (int)BinaryPrimitives.ReadUInt32LittleEndian(s[p..]);
-                p += 4;
-                Need(s, p + pathLen + 1);
+                int p = 3 + nameLen + 4;
+                int pathLen = CheckedLength(s, p, BinaryPrimitives.ReadUInt32LittleEndian(s[(p - 4)..]), 1);
                 var pathStr = Encoding.UTF8.GetString(s.Slice(p, pathLen));
                 p += pathLen;
+                Need(s, p + 1);
                 bool absolute = pathStr.StartsWith('\0');
                 var parts = (absolute ? pathStr[1..] : pathStr).Split('\0');
                 int optCount = s[p];
@@ -568,6 +596,8 @@ public static class Par3PacketReader
                 Need(s, p + gl);
                 string group = Encoding.UTF8.GetString(s.Slice(p, gl));
                 p += gl;
+
+                // xattrs: {name length (2), name, value length (2), value} until the end of the body.
                 var xattrs = new List<(string, string)>();
                 while (p < s.Length)
                 {
@@ -595,12 +625,24 @@ public static class Par3PacketReader
         }
     }
 
-    private static void Need(ReadOnlySpan<byte> s, int n)
+    private static void Need(ReadOnlySpan<byte> s, int n) => Expect(s.Length >= n, "Packet body too short.");
+
+    private static void Expect(bool condition, string message)
     {
-        if (s.Length < n)
+        if (!condition)
         {
-            throw new InvalidDataException("Packet body too short.");
+            throw new InvalidDataException(message);
         }
+    }
+
+    /// <summary>
+    /// Bytes taken by <paramref name="count"/> items of <paramref name="itemSize"/> bytes at <paramref name="offset"/>,
+    /// checked against the body length without overflowing (a 4-byte count of 2^28 checksums must not wrap to 0).
+    /// </summary>
+    private static int CheckedLength(ReadOnlySpan<byte> s, int offset, uint count, int itemSize)
+    {
+        Expect(count <= (ulong)(s.Length - offset) / (ulong)itemSize, "Packet body too short.");
+        return (int)count * itemSize;
     }
 
     private static ulong U64(ReadOnlySpan<byte> s, int offset) => BinaryPrimitives.ReadUInt64LittleEndian(s[offset..]);
@@ -627,48 +669,25 @@ public static class Par3PacketReader
         return list;
     }
 
+    /// <summary>
+    /// Offset of the next magic sequence at or after <paramref name="start"/>, or -1. The file is read in 1 MiB
+    /// windows that overlap by 7 bytes, so a magic sequence split across two windows is still found.
+    /// </summary>
     private static long FindMagic(SafeFileHandle handle, long start, long fileLen)
     {
-        var buf = new byte[(1 << 20) + 7];
-        long pos = start;
-        while (pos < fileLen)
+        var magic = Par3PacketTypes.Magic;
+        var buf = new byte[(1 << 20) + magic.Length - 1];
+        for (long pos = start; fileLen - pos >= magic.Length; pos += buf.Length - (magic.Length - 1))
         {
             int want = (int)Math.Min(buf.Length, fileLen - pos);
-            int got = RandomAccess.Read(handle, buf.AsSpan(0, want), pos);
-            if (got <= 0)
-            {
-                return -1;
-            }
-
-            int idx = buf.AsSpan(0, got).IndexOf(Par3PacketTypes.Magic);
+            FileHandleCache.ReadPadded(handle, pos, buf.AsSpan(0, want));
+            int idx = buf.AsSpan(0, want).IndexOf(magic);
             if (idx >= 0)
             {
                 return pos + idx;
             }
-
-            if (got < 8)
-            {
-                return -1;
-            }
-
-            pos += got - 7;
         }
 
         return -1;
-    }
-
-    private static void ReadExactly(SafeFileHandle handle, long offset, Span<byte> destination)
-    {
-        int total = 0;
-        while (total < destination.Length)
-        {
-            int n = RandomAccess.Read(handle, destination[total..], offset + total);
-            if (n <= 0)
-            {
-                throw new EndOfStreamException();
-            }
-
-            total += n;
-        }
     }
 }

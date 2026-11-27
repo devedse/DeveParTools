@@ -138,12 +138,11 @@ public sealed class Par3InputSet
             {
                 if (byChecksum.TryGetValue(o, out var op))
                 {
-                    if (op is Par3LinkPacket link)
+                    // Links are entries of the directory, not properties of it (see Walk).
+                    if (op is not Par3LinkPacket)
                     {
-                        continue;
+                        list.Add(op);
                     }
-
-                    list.Add(op);
                 }
                 else
                 {
@@ -180,11 +179,17 @@ public sealed class Par3InputSet
                 switch (child)
                 {
                     case Par3FilePacket f:
+                        if (!TryParseChunks(f, blockSize, out var chunks, out var problem))
+                        {
+                            warnings.Add($"File '{Join(prefix, f.Name)}' is skipped: {problem}");
+                            break;
+                        }
+
                         fileEntries.Add(new Par3FileEntry
                         {
                             RelativePath = Join(prefix, f.Name),
                             Packet = f,
-                            Chunks = Par3Chunk.ParseAll(f.ChunkBytes, blockSize),
+                            Chunks = chunks,
                             Options = ResolveOptions(f.Options),
                         });
                         break;
@@ -326,7 +331,53 @@ public sealed class Par3InputSet
 
     private static string Join(string prefix, string name) => prefix.Length == 0 ? name : prefix + "/" + name;
 
-    /// <summary>The .par3 files belonging to <paramref name="par3Path"/>: siblings with the same base name.</summary>
+    /// <summary>
+    /// Parses and checks the chunk descriptions of a File packet. Its checksum only proves that the packet was not
+    /// damaged, not that its creator wrote sensible values, so the descriptions must be complete, the file must fit in
+    /// a <see cref="long"/>, block indices must stay below 2^31 and every tail must lie inside its block (as the
+    /// specification requires).
+    /// </summary>
+    private static bool TryParseChunks(Par3FilePacket file, ulong blockSize, out List<Par3Chunk> chunks, out string problem)
+    {
+        try
+        {
+            chunks = Par3Chunk.ParseAll(file.ChunkBytes, blockSize);
+        }
+        catch (InvalidDataException e)
+        {
+            chunks = [];
+            problem = e.Message;
+            return false;
+        }
+
+        UInt128 total = 0;
+        problem = string.Empty;
+        foreach (var c in chunks)
+        {
+            total += c.Length;
+            ulong tail = c.TailLength(blockSize);
+            if (c.FullBlocks(blockSize) > 0 && (UInt128)c.FirstBlock + c.FullBlocks(blockSize) > int.MaxValue)
+            {
+                problem = "its blocks lie beyond input block 2^31.";
+            }
+            else if (tail >= Par3Chunk.InlineLimit && (c.TailBlock >= int.MaxValue || (UInt128)c.TailOffset + tail > blockSize))
+            {
+                problem = "a tail does not lie inside its input block.";
+            }
+        }
+
+        if (total > long.MaxValue)
+        {
+            problem = "it is longer than 2^63 bytes.";
+        }
+
+        return problem.Length == 0;
+    }
+
+    /// <summary>
+    /// The .par3 files belonging to <paramref name="par3Path"/>: the file itself first, then its siblings with the same
+    /// base name in name order. "set.par3", "set.vol03+04.par3" and "set.part00+01.par3" all have base name "set".
+    /// </summary>
     public static List<string> DiscoverFiles(string par3Path)
     {
         var full = Path.GetFullPath(par3Path);
@@ -345,7 +396,7 @@ public sealed class Par3InputSet
         var result = new List<string> { full };
         if (Directory.Exists(dir))
         {
-            foreach (var f in Directory.EnumerateFiles(dir))
+            foreach (var f in Directory.EnumerateFiles(dir).Order(StringComparer.Ordinal))
             {
                 var fn = Path.GetFileName(f);
                 if (fn.EndsWith(".par3", StringComparison.OrdinalIgnoreCase) && !string.Equals(f, full, StringComparison.Ordinal)

@@ -59,8 +59,11 @@ public sealed class Par3VerifyResult
 
     public bool AllFilesComplete => Files.All(f => f.Status == Par3FileStatus.Complete) && MissingDirectories.Count == 0;
 
-    /// <summary>Blocks that must be rebuilt for damaged files (blocks whose pieces are missing).</summary>
-    public bool RepairPossible => MissingBlocks <= RecoveryBlocksAvailable;
+    /// <summary>
+    /// Whether the missing blocks can be rebuilt from the available recovery blocks. For FFT sets this is checked
+    /// per cohort: a cohort only rebuilds its own blocks, so the total count is not enough.
+    /// </summary>
+    public bool RepairPossible => Par3Repairer.CanReconstruct(this);
 }
 
 /// <summary>Verifies the files of a PAR3 input set, locating every intact block and tail wherever it is.</summary>
@@ -108,10 +111,11 @@ public static class Par3Verifier
             files.Add(new Par3FileVerification { File = f, TargetPath = target, Status = Par3FileStatus.Missing });
         }
 
+        var targets = files.ToDictionary(f => f.File, f => f.TargetPath);
         for (int b = 0; b < blockCount; b++)
         {
             var owners = set.BlockPieces[b];
-            map.Ownership[b] = owners.Select(o => new BlockLocation(files.First(f => f.File == o.File).TargetPath, (long)o.FileOffset, (int)o.Length)).ToArray();
+            map.Ownership[b] = owners.Select(o => new BlockLocation(targets[o.File], (long)o.FileOffset, (int)o.Length)).ToArray();
             if (owners.Count(o => !o.IsTail) > 1)
             {
                 map.AddFlags(b, BlockFlags.Deduplicated);
@@ -178,7 +182,7 @@ public static class Par3Verifier
                             if (blocks[idx] == null)
                             {
                                 blocks[idx] = new BlockAvailability([(0, set.BlockSize, new PieceSource(path, hit.Offset))]);
-                                bool inOwnFile = set.BlockPieces[idx].Any(o => string.Equals(files.First(f => f.File == o.File).TargetPath, path, StringComparison.Ordinal));
+                                bool inOwnFile = set.BlockPieces[idx].Any(o => string.Equals(targets[o.File], path, StringComparison.Ordinal));
                                 map.Set(idx, inOwnFile ? BlockState.FoundMoved : BlockState.FoundElsewhere);
                                 map.FoundAt[idx] = new BlockLocation(path, hit.Offset, (int)set.BlockSize);
                             }
@@ -190,7 +194,8 @@ public static class Par3Verifier
             }
         }
 
-        // Blocks made of tails become available when all their tails are known.
+        // Blocks made of tails become available when all their tails are known: "found" when every tail is where its
+        // file has it, "found elsewhere" when at least one came from the search.
         for (int b = 0; b < blockCount; b++)
         {
             if (blocks[b] != null)
@@ -202,7 +207,8 @@ public static class Par3Verifier
             if (pieces.Count > 0 && pieces.All(p => p.IsTail && tails.ContainsKey((p.File, p.Chunk))))
             {
                 blocks[b] = new BlockAvailability(pieces.Select(p => (p.BlockOffset, p.Length, tails[(p.File, p.Chunk)])).ToList());
-                map.Set(b, BlockState.FoundElsewhere);
+                bool inPlace = pieces.All(p => tails[(p.File, p.Chunk)] == new PieceSource(targets[p.File], (long)p.FileOffset));
+                map.Set(b, inPlace ? BlockState.Found : BlockState.FoundElsewhere);
             }
         }
 
@@ -236,6 +242,7 @@ public static class Par3Verifier
         var hasher = new Blake3Hasher();
         var buf = new byte[(int)Math.Min(bs, 1 << 24)];
         bool allPieces = true;
+        var unverified = new List<(ulong Index, long Position)>();
         ulong offset = 0;
         foreach (var c in f.Chunks)
         {
@@ -260,7 +267,13 @@ public static class Par3Verifier
                 long pos = (long)(offset + b * bs);
                 bool ok = HashRange(fv.TargetPath, pos, (long)bs, handles, hasher, buf, out var crc, out var fp) && actualLen >= pos + (long)bs;
                 ulong idx = c.FirstBlock + b;
-                if (ok && set.BlockChecksums[idx] is { } expected && expected.Crc64 == crc && expected.Hash == fp)
+                if (ok && set.BlockChecksums[idx] == null)
+                {
+                    // No External Data checksum (the specification allows that for blocks stored in Data packets):
+                    // the block is only known to be good if the whole file hash matches.
+                    unverified.Add((idx, pos));
+                }
+                else if (ok && set.BlockChecksums[idx] is { } expected && expected.Crc64 == crc && expected.Hash == fp)
                 {
                     if (blocks[idx] == null)
                     {
@@ -308,7 +321,17 @@ public static class Par3Verifier
 
         var h = new byte[16];
         hasher.Finalize(h);
-        return allPieces && actualLen == (long)f.Length && Fingerprint.FromBytes(h) == f.Packet.FileHash;
+        bool complete = allPieces && actualLen == (long)f.Length && Fingerprint.FromBytes(h) == f.Packet.FileHash;
+        if (complete)
+        {
+            foreach (var (idx, pos) in unverified)
+            {
+                blocks[idx] ??= new BlockAvailability([(0, bs, new PieceSource(fv.TargetPath, pos))]);
+                map.Set((int)idx, BlockState.Found);
+            }
+        }
+
+        return complete;
     }
 
     private static bool HashRange(string path, long pos, long length, FileHandleCache handles, Blake3Hasher fileHasher, byte[] buf, out ulong crc, out Fingerprint fp)

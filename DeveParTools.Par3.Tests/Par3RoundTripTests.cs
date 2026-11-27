@@ -1,17 +1,11 @@
 using DeveParTools.Core.Operations;
-using DeveParTools.Par3;
+using DeveParTools.Par3.Tests.TestSupport;
 
 namespace DeveParTools.Par3.Tests;
 
 [TestClass]
 public sealed class Par3RoundTripTests
 {
-    private static string NewDir()
-    {
-        var d = Path.Combine(Path.GetTempPath(), "deveparttools-par3", Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(d);
-        return d;
-    }
 
     private static Dictionary<string, byte[]> MakeTree(string dir, int seed)
     {
@@ -38,7 +32,8 @@ public sealed class Par3RoundTripTests
     [DataRow(Par3Code.Fft, Par3Dedup.Blocks)]
     public void CreateVerifyRepair(Par3Code code, Par3Dedup dedup)
     {
-        var dir = NewDir();
+        using var temp = new TempDir();
+        var dir = temp.Path;
         var files = MakeTree(dir, 1);
         // Duplicate content to exercise dedup.
         File.WriteAllBytes(Path.Combine(dir, "dup.bin"), files[Path.Combine(dir, "a.bin")]);
@@ -88,7 +83,8 @@ public sealed class Par3RoundTripTests
     [TestMethod]
     public void StoreData_ArchiveModeRecoversEverything()
     {
-        var dir = NewDir();
+        using var temp = new TempDir();
+        var dir = temp.Path;
         var files = MakeTree(dir, 2);
         Par3Creator.Create(new Par3CreateOptions { Inputs = [dir], OutputPath = Path.Combine(dir, "arch.par3"), BlockSize = 2048, RecoveryBlockCount = 2, StoreData = true });
         foreach (var f in files.Keys)

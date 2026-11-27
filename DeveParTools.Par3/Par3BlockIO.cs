@@ -22,13 +22,11 @@ public sealed class Par3BlockSource : IRegionSource
 {
     private readonly IReadOnlyList<(ulong BlockOffset, ulong Length, PieceSource Source)>[] _blocks;
     private readonly FileHandleCache _handles;
-    private readonly Func<int, int>? _indexMap;
 
-    public Par3BlockSource(IReadOnlyList<(ulong BlockOffset, ulong Length, PieceSource Source)>[] blocks, FileHandleCache handles, Func<int, int>? indexMap = null)
+    public Par3BlockSource(IReadOnlyList<(ulong BlockOffset, ulong Length, PieceSource Source)>[] blocks, FileHandleCache handles)
     {
         _blocks = blocks;
         _handles = handles;
-        _indexMap = indexMap;
     }
 
     public IReadOnlyList<(ulong BlockOffset, ulong Length, PieceSource Source)>[] Blocks => _blocks;
@@ -38,23 +36,15 @@ public sealed class Par3BlockSource : IRegionSource
     /// <summary>Optional per-read hook (e.g. progress or state updates).</summary>
     public Action<int>? OnRead { get; init; }
 
+    /// <summary>
+    /// Reads bytes [offset, offset + length) of block <paramref name="index"/>; bytes that no piece covers (gaps
+    /// between packed tails, the padding at the end) are zero.
+    /// </summary>
     public void Read(int index, long offset, Span<byte> destination)
     {
-        int block = _indexMap?.Invoke(index) ?? index;
         destination.Clear();
-        if (block < 0)
-        {
-            return;
-        }
-
-        ReadBlock(block, offset, destination);
-        OnRead?.Invoke(block);
-    }
-
-    public void ReadBlock(int block, long offset, Span<byte> destination)
-    {
         long end = offset + destination.Length;
-        foreach (var (blockOffset, length, source) in _blocks[block])
+        foreach (var (blockOffset, length, source) in _blocks[index])
         {
             long ps = (long)blockOffset;
             long pe = ps + (long)length;
@@ -67,5 +57,7 @@ public sealed class Par3BlockSource : IRegionSource
 
             _handles.ReadPadded(source.Path, source.Offset + (s - ps), destination.Slice((int)(s - offset), (int)(e - s)));
         }
+
+        OnRead?.Invoke(index);
     }
 }

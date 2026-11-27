@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using DeveParTools.Core.Codes;
 using DeveParTools.Core.Codes.Fft;
+using DeveParTools.Par3.Packets;
 
 namespace DeveParTools.Par3;
 
@@ -10,12 +11,29 @@ namespace DeveParTools.Par3;
 /// position i / C) and recovery block r to cohort r mod C (local index r / C). Cohorts let a set exceed the
 /// 65536-symbol limit of GF(2^16) at the cost of a weaker guarantee (each cohort can only repair its own blocks).
 /// </summary>
+/// <remarks>
+/// <para>Example with 7 input blocks, 4 recovery blocks and 2 cohorts:</para>
+/// <code>
+/// cohort 0: inputs 0 2 4 6 (local 0..3), recovery 0 2 (local 0 1)
+/// cohort 1: inputs 1 3 5 + one zero block (local 0..3), recovery 1 3 (local 0 1)
+/// </code>
+/// <para>Losing inputs 2 and 4 is repairable (cohort 0 has 2 recovery blocks); losing 1, 3 and 5 is not, although
+/// 4 recovery blocks exist in total.</para>
+/// <para><b>Codes with m &gt; k.</b> Leopard is documented for recovery count ≤ original count (and our port checks
+/// it), but par3cmdline also writes FFT codes with more recovery than input blocks per cohort, e.g. 20 recovery
+/// blocks for 10 input blocks (m = 32). Such a code is the same as one with zero originals appended: Leopard encodes
+/// the originals in groups of m and a group of zeros adds nothing, and NextPow2(m + k) is 2m either way. So every
+/// cohort is coded with <see cref="Layout.LeopardOriginals"/> = max(k, m) originals, the extra ones zero.</para>
+/// </remarks>
 public static unsafe class Par3Fft
 {
     public sealed record Layout(int Cohorts, int OriginalsPerCohort, int RecoveryPerCohort, LeopardField? Field)
     {
         /// <summary>m: recovery blocks computed per cohort (a power of two).</summary>
         public int M => LeopardCodec.NextPow2(RecoveryPerCohort);
+
+        /// <summary>Originals passed to Leopard per cohort: the cohort's input blocks, padded with zero blocks to at least m.</summary>
+        public int LeopardOriginals => Math.Max(OriginalsPerCohort, M);
     }
 
     /// <summary>
@@ -36,6 +54,77 @@ public static unsafe class Par3Fft
         var field = n <= 256 ? LeopardField.FF8 : LeopardField.FF16;
         return new Layout(cohorts, k2, r2, field);
     }
+
+    /// <summary>
+    /// The layout a "PAR FFT" matrix packet describes: XOR when the Start packet's field size is 0, otherwise
+    /// interleave + 1 cohorts of Leopard codes over GF(2^8) (field size 1) or GF(2^16) (field size 2), each with
+    /// m = 2^MaxRecoveryLog2 recovery blocks. Null when Leopard cannot handle the parameters (other field sizes,
+    /// m &gt; 32768, absurd interleave values).
+    /// </summary>
+    public static Layout? FromPacket(Par3FftMatrixPacket packet, int gfSize, ulong blockCount)
+    {
+        if (gfSize == 0)
+        {
+            return new Layout(1, (int)blockCount, 1, null);
+        }
+
+        if (gfSize > 2 || packet.MaxRecoveryLog2 > 15 || packet.Interleave >= int.MaxValue)
+        {
+            return null;
+        }
+
+        int cohorts = (int)packet.Interleave + 1;
+        return new Layout(cohorts, (int)((blockCount + (ulong)cohorts - 1) / (ulong)cohorts), 1 << packet.MaxRecoveryLog2, gfSize == 1 ? LeopardField.FF8 : LeopardField.FF16);
+    }
+
+    /// <summary>
+    /// Whether <see cref="Decode"/> can rebuild every missing block: each cohort needs at least as many usable recovery
+    /// blocks (local index below m) as it has missing input blocks. The XOR code repairs at most one block, with
+    /// recovery block 0.
+    /// </summary>
+    /// <example>
+    /// Two cohorts, input blocks 1 and 3 missing (both odd, so both in cohort 1), recovery blocks 0 and 2 available
+    /// (both even, cohort 0): two recovery blocks for two missing blocks, but cohort 1 has none, so repair fails.
+    /// </example>
+    public static bool CanDecode(Layout layout, ulong blockCount, bool[] available, IEnumerable<ulong> recoveryIndices)
+    {
+        var indices = recoveryIndices.ToHashSet();
+        if (layout.Field == null)
+        {
+            int missing = available.Count(a => !a);
+            return missing == 0 || (missing == 1 && indices.Contains(0));
+        }
+
+        for (int cohort = 0; cohort < layout.Cohorts; cohort++)
+        {
+            if (MissingInCohort(layout, blockCount, available, cohort).Count > UsableInCohort(layout, indices, cohort).Count)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Local positions (input i is local i / C) of the missing input blocks of a cohort.</summary>
+    private static List<int> MissingInCohort(Layout layout, ulong blockCount, bool[] available, int cohort)
+    {
+        var missing = new List<int>();
+        for (int j = 0; j < layout.OriginalsPerCohort; j++)
+        {
+            ulong block = (ulong)j * (ulong)layout.Cohorts + (ulong)cohort;
+            if (block < blockCount && !available[block])
+            {
+                missing.Add(j);
+            }
+        }
+
+        return missing;
+    }
+
+    /// <summary>Global recovery indices of a cohort that its code can use (local index r / C below m).</summary>
+    private static List<ulong> UsableInCohort(Layout layout, IEnumerable<ulong> recoveryIndices, int cohort)
+        => recoveryIndices.Where(r => (int)(r % (ulong)layout.Cohorts) == cohort && r / (ulong)layout.Cohorts < (ulong)layout.M).ToList();
 
     /// <summary>Smallest number of cohorts for which every cohort fits in GF(2^16) and has m ≤ k.</summary>
     public static int ChooseCohorts(ulong blockCount, int recoveryCount)
@@ -75,7 +164,7 @@ public static unsafe class Par3Fft
             position[recoveryIndices[i]] = i;
         }
 
-        int k2 = layout.OriginalsPerCohort;
+        int k2 = layout.LeopardOriginals;
         int m = layout.M;
         int workCount = LeopardCodec.EncodeWorkCount(k2, m);
         long slice = Math.Max(64, options.MemoryBudget / Math.Max(1, k2 + workCount)) / 64 * 64;
@@ -144,36 +233,21 @@ public static unsafe class Par3Fft
             return;
         }
 
-        int k2 = layout.OriginalsPerCohort;
+        int k2 = layout.LeopardOriginals;
         int m = layout.M;
         int workCount = LeopardCodec.DecodeWorkCount(k2, m);
         long slice = Math.Max(64, options.MemoryBudget / Math.Max(1, k2 + m + workCount)) / 64 * 64;
         slice = Math.Min(slice, (blockSize + 63) / 64 * 64);
         for (int cohort = 0; cohort < c; cohort++)
         {
-            var missingLocal = new List<int>();
-            for (int j = 0; j < k2; j++)
-            {
-                ulong block = (ulong)j * (ulong)c + (ulong)cohort;
-                if (block < blockCount && !available[block])
-                {
-                    missingLocal.Add(j);
-                }
-            }
-
+            var missingLocal = MissingInCohort(layout, blockCount, available, cohort);
             if (missingLocal.Count == 0)
             {
                 continue;
             }
 
-            var recLocal = new Dictionary<int, int>();
-            foreach (var (global, reader) in recovery)
-            {
-                if ((int)(global % (ulong)c) == cohort && global / (ulong)c < (ulong)m)
-                {
-                    recLocal[(int)(global / (ulong)c)] = reader;
-                }
-            }
+            // Local recovery index → reader index.
+            var recLocal = UsableInCohort(layout, recovery.Keys, cohort).ToDictionary(g => (int)(g / (ulong)c), g => recovery[g]);
 
             if (recLocal.Count < missingLocal.Count)
             {
