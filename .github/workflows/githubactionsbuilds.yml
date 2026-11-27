@@ -109,7 +109,8 @@ jobs:
           os: ubuntu-latest
           sde: skx
         - name: sde-sandybridge
-          os: ubuntu-latest
+          # Newer Ubuntu images ship a glibc built for x86-64-v3 (AVX2), which cannot start on an emulated pre-AVX2 CPU.
+          os: ubuntu-24.04
           sde: snb
     runs-on: ${{ matrix.os }}
     permissions:
