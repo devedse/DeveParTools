@@ -382,7 +382,7 @@ public static class Par1Set
             map.RecoveryContainer[i] = Path.GetFileName(volumes[i].Path);
         }
 
-        var candidates = Directory.EnumerateFiles(dir).Concat(extraFiles?.Select(Path.GetFullPath) ?? []).Distinct(StringComparer.Ordinal).ToList();
+        var candidates = Directory.EnumerateFiles(dir).Concat((extraFiles ?? []).Select(Path.GetFullPath)).Distinct(StringComparer.Ordinal).ToList();
         var results = new List<Par1FileVerification>();
         for (int i = 0; i < index.Files.Count; i++)
         {
