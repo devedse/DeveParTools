@@ -55,6 +55,22 @@ public sealed class MetadataValueTests
         Assert.IsNull(Par3Metadata.FatAttributes(0xFFFF), "par3cmdline: attributes not stored");
         Assert.IsNull(Par3Metadata.FatAttributes(0x10), "the directory bit is not an attribute to set");
     }
+
+    /// <summary>Runs on every OS (unlike <see cref="MetadataTests"/>): FAT attributes only apply on Windows.</summary>
+    [TestMethod]
+    public void FatAttributes_AreSetOnWindows_AndIgnoredElsewhere()
+    {
+        using var dir = new TempDir();
+        var f = dir.Write("fat", [1]);
+        var observer = new RecordingObserver();
+        var unset = Par3FatPermissionsPacket.UnsetTime;
+
+        // 0x21 = read-only + archive; no times stored.
+        Par3Metadata.ApplyTo(f, [new Par3FatPermissionsPacket(unset, unset, unset, 0x21) { SetId = new InputSetId(2) }], isDirectory: false, observer);
+        Assert.AreEqual(OperatingSystem.IsWindows(), File.GetAttributes(f).HasFlag(FileAttributes.ReadOnly));
+        Assert.AreEqual(0, observer.Logs.Count);
+        File.SetAttributes(f, FileAttributes.Normal);
+    }
 }
 
 /// <summary>Restoring UNIX permissions, timestamps and symbolic links (not on Windows: modes and symlinks need UNIX).</summary>
@@ -138,20 +154,6 @@ public sealed class MetadataTests
         // Errors are warnings, not exceptions.
         Par3Metadata.ApplyTo(dir["missing"], [Unix(set, 0x180, Past)], isDirectory: false, observer);
         StringAssert.StartsWith(observer.Warnings.Single(), "Could not apply metadata to");
-    }
-
-    [TestMethod]
-    public void FatAttributes_AreSetOnWindows_AndIgnoredElsewhere()
-    {
-        using var dir = new TempDir();
-        var f = dir.Write("fat", [1]);
-        var observer = new RecordingObserver();
-
-        // 0x21 = read-only + archive.
-        Par3Metadata.ApplyTo(f, [Par3Fat(new InputSetId(2), null) with { Attributes = 0x21 }], isDirectory: false, observer);
-        Assert.AreEqual(OperatingSystem.IsWindows(), File.GetAttributes(f).HasFlag(FileAttributes.ReadOnly));
-        Assert.AreEqual(0, observer.Logs.Count);
-        File.SetAttributes(f, FileAttributes.Normal);
     }
 
     private static Par3UnixPermissionsPacket Unix(InputSetId set, ushort mode, DateTime? mtime)

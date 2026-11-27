@@ -79,6 +79,7 @@ public sealed class CrcTests
     {
         var data = RandomBytes(window + 3000, 3);
         var roll = new RollingCrc64(window);
+        Assert.AreEqual(window, roll.Window);
         ulong crc = Crc64Iso.Compute(data.AsSpan(0, window));
         for (int i = 0; i + window < data.Length; i++)
         {
@@ -94,6 +95,7 @@ public sealed class CrcTests
     {
         var data = RandomBytes(window + 3000, 4);
         var roll = new RollingCrc32(window);
+        Assert.AreEqual(window, roll.Window);
         uint crc = Crc32Ieee.Compute(data.AsSpan(0, window));
         for (int i = 0; i + window < data.Length; i++)
         {
