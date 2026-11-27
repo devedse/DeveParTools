@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using DeveParTools.Core.Galois;
 
@@ -249,13 +250,21 @@ public static unsafe class LeopardCodec
         return err;
     }
 
-    /// <summary>How many parts <see cref="RunParallel"/> splits <paramref name="bytes"/> into, and how long each is.</summary>
+    /// <summary>Bytes of every buffer one part works on: a column of the transform (256 buffers) fits a core's L2 cache.</summary>
+    private const long PartBytes = 1024;
+
+    /// <summary>
+    /// How many parts <see cref="RunParallel"/> splits <paramref name="bytes"/> into, and how long each is: parts of
+    /// a multiple of <see cref="PartBytes"/> (smaller ones, a multiple of 64 bytes, only to give every thread one).
+    /// A slice of 317,888 bytes cut into parts of 1,088 bytes made a decode pass twice as slow as parts of 1,024: the
+    /// parts did not line up with the 4 KiB pages and cache sets their buffers sit in.
+    /// </summary>
     private static (int Count, long Per) Ranges(long bytes, int threads)
     {
-        // Independent ranges: a multiple of 64 bytes (and of the symbol size).
-        long chunks = Math.Max(1, Math.Min(Math.Max(1, threads), bytes / 4096));
+        long chunks = Math.Max(1, Math.Max(bytes / PartBytes, Math.Min(Math.Max(1, threads), bytes / 256)));
         long per = (bytes + chunks - 1) / chunks;
-        per = (per + 63) / 64 * 64;
+        long align = per >= PartBytes ? PartBytes : 64;
+        per = (per + align - 1) / align * align;
         return ((int)((bytes + per - 1) / per), per);
     }
 
@@ -341,17 +350,24 @@ public static unsafe class LeopardCodec
 
     private static void IfftDitEncoder(RegionOps ops, nint[] data, int dataIndex, int mTruncated, nint[] work, int workIndex, bool xorInto, int m, int skew)
     {
-        for (int i = 0; i < mTruncated; i++)
+        // The originals are copied in (the rest is zero) block by block, just before the IFFT's first layers use them.
+        void Prepare(int start, int count)
         {
-            ops.Copy(work[workIndex + i], data[dataIndex + i]);
+            for (int i = start; i < start + count; i++)
+            {
+                int local = i - workIndex;
+                if (local < mTruncated)
+                {
+                    ops.Copy(work[i], data[dataIndex + local]);
+                }
+                else
+                {
+                    ops.Zero(work[i]);
+                }
+            }
         }
 
-        for (int i = mTruncated; i < m; i++)
-        {
-            ops.Zero(work[workIndex + i]);
-        }
-
-        IfftDitCore(ops, work, workIndex, mTruncated, m, skew);
+        IfftDitCore(ops, work, workIndex, mTruncated, m, skew, Prepare);
         if (xorInto)
         {
             for (int i = 0; i < m; i++)
@@ -361,7 +377,7 @@ public static unsafe class LeopardCodec
         }
     }
 
-    /// <summary>Decimation-in-time IFFT, two layers at a time (4-way butterflies).</summary>
+    /// <summary>Decimation-in-time IFFT, two layers at a time (4-way butterflies), in cache-sized blocks (see <see cref="Transform"/>).</summary>
     /// <remarks>
     /// <para><b>The "multiply by 0" shortcut.</b> A butterfly whose twiddle logarithm equals
     /// <see cref="LeopardField.Modulus"/> multiplies by zero, so it reduces to a plain XOR. <c>FftSkew[j]</c> is Modulus
@@ -378,39 +394,8 @@ public static unsafe class LeopardCodec
     /// <para>So logM01 and logM02 need the shortcut, logM23 never does. Example with dist = 1 in the decoder:
     /// logM01 = FftSkew[0], logM02 = FftSkew[1] (both Modulus at r = 0), logM23 = FftSkew[2] (not Modulus).</para>
     /// </remarks>
-    private static void IfftDitCore(RegionOps ops, nint[] work, int baseIndex, int mTruncated, int m, int skew)
-    {
-        var f = ops.Field;
-        byte* t01 = stackalloc byte[MaxTable];
-        byte* t23 = stackalloc byte[MaxTable];
-        byte* t02 = stackalloc byte[MaxTable];
-        int dist = 1, dist4 = 4;
-        for (; dist4 <= m; dist = dist4, dist4 <<= 2)
-        {
-            for (int r = 0; r < mTruncated; r += dist4)
-            {
-                // The twiddles are the same for the whole group: their tables are built once.
-                int iEnd = r + dist;
-                byte* p01 = ops.Table(f.FftSkew[skew + iEnd], t01);
-                byte* p02 = ops.Table(f.FftSkew[skew + iEnd + dist], t02);
-                byte* p23 = ops.Table(f.FftSkew[skew + iEnd + dist * 2], t23);
-                Debug.Assert(p23 != null, "logM23 can never be Modulus");
-                for (int i = r; i < iEnd; i++)
-                {
-                    IfftDit4(ops, work, baseIndex + i, dist, p01, p23, p02);
-                }
-            }
-        }
-
-        if (dist < m)
-        {
-            byte* p = ops.Table(f.FftSkew[skew + dist], t01);
-            for (int i = 0; i < dist; i++)
-            {
-                ops.IfftButterfly(work[baseIndex + i], work[baseIndex + i + dist], p);
-            }
-        }
-    }
+    private static void IfftDitCore(RegionOps ops, nint[] work, int baseIndex, int mTruncated, int m, int skew, Action<int, int>? prepare = null)
+        => Transform(ops, work, baseIndex, mTruncated, m, skew, inverse: true, prepare);
 
     /// <summary>
     /// Four IFFT butterflies on four buffers (two layers), a piece of <see cref="ButterflyChunk"/> bytes at a time so
@@ -432,34 +417,180 @@ public static unsafe class LeopardCodec
 
     /// <summary>Decimation-in-time FFT, two layers at a time; only the first <paramref name="mTruncated"/> outputs are needed.</summary>
     private static void FftDit(RegionOps ops, nint[] work, int baseIndex, int mTruncated, int m, int skew)
+        => Transform(ops, work, baseIndex, mTruncated, m, skew, inverse: false);
+
+    /// <summary>One layer of a transform: 4-way butterflies (two layers in one) or, at the end, 2-way ones.</summary>
+    private readonly record struct Layer(int Dist, int Span, bool Radix2);
+
+    /// <summary>The layers of the IFFT (distances 1, 4, 16, …) or the FFT (…, 16, 4, 1), in the order they run.</summary>
+    private static List<Layer> Layers(int m, bool inverse)
     {
-        var f = ops.Field;
-        byte* t01 = stackalloc byte[MaxTable];
-        byte* t23 = stackalloc byte[MaxTable];
-        byte* t02 = stackalloc byte[MaxTable];
-        int dist4 = m, dist = m >> 2;
-        for (; dist != 0; dist4 = dist, dist >>= 2)
+        var layers = new List<Layer>();
+        if (inverse)
         {
-            for (int r = 0; r < mTruncated; r += dist4)
+            int dist = 1, dist4 = 4;
+            for (; dist4 <= m; dist = dist4, dist4 <<= 2)
             {
-                int iEnd = r + dist;
-                byte* p01 = ops.Table(f.FftSkew[skew + iEnd], t01);
-                byte* p02 = ops.Table(f.FftSkew[skew + iEnd + dist], t02);
-                byte* p23 = ops.Table(f.FftSkew[skew + iEnd + dist * 2], t23);
-                Debug.Assert(p23 != null, "logM23 can never be Modulus");
-                for (int i = r; i < iEnd; i++)
-                {
-                    FftDit4(ops, work, baseIndex + i, dist, p01, p23, p02);
-                }
+                layers.Add(new(dist, dist4, false));
+            }
+
+            if (dist < m)
+            {
+                layers.Add(new(dist, 2 * dist, true));
+            }
+        }
+        else
+        {
+            int dist4 = m, dist = m >> 2;
+            for (; dist != 0; dist4 = dist, dist >>= 2)
+            {
+                layers.Add(new(dist, dist4, false));
+            }
+
+            if (dist4 == 2)
+            {
+                layers.Add(new(1, 2, true));
             }
         }
 
-        if (dist4 == 2)
+        return layers;
+    }
+
+    /// <summary>Buffers a block of layers works on at once (a column, see <see cref="Transform"/>): 256 × 1 KiB, half a Zen 3 L2.</summary>
+    private const int ColumnLimit = 256;
+
+    /// <summary>
+    /// The IFFT (<paramref name="inverse"/>) or FFT of work[baseIndex .. baseIndex + m), only groups below
+    /// <paramref name="mTruncated"/> computed, in blocks of layers that keep their data in the CPU cache.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Why blocks.</b> Done layer after layer, every layer pair streams all m buffers through main memory: for
+    /// a set of 5,316 blocks (16,384 positions) that is 7 sweeps per transform, and the processor mostly waits for
+    /// memory (on 4 threads as slow as on 1). A layer with distance d only combines buffers that are d apart, so
+    /// consecutive layers with distances lo … hi only mix buffers in one <i>column</i>: the same position modulo lo,
+    /// within the same group of the largest span G. Doing all layers of such a block for one column at a time keeps
+    /// the column (G ÷ lo ≤ 256 buffers of 1 KiB, see <see cref="PartBytes"/>) in the core's L2 cache:</para>
+    /// <code>
+    /// IFFT, m = 16384:  layers 1 4 16 64 | 256 1024 4096     (two sweeps instead of seven)
+    /// block "256 1024 4096": G = 16384, lo = 256: column c = buffers c + 256·j, j = 0..63
+    /// </code>
+    /// <para>Measured on 16 cores, 5,316 blocks (n = 16,384), slices of 64 KiB: a decode pass took 760 ms layer by
+    /// layer, 360 ms in blocks of 256 buffers, 320 ms with the derivative and the multiply-in also done block by block
+    /// (see <see cref="FormalDerivative"/>).</para>
+    /// <para>The order of the butterflies within a column is the layer order, and different columns share nothing,
+    /// so the result is the same as layer by layer. Each group's twiddle tables are built once per block.</para>
+    /// </remarks>
+    /// <param name="prepare">Called with (first, count) for each group of consecutive buffers the first block of layers
+    /// is about to use, to fill them just before (IFFT only: its first block works on consecutive buffers).</param>
+    private static void Transform(RegionOps ops, nint[] work, int baseIndex, int mTruncated, int m, int skew, bool inverse, Action<int, int>? prepare = null)
+    {
+        var f = ops.Field;
+        var layers = Layers(m, inverse);
+        int stride = MaxTable;
+        for (int first = 0; first < layers.Count;)
         {
-            for (int r = 0; r < mTruncated; r += 2)
+            // The block: as many layers as keep a column within ColumnLimit buffers.
+            int last = first;
+            int lo = layers[first].Dist, span = layers[first].Span;
+            while (last + 1 < layers.Count)
             {
-                ops.FftButterfly(work[baseIndex + r], work[baseIndex + r + 1], ops.Table(f.FftSkew[skew + r + 1], t01));
+                var next = layers[last + 1];
+                if (Math.Max(span, next.Span) / Math.Min(lo, next.Dist) > ColumnLimit)
+                {
+                    break;
+                }
+
+                last++;
+                lo = Math.Min(lo, next.Dist);
+                span = Math.Max(span, next.Span);
             }
+
+            int groups = 0;
+            for (int l = first; l <= last; l++)
+            {
+                groups += span / layers[l].Span;
+            }
+
+            byte* tableData = (byte*)NativeMemory.Alloc((nuint)(groups * 3 * stride));
+            var tables = new nint[groups * 3];
+            try
+            {
+                for (int s = 0; s < m; s += span)
+                {
+                    if (first == 0 && prepare != null)
+                    {
+                        Debug.Assert(lo == 1, "the first block of an IFFT works on consecutive buffers");
+                        prepare(baseIndex + s, span);
+                    }
+
+                    // The twiddle tables of every group of the block in this super-group, built once.
+                    int g = 0;
+                    for (int l = first; l <= last; l++)
+                    {
+                        var layer = layers[l];
+                        for (int r = s; r < s + span; r += layer.Span, g++)
+                        {
+                            if (r >= mTruncated)
+                            {
+                                continue;
+                            }
+
+                            byte* t = tableData + (long)g * 3 * stride;
+                            tables[g * 3] = (nint)ops.Table(f.FftSkew[skew + r + layer.Dist], t);
+                            if (!layer.Radix2)
+                            {
+                                tables[g * 3 + 1] = (nint)ops.Table(f.FftSkew[skew + r + layer.Dist * 2], t + stride);
+                                tables[g * 3 + 2] = (nint)ops.Table(f.FftSkew[skew + r + layer.Dist * 3], t + 2 * stride);
+                                Debug.Assert(tables[g * 3 + 2] != 0, "logM23 can never be Modulus");
+                            }
+                        }
+                    }
+
+                    for (int c = 0; c < lo; c++)
+                    {
+                        g = 0;
+                        for (int l = first; l <= last; l++)
+                        {
+                            var layer = layers[l];
+                            for (int r = s; r < s + span; r += layer.Span, g++)
+                            {
+                                if (r >= mTruncated)
+                                {
+                                    continue;
+                                }
+
+                                byte* t01 = (byte*)tables[g * 3];
+                                for (int i = r + c; i < r + layer.Dist; i += lo)
+                                {
+                                    int at = baseIndex + i;
+                                    if (layer.Radix2 && inverse)
+                                    {
+                                        ops.IfftButterfly(work[at], work[at + layer.Dist], t01);
+                                    }
+                                    else if (layer.Radix2)
+                                    {
+                                        ops.FftButterfly(work[at], work[at + 1], t01);
+                                    }
+                                    else if (inverse)
+                                    {
+                                        IfftDit4(ops, work, at, layer.Dist, t01, (byte*)tables[g * 3 + 2], (byte*)tables[g * 3 + 1]);
+                                    }
+                                    else
+                                    {
+                                        FftDit4(ops, work, at, layer.Dist, t01, (byte*)tables[g * 3 + 2], (byte*)tables[g * 3 + 1]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                NativeMemory.Free(tableData);
+            }
+
+            first = last + 1;
         }
     }
 
@@ -485,54 +616,28 @@ public static unsafe class LeopardCodec
         int k = originals.Length;
         int rc = recovery.Length;
 
-        // Multiply received blocks by their error-locator values.
-        for (int i = 0; i < rc; i++)
+        // Multiply received blocks by their error-locator values (the rest is zero): done for each block of buffers
+        // just before the IFFT's first layers use it, so the buffers go through memory once less.
+        void Prepare(int start, int count)
         {
-            if (recovery[i] != 0)
+            for (int i = start; i < start + count; i++)
             {
-                ops.Mul(work[i], recovery[i], err[i]);
-            }
-            else
-            {
-                ops.Zero(work[i]);
-            }
-        }
-
-        for (int i = rc; i < m; i++)
-        {
-            ops.Zero(work[i]);
-        }
-
-        for (int i = 0; i < k; i++)
-        {
-            if (originals[i] != 0)
-            {
-                ops.Mul(work[m + i], originals[i], err[m + i]);
-            }
-            else
-            {
-                ops.Zero(work[m + i]);
+                nint source = i < rc ? recovery[i] : i >= m && i < m + k ? originals[i - m] : 0;
+                if (source != 0)
+                {
+                    ops.Mul(work[i], source, err[i]);
+                }
+                else
+                {
+                    ops.Zero(work[i]);
+                }
             }
         }
 
-        for (int i = m + k; i < n; i++)
-        {
-            ops.Zero(work[i]);
-        }
-
-        IfftDitCore(ops, work, 0, m + k, n, -1);
+        IfftDitCore(ops, work, 0, m + k, n, -1, Prepare);
         counter?.Step(9);
 
-        // Formal derivative: in the novel polynomial basis this is a fixed XOR pattern.
-        for (int i = 1; i < n; i++)
-        {
-            int width = ((i ^ (i - 1)) + 1) >> 1;
-            for (int j = 0; j < width; j++)
-            {
-                ops.Xor(work[i - width + j], work[i + j]);
-            }
-        }
-
+        FormalDerivative(ops, work, n);
         counter?.Step(1);
         FftDit(ops, work, 0, m + k, n, -1);
         counter?.Step(9);
@@ -547,6 +652,54 @@ public static unsafe class LeopardCodec
         }
 
         counter?.Step(1);
+    }
+
+    /// <summary>Consecutive buffers the formal derivative works through at once (they stay in the cache).</summary>
+    private const int DerivativeBlock = 256;
+
+    /// <summary>
+    /// The formal derivative in the novel polynomial basis, a fixed XOR pattern:
+    /// <c>out[t] = in[t] ⊕ in[t + 2^b]</c> for every bit b that is 0 in t.
+    /// </summary>
+    /// <remarks>
+    /// <para>Leopard writes it as a loop (for i = 1 … n−1, w = the lowest set bit of i: work[i − w .. i) ^= work[i .. i + w)),
+    /// which goes through all n buffers once per bit, log2 n times. Its XORs cancel down to the formula above
+    /// (checked against the loop for every n up to 16,384). Example, n = 8: out[0] = in[0] ⊕ in[1] ⊕ in[2] ⊕ in[4],
+    /// out[5] = in[5] ⊕ in[7], out[7] = in[7].</para>
+    /// <para>In ascending order every input read is still unchanged, so it can be done in place, and block by block
+    /// (<see cref="DerivativeBlock"/> buffers): first the bits inside the block, from the block itself, then the
+    /// higher bits, from the blocks above it.</para>
+    /// </remarks>
+    private static void FormalDerivative(RegionOps ops, nint[] work, int n)
+    {
+        int block = Math.Min(n, DerivativeBlock);
+        int blocks = n / block;
+        for (int start = 0; start < n; start += block)
+        {
+            for (int lo = 0; lo < block; lo++)
+            {
+                for (int bit = 1; bit < block; bit <<= 1)
+                {
+                    if ((lo & bit) == 0)
+                    {
+                        ops.Xor(work[start + lo], work[start + lo + bit]);
+                    }
+                }
+            }
+
+            int hi = start / block;
+            for (int bit = 1; bit < blocks; bit <<= 1)
+            {
+                if ((hi & bit) == 0)
+                {
+                    int source = start + bit * block;
+                    for (int lo = 0; lo < block; lo++)
+                    {
+                        ops.Xor(work[start + lo], work[source + lo]);
+                    }
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------ region helpers
