@@ -96,7 +96,7 @@ shell.Page = AppPage.Create;
 shell.Create.Add(Path.Combine(work, "photos"));
 shell.Create.Add(Path.Combine(work, "video.mp4"));
 shell.Create.Add(Path.Combine(work, "notes.txt"));
-shell.Create.FormatIndex = 1;
+shell.Create.FormatIndex = 0;
 shell.Create.Redundancy = 30;
 shell.Create.BlockCount = 3000;
 shell.Create.OutputPath = Path.Combine(work, "backup.par3");
@@ -158,7 +158,7 @@ var zipOriginal = File.ReadAllBytes(zipPath);
 shell.Page = AppPage.Create;
 shell.Create.ClearInputsCommand.Execute(null);
 shell.Create.Add(zipPath);
-shell.Create.FormatIndex = 1;
+shell.Create.FormatIndex = 0;
 Check(shell.Create.CanInsertIntoArchive, "PAR inside is offered for a single archive");
 shell.Create.InsideArchive = true;
 shell.Create.Redundancy = 5;
@@ -181,7 +181,7 @@ shell.Page = AppPage.Create;
 shell.Create.ClearInputsCommand.Execute(null);
 shell.Create.Add(Path.Combine(work, "video.mp4"));
 shell.Create.Add(Path.Combine(work, "notes.txt"));
-shell.Create.FormatIndex = 0;
+shell.Create.FormatIndex = 1;
 shell.Create.BlockCount = 200;
 shell.Create.RecoveryCount = 6;
 shell.Create.FirstRecoveryBlock = 10;
@@ -189,7 +189,7 @@ shell.Create.VolumeSizingIndex = 1;
 shell.Create.VolumeCount = 2;
 shell.Create.OutputPath = Path.Combine(work, "advanced.par2");
 Await(shell.Create.Planned);
-Check(shell.Create.RecoveryCount == 6 && shell.Create.RecoveryFiles.Count == 2 && shell.Create.RecoveryFiles[0].Name.StartsWith("advanced.vol10+", StringComparison.Ordinal),
+Check(shell.Create.RecoveryCount == 6 && shell.Create.RecoveryFiles.Count == 3 && shell.Create.RecoveryFiles[0].Blocks == "index" && shell.Create.RecoveryFiles[1].Name.StartsWith("advanced.vol10+", StringComparison.Ordinal),
     "an exact recovery count, first block and equal files are planned: " + string.Join(", ", shell.Create.RecoveryFiles.Select(f => f.Name)));
 Settle();
 foreach (var expander in window.GetVisualDescendants().OfType<Expander>().Where(e => e.Header as string == "Advanced options"))
@@ -198,9 +198,9 @@ foreach (var expander in window.GetVisualDescendants().OfType<Expander>().Where(
 }
 
 Save(window, output, "create-advanced");
-shell.Create.FormatIndex = 1;
-Save(window, output, "create-advanced-par3");
 shell.Create.FormatIndex = 0;
+Save(window, output, "create-advanced-par3");
+shell.Create.FormatIndex = 1;
 Await(shell.Create.CreateCommand.ExecuteAsync(null));
 var volumes = Directory.GetFiles(work, "advanced.vol*.par2").Select(Path.GetFileName).Order().ToList();
 Check(volumes.Count == 2 && volumes[0]!.StartsWith("advanced.vol10+", StringComparison.Ordinal), "6 recovery blocks from number 10 in 2 files: " + string.Join(", ", volumes));
@@ -237,10 +237,12 @@ shell.Create.RecoveryCount = 7;
 Check(shell.Create.RedundancyText == $"{700.0 / (double)shell.Create.BlockCount!:0.00}%", "an exact recovery count shows the real percentage: " + shell.Create.RedundancyText);
 shell.Create.BlockSlider = 5;
 Check(shell.Create.BlockCount is > 0 and <= 32, "the block slider (log scale) sets a target of 2^5 = 32 blocks: " + shell.Create.BlockCount);
-Check(shell.Create.RebuildText.Contains(" of 2", StringComparison.Ordinal) && shell.Create.EfficiencyText.EndsWith('%'), $"rebuild {shell.Create.RebuildText}, efficiency {shell.Create.EfficiencyText}");
+Await(shell.Create.Planned);
+Check(shell.Create.RebuildText.Contains(" of 2", StringComparison.Ordinal) && shell.Create.EfficiencyText.EndsWith('%') && shell.Create.ParFilesText.EndsWith("file(s)", StringComparison.Ordinal)
+    && shell.Create.RecoveryFiles[0].Blocks == "index", $"rebuild {shell.Create.RebuildText}, PAR files {shell.Create.ParFilesText}, efficiency {shell.Create.EfficiencyText}");
 shell.Create.FormatIndex = 2;
 Check(!shell.Create.HasBlockChoice && shell.Create.BlockCount == 2, "PAR1: one block per file, no block choice");
-shell.Create.FormatIndex = 0;
+shell.Create.FormatIndex = 1;
 
 shell.Page = AppPage.Benchmark;
 shell.Benchmark.TimePerItem = TimeSpan.FromMilliseconds(120);

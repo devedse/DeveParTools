@@ -107,11 +107,7 @@ public static class Par2Creator
         //    gets the same stored name and is used once; different files always get different names (relative
         //    paths below one base directory).
         observer.Stage("Preparing");
-        var inputs = options.InputFiles
-            .Select(p => Path.GetFullPath(p))
-            .Select(p => new InputFile { Path = p, Name = PathSafety.ToStoredName(baseDir, p), Length = new FileInfo(p).Length })
-            .DistinctBy(i => i.Name, StringComparer.Ordinal)
-            .ToList();
+        var inputs = LoadInputs(options, baseDir);
         if (inputs.Count == 0)
         {
             throw new ArgumentException("No input files.");
@@ -156,7 +152,7 @@ public static class Par2Creator
             throw new ArgumentException($"{totalSlices} input slices exceed the PAR2 maximum of {Par2Math.MaxInputSlices}; use a larger slice size.");
         }
 
-        int recoveryCount = totalSlices == 0 ? 0 : options.RecoverySliceCount ?? (int)Math.Ceiling(totalSlices * options.RedundancyPercent / 100.0);
+        int recoveryCount = RecoveryCountOf(totalSlices, options);
         if (recoveryCount < 0 || options.FirstExponent < 0 || (long)options.FirstExponent + recoveryCount > 65535)
         {
             throw new ArgumentException("Recovery slice exponents must lie in [0, 65535).");
@@ -319,8 +315,7 @@ public static class Par2Creator
         {
             using var fs = new FileStream(v.Path, FileMode.Open, FileAccess.Write);
             fs.Seek(0, SeekOrigin.End);
-            // More recovery slices in a file → more copies of the critical packets (log2, at least one).
-            int copies = 1 + (int)Math.Log2(Math.Max(1, v.Count));
+            int copies = CriticalCopies(v.Count);
             for (int c = 0; c < copies; c++)
             {
                 foreach (var p in critical)
@@ -342,6 +337,79 @@ public static class Par2Creator
             WrittenFiles = options.WriteIndexFile ? [outputPath, .. volumes.Select(v => v.Path)] : volumes.Select(v => v.Path).ToList(),
         };
     }
+
+    /// <summary>
+    /// The files <see cref="Create"/> writes and their exact sizes, computed without reading the inputs (the sizes do
+    /// not depend on the contents).
+    /// </summary>
+    /// <remarks>
+    /// <para>Every packet is a 64-byte header plus its body, padded to a multiple of 4. The critical packets are the
+    /// main packet (12 bytes + 16 per file), a file description per file (56 bytes + the name), a slice checksum packet
+    /// per non-empty file (16 bytes + 20 per slice: MD5 and CRC32) and the comment.</para>
+    /// <para>The index file holds the critical packets once plus the creator packet. A volume holds its recovery slices
+    /// (64 + 4 + slice size each), 1 + log2(slices) copies of the critical packets (<see cref="CriticalCopies"/>) and the
+    /// creator packet. Example: 1,000 slices of 4 KiB over 10 files cost 10 × 20,000 bytes of slice checksums, so every
+    /// copy of the critical packets is about 21 KB, and a volume with 64 slices carries 7 copies (147 KB) next to its
+    /// 266 KB of recovery data.</para>
+    /// </remarks>
+    public static IReadOnlyList<OutputFileSize> PlanFileSizes(Par2CreateOptions options)
+    {
+        var outputPath = Path.GetFullPath(options.OutputPath);
+        var baseDir = Path.GetFullPath(options.BaseDirectory ?? Path.GetDirectoryName(outputPath)!);
+        var inputs = LoadInputs(options, baseDir);
+        var nonEmpty = inputs.Where(i => i.Length > 0).ToList();
+        long sliceSize = options.SliceSize ?? ChooseSliceSize(inputs.Select(i => i.Length).ToList(), options.SliceCount);
+        long SlicesOf(InputFile f) => (f.Length + sliceSize - 1) / sliceSize;
+        int totalSlices = (int)nonEmpty.Sum(SlicesOf);
+        int recoveryCount = RecoveryCountOf(totalSlices, options);
+
+        long critical = Par2PacketWriter.Build(default, Par2PacketTypes.Main, Par2PacketWriter.MainBody(sliceSize, nonEmpty.Select(_ => default(Md5Hash)).ToList(), inputs.Where(i => i.Length == 0).Select(_ => default(Md5Hash)).ToList())).Length;
+        foreach (var f in inputs)
+        {
+            critical += Par2PacketWriter.FileDescription(default, default, default, default, f.Length, f.Name).Length;
+            if (f.Length > 0)
+            {
+                critical += Par2PacketTypes.HeaderSize + 16 + 20 * SlicesOf(f); // slice checksums: always a multiple of 4
+            }
+        }
+
+        if (!string.IsNullOrEmpty(options.Comment))
+        {
+            critical += Par2PacketWriter.AsciiComment(default, options.Comment).Length;
+        }
+
+        long creator = Par2PacketWriter.Creator(default, options.Creator).Length;
+        long sliceHeader = Par2PacketWriter.RecoverySliceHeader(default, 0, sliceSize).Length;
+        var sizes = new List<OutputFileSize>();
+        if (options.WriteIndexFile)
+        {
+            sizes.Add(new OutputFileSize(outputPath, critical + creator, 0));
+        }
+
+        foreach (var v in PlanVolumes(outputPath, options.Scheme, options.VolumeCount, options.FirstExponent, recoveryCount, sliceSize, nonEmpty.Select(i => i.Length).DefaultIfEmpty(0).Max()))
+        {
+            sizes.Add(new OutputFileSize(v.Path, v.Count * (sliceHeader + sliceSize) + CriticalCopies(v.Count) * critical + creator, v.Count));
+        }
+
+        return sizes;
+    }
+
+    /// <summary>More recovery slices in a volume → more copies of the critical packets: 1 + log2(slices).</summary>
+    internal static int CriticalCopies(int slices) => 1 + (int)Math.Log2(Math.Max(1, slices));
+
+    /// <summary>The recovery slice count: the exact count if given, else the redundancy of the input slices (none without input).</summary>
+    private static int RecoveryCountOf(int totalSlices, Par2CreateOptions options)
+        => totalSlices == 0 ? 0 : options.RecoverySliceCount ?? (int)Math.Ceiling(totalSlices * options.RedundancyPercent / 100.0);
+
+    /// <summary>
+    /// The inputs with their stored names and lengths. The same file given twice (also spelled differently, e.g.
+    /// "x/../a" for "a") gets the same stored name and is used once.
+    /// </summary>
+    private static List<InputFile> LoadInputs(Par2CreateOptions options, string baseDir) => options.InputFiles
+        .Select(p => Path.GetFullPath(p))
+        .Select(p => new InputFile { Path = p, Name = PathSafety.ToStoredName(baseDir, p), Length = new FileInfo(p).Length })
+        .DistinctBy(i => i.Name, StringComparer.Ordinal)
+        .ToList();
 
     /// <summary>
     /// Smallest slice size (multiple of 4) for which the slice count (each file rounded up separately) does not

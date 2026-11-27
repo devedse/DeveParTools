@@ -87,24 +87,26 @@
           <StackPanel Spacing="12">
             <!-- Format and blocks -->
             <Border Classes="Card">
-              <Grid ColumnDefinitions="Auto,*,150" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10">
+              <Grid ColumnDefinitions="Auto,*,190" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10">
                 <TextBlock Text="Format" VerticalAlignment="Center" />
-                <ComboBox Grid.Column="1" Grid.ColumnSpan="2" ItemsSource="{Binding Formats}" SelectedIndex="{Binding FormatIndex}" HorizontalAlignment="Stretch" />
+                <ComboBox Grid.Column="1" Grid.ColumnSpan="2" ItemsSource="{Binding Formats}" SelectedIndex="{Binding FormatIndex}" HorizontalAlignment="Stretch"
+                          ToolTip.Tip="PAR3: protects folder trees, fast for large sets (FFT code), can store permissions; read by DeveParTools and par3cmdline. PAR2: read by almost every PAR tool (par2cmdline, MultiPar, QuickPar …), at most 32,768 blocks. PAR1: only for very old tools; one block per file." />
 
                 <TextBlock Grid.Row="1" Text="Blocks" VerticalAlignment="Center" />
-                <Slider Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="{Binding BlockSliderMaximum}" Value="{Binding BlockSlider}"
-                        IsEnabled="{Binding HasBlockChoice}" ToolTip.Tip="More blocks: finer repair, but more work and more metadata." />
+                <Slider Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="{Binding BlockSliderMaximum}" Value="{Binding BlockSlider}" IsEnabled="{Binding HasBlockChoice}"
+                        ToolTip.Tip="Your files are cut into blocks; a recovery block can replace any one lost block. More blocks: damage is repaired more precisely, but every block costs checksums and work. Fewer blocks: less overhead, but a small error costs a whole block." />
                 <NumericUpDown Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" Value="{Binding BlockCount}" Minimum="1" FormatString="N0" IsEnabled="{Binding HasBlockChoice}"
-                               AutomationProperties.Name="Number of blocks" />
+                               AutomationProperties.Name="Number of blocks" ToolTip.Tip="Number of input blocks. Type one to aim for it; the real count can differ a little, because every file is rounded up to whole blocks." />
 
                 <TextBlock Grid.Row="2" Text="Block size" VerticalAlignment="Center" />
                 <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
                   <TextBlock Classes="Value" Text="{Binding BlockSizeText}" />
-                  <TextBlock Classes="Label" Text="{Binding EfficiencyText, StringFormat='efficiency {0}'}"
-                             ToolTip.Tip="How full the blocks are: the last block of each file is partly empty." />
+                  <TextBlock Classes="Label" Text="{Binding BlockFillText}"
+                             ToolTip.Tip="The last block of every file is only partly filled; the rest is padding that the recovery blocks protect for nothing." />
                 </StackPanel>
-                <NumericUpDown Grid.Row="2" Grid.Column="2" Value="{Binding BlockSize}" Minimum="4" Increment="{Binding BlockSizeStep}" FormatString="N0"
-                               IsEnabled="{Binding HasBlockChoice}" AutomationProperties.Name="Block size in bytes" />
+                <NumericUpDown Grid.Row="2" Grid.Column="2" Value="{Binding BlockSize}" Minimum="4" ShowButtonSpinner="False" FormatString="N0"
+                               IsEnabled="{Binding HasBlockChoice}" AutomationProperties.Name="Block size in bytes"
+                               ToolTip.Tip="Block size in bytes. Type one to use exactly that (rounded up to a multiple of 4 for PAR2, 8 for PAR3)." />
 
                 <TextBlock Grid.Row="3" Grid.ColumnSpan="3" Classes="Caption" Text="PAR1 uses one block per file." IsVisible="{Binding IsPar1}" />
               </Grid>
@@ -113,40 +115,61 @@
             <!-- Recovery -->
             <Border Classes="Card">
               <StackPanel Spacing="10">
-                <Grid ColumnDefinitions="Auto,*,150" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10">
+                <Grid ColumnDefinitions="Auto,*,190" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10">
                   <TextBlock Text="Redundancy" VerticalAlignment="Center" />
-                  <Slider Grid.Column="1" Minimum="0" Maximum="100" Value="{Binding Redundancy}" />
+                  <Slider Grid.Column="1" Minimum="0" Maximum="100" Value="{Binding Redundancy}"
+                          ToolTip.Tip="Recovery blocks as a percentage of the input blocks: 10% can repair up to 10% of the blocks being lost or damaged, wherever they are." />
                   <TextBlock Grid.Column="2" Classes="Value" Text="{Binding RedundancyText}" HorizontalAlignment="Right" />
 
                   <TextBlock Grid.Row="1" Text="Recovery blocks" VerticalAlignment="Center" />
                   <TextBlock Grid.Row="1" Grid.Column="1" Classes="Label" Text="exact number (instead of the percentage)" />
                   <NumericUpDown Grid.Row="1" Grid.Column="2" Value="{Binding RecoveryCount}" Minimum="0" Maximum="{Binding RecoveryCountMaximum}" FormatString="N0"
-                                 AutomationProperties.Name="Number of recovery blocks" />
+                                 AutomationProperties.Name="Number of recovery blocks"
+                                 ToolTip.Tip="Each recovery block can replace one lost or damaged input block. Type a number to use exactly that many." />
 
                   <TextBlock Grid.Row="2" Text="Recovery files" VerticalAlignment="Center" />
                   <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding VolumeSizings}" SelectedIndex="{Binding VolumeSizingIndex}" HorizontalAlignment="Stretch"
-                            IsEnabled="{Binding HasBlockChoice}" />
+                            IsEnabled="{Binding HasBlockChoice}"
+                            ToolTip.Tip="How the recovery blocks are spread over files. Growing (1, 2, 4, 8 …): to repair a little damage you only need to download or keep the small files. Equal: files of the same size. Limited: no file larger than your largest file." />
                   <NumericUpDown Grid.Row="2" Grid.Column="2" Value="{Binding VolumeCount}" Minimum="0" PlaceholderText="automatic" FormatString="N0"
-                                 IsEnabled="{Binding HasBlockChoice}" AutomationProperties.Name="Number of recovery files" />
+                                 IsEnabled="{Binding HasBlockChoice}" AutomationProperties.Name="Number of recovery files"
+                                 ToolTip.Tip="How many recovery files to make. Empty: as many as the growing sizes need (Growing) or one (Equal)." />
                 </Grid>
 
                 <!-- What the choices give -->
                 <Border Padding="12" CornerRadius="6" Background="{DynamicResource SubtleFillColorSecondaryBrush}">
-                  <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="6">
-                    <TextBlock Classes="Label" Text="Recovery data" />
-                    <TextBlock Grid.Column="1" Classes="Value" Text="{Binding RecoveryDataText}" />
-                    <TextBlock Grid.Row="1" Classes="Label" Text="Missing files it can rebuild" />
-                    <TextBlock Grid.Row="1" Grid.Column="1" Classes="Value" Text="{Binding RebuildText}"
-                               ToolTip.Tip="Whole files that can be recreated when they are gone completely: if the largest ones are lost … if the smallest ones are lost." />
-                    <TextBlock Grid.Row="2" Classes="Label" Text="Code" />
-                    <TextBlock Grid.Row="2" Grid.Column="1" Classes="Value" Text="{Binding CodeText}" />
-                    <ItemsControl Grid.Row="3" Grid.ColumnSpan="2" ItemsSource="{Binding Warnings}" IsVisible="{Binding HasWarnings}">
-                      <ItemsControl.ItemTemplate>
-                        <DataTemplate x:DataType="x:String">
-                          <TextBlock Text="{Binding StringFormat='⚠ {0}'}" TextWrapping="Wrap" Foreground="{DynamicResource BlockDamagedBrush}" Margin="0,4,0,0" />
-                        </DataTemplate>
-                      </ItemsControl.ItemTemplate>
-                    </ItemsControl>
+                  <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="6">
+                    <TextBlock Classes="Label" Text="PAR files" />
+                    <TextBlock Grid.Column="1" Classes="Value" Text="{Binding ParFilesText}"
+                               ToolTip.Tip="Everything that will be written: the index file and the recovery files, with all their checksums and copies of the file list." />
+                    <TextBlock Grid.Row="1" Classes="Label" Text="Recovery data" />
+                    <TextBlock Grid.Row="1" Grid.Column="1" Classes="Value" Text="{Binding RecoveryDataText}"
+                               ToolTip.Tip="The recovery blocks themselves, without the packets around them." />
+                    <TextBlock Grid.Row="2" Classes="Label" Text="Efficiency" />
+                    <TextBlock Grid.Row="2" Grid.Column="1" Classes="Value" Text="{Binding EfficiencyText}"
+                               ToolTip.Tip="How much of what is written protects your data: the data the recovery blocks stand for, divided by the size of all PAR files. The rest is overhead: partly empty blocks, a checksum per block, and copies of the file list and checksums in every recovery file (so each one also works on its own). Many small blocks lower it; fewer, larger blocks raise it." />
+                    <TextBlock Grid.Row="3" Classes="Label" Text="Missing files it can rebuild" />
+                    <TextBlock Grid.Row="3" Grid.Column="1" Classes="Value" Text="{Binding RebuildText}"
+                               ToolTip.Tip="Whole files that can be recreated when they are gone completely: the first number if the largest files are lost, the second if the smallest are." />
+                    <TextBlock Grid.Row="4" Classes="Label" Text="Code" />
+                    <TextBlock Grid.Row="4" Grid.Column="1" Classes="Value" Text="{Binding CodeText}"
+                               ToolTip.Tip="The error-correcting code that computes the recovery blocks, and the Galois field it calculates in." />
+                    <StackPanel Grid.Row="5" Grid.ColumnSpan="2" Spacing="4" IsVisible="{Binding HasWarnings}">
+                      <ItemsControl ItemsSource="{Binding Errors}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="x:String">
+                            <TextBlock Text="{Binding StringFormat='⛔ {0}'}" TextWrapping="Wrap" Foreground="{DynamicResource BlockMissingBrush}" Margin="0,4,0,0" />
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                      <ItemsControl ItemsSource="{Binding Warnings}">
+                        <ItemsControl.ItemTemplate>
+                          <DataTemplate x:DataType="x:String">
+                            <TextBlock Text="{Binding StringFormat='⚠ {0}'}" TextWrapping="Wrap" Foreground="{DynamicResource BlockRecoverableBrush}" Margin="0,4,0,0" />
+                          </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                      </ItemsControl>
+                    </StackPanel>
                   </Grid>
                 </Border>
 
@@ -154,9 +177,9 @@
                   <ItemsControl ItemsSource="{Binding RecoveryFiles}">
                     <ItemsControl.ItemTemplate>
                       <DataTemplate x:DataType="vm:RecoveryFileRow">
-                        <Grid ColumnDefinitions="*,90,90" Margin="0,2">
+                        <Grid ColumnDefinitions="*,110,90" Margin="0,2">
                           <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
-                          <TextBlock Grid.Column="1" Text="{Binding Blocks, StringFormat='{}{0} blocks'}" HorizontalAlignment="Right" Opacity="0.8" />
+                          <TextBlock Grid.Column="1" Text="{Binding Blocks}" HorizontalAlignment="Right" Opacity="0.8" />
                           <TextBlock Grid.Column="2" Text="{Binding Size}" HorizontalAlignment="Right" />
                         </Grid>
                       </DataTemplate>
@@ -170,20 +193,29 @@
             <Border Classes="Card" IsVisible="{Binding IsPar3}">
               <StackPanel Spacing="8">
                 <TextBlock Classes="Section" Margin="0" Text="PAR3 options" />
-                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="14">
+                <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto" ColumnSpacing="14" RowSpacing="4">
                   <TextBlock Text="Code" VerticalAlignment="Center" />
-                  <ComboBox Grid.Column="1" ItemsSource="{Binding Codes}" SelectedIndex="{Binding CodeIndex}" HorizontalAlignment="Stretch" />
+                  <ComboBox Grid.Column="1" ItemsSource="{Binding Codes}" SelectedIndex="{Binding CodeIndex}" HorizontalAlignment="Stretch"
+                            ToolTip.Tip="Automatic: Cauchy for small sets (up to 256 blocks in all) and when there are more recovery than input blocks, FFT otherwise. Cauchy: the classic Reed-Solomon code from the PAR3 specification; any number of recovery blocks, but its work grows with input × recovery blocks, so large sets are slow. FFT: Reed-Solomon computed with fast Fourier transforms, many times faster for large sets; at most as many recovery blocks as input blocks (set the most you will ever need under Advanced options). FFT sets are read by DeveParTools and par3cmdline." />
+                  <TextBlock Grid.Row="1" Grid.Column="1" Classes="Caption" Text="{Binding CodeChoiceText}" IsVisible="{Binding CodeChoiceText, Converter={x:Static ObjectConverters.IsNotNull}}" />
                 </Grid>
                 <WrapPanel>
-                  <CheckBox Content="Deduplicate identical blocks" IsChecked="{Binding Dedup}" Margin="0,0,16,0" />
-                  <CheckBox Content="Pack file tails" IsChecked="{Binding PackTails}" Margin="0,0,16,0" />
-                  <CheckBox Content="Store data (archive)" IsChecked="{Binding StoreData}" Margin="0,0,16,0" />
-                  <CheckBox Content="Store Unix permissions" IsChecked="{Binding UnixPermissions}" Margin="0,0,16,0" />
-                  <CheckBox Content="Store Windows attributes" IsChecked="{Binding FatPermissions}" Margin="0,0,16,0" />
-                  <CheckBox Content="Reproducible output" IsChecked="{Binding Reproducible}" />
+                  <CheckBox Content="Deduplicate identical blocks" IsChecked="{Binding Dedup}" Margin="0,0,16,0"
+                            ToolTip.Tip="Blocks with exactly the same content (copies of a file, long runs of zeros) are stored once, so there are fewer blocks to protect and less recovery data for the same percentage. Which blocks are the same is only known when the files are read, so the numbers above are without it: the real set can be smaller." />
+                  <CheckBox Content="Pack file tails" IsChecked="{Binding PackTails}" Margin="0,0,16,0"
+                            ToolTip.Tip="The last, partly filled block of each file is packed together with other files' last pieces into shared blocks, instead of each taking a whole block. Saves blocks and recovery data with many small files." />
+                  <CheckBox Content="Store data (archive)" IsChecked="{Binding StoreData}" Margin="0,0,16,0"
+                            ToolTip.Tip="Also copies the contents of your files into the PAR files (.part files), so the PAR set alone can recreate everything, like an archive. The PAR files then become as large as your files plus the recovery data." />
+                  <CheckBox Content="Store Unix permissions" IsChecked="{Binding UnixPermissions}" Margin="0,0,16,0"
+                            ToolTip.Tip="Stores each file's modification time, owner, group and permission bits, so a repair can restore them (Verify page: Restore permissions)." />
+                  <CheckBox Content="Store Windows attributes" IsChecked="{Binding FatPermissions}" Margin="0,0,16,0"
+                            ToolTip.Tip="Stores each file's creation and modification times and attributes (read-only, hidden, system, archive), so a repair can restore them." />
+                  <CheckBox Content="Reproducible output" IsChecked="{Binding Reproducible}"
+                            ToolTip.Tip="The same files and settings always give byte-for-byte the same PAR files (the set's ID is derived from the contents instead of chosen at random). Handy for comparing or deduplicating backups." />
                 </WrapPanel>
                 <CheckBox IsVisible="{Binding CanInsertIntoArchive}" IsChecked="{Binding InsideArchive}"
-                          Content="Store the recovery data inside the archive itself, so it can repair itself (PAR inside)" />
+                          Content="Store the recovery data inside the archive itself, so it can repair itself (PAR inside)"
+                          ToolTip.Tip="Appends the PAR3 data to the .zip, .7z or .rar itself. Archive tools still open it, and DeveParTools (or par3cmdline) can verify and repair it from the archive alone. The Verify page can remove it again." />
               </StackPanel>
             </Border>
 
@@ -198,7 +230,8 @@
                   <TextBox Text="{Binding BaseDirectory}" PlaceholderText="the folder of the recovery set" ToolTip.Tip="File names are stored relative to this folder." />
                   <Button Grid.Column="1" Content="Browse…" Command="{Binding BrowseBaseCommand}" />
                 </Grid>
-                <CheckBox Grid.Row="2" Grid.ColumnSpan="2" Content="Include subfolders" IsChecked="{Binding Recursive}" />
+                <CheckBox Grid.Row="2" Grid.ColumnSpan="2" Content="Include subfolders" IsChecked="{Binding Recursive}"
+                          ToolTip.Tip="For folders you added: also protect the files in their subfolders (and their subfolders, and so on)." />
                 <Grid Grid.Row="3" Grid.ColumnSpan="2" ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10" IsVisible="{Binding IsPar3}">
                   <TextBlock Text="Most recovery blocks ever (FFT)" VerticalAlignment="Center" />
                   <NumericUpDown Grid.Column="1" Value="{Binding MaxRecoveryBlocks}" Minimum="0" Maximum="32768" PlaceholderText="automatic" FormatString="N0"
@@ -207,7 +240,8 @@
                   <NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding Interleave}" Minimum="0" Maximum="255" PlaceholderText="automatic" FormatString="N0"
                                  ToolTip.Tip="Splits very large sets into interleaved groups (0 or empty: automatic)." />
                   <TextBlock Grid.Row="2" Text="Cauchy coefficients" VerticalAlignment="Center" />
-                  <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding CauchyConventions}" SelectedIndex="{Binding CauchyConventionIndex}" HorizontalAlignment="Stretch" />
+                  <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding CauchyConventions}" SelectedIndex="{Binding CauchyConventionIndex}" HorizontalAlignment="Stretch"
+                            ToolTip.Tip="The PAR3 draft specification and par3cmdline (the reference program) number the Cauchy matrix differently. Keep par3cmdline unless a program that follows the specification text must read the set; DeveParTools reads both." />
                 </Grid>
               </Grid>
             </Expander>

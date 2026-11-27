@@ -22,6 +22,14 @@ public enum RecoveryFileScheme
 /// <summary>A recovery file to write: its path, the number of its first recovery block, and how many it holds.</summary>
 public sealed record RecoveryFilePlan(string Path, long FirstBlock, int Count);
 
+/// <summary>
+/// A file that creating a set will write, with its exact size: recovery blocks plus everything around them (packet
+/// headers, checksums, the file list and its copies). Computed by the formats' PlanFileSizes without reading the input
+/// files.
+/// </summary>
+/// <param name="RecoveryBlocks">Recovery blocks in the file (0 for the index file and PAR3 data parts).</param>
+public sealed record OutputFileSize(string Path, long Bytes, int RecoveryBlocks);
+
 /// <summary>How many recovery blocks go into each recovery file. Shared by PAR2 and PAR3 so both follow one set of rules.</summary>
 /// <remarks>
 /// Blocks per file for 10 recovery blocks:

@@ -32,7 +32,7 @@ public sealed partial class CreateInputRow : ObservableObject
     private string _blocks = string.Empty;
 }
 
-/// <summary>One planned recovery file: its name, blocks and size.</summary>
+/// <summary>One file that will be written: its name, what it holds and its exact size.</summary>
 public sealed record RecoveryFileRow(string Name, string Blocks, string Size);
 
 /// <summary>
@@ -85,7 +85,11 @@ public sealed partial class CreateViewModel : OperationViewModel
 
     public ObservableCollection<string> Warnings { get; } = new();
 
-    public string[] Formats { get; } = ["PAR2 (most compatible)", "PAR3 (modern, folders, FFT)", "PAR1 (legacy)"];
+    /// <summary>Problems that make Create refuse the choices (shown in red).</summary>
+    public ObservableCollection<string> Errors { get; } = new();
+
+    /// <summary>PAR3 first: it is the default.</summary>
+    public string[] Formats { get; } = ["PAR3 (modern: folders, fast FFT code)", "PAR2 (most compatible)", "PAR1 (legacy)"];
 
     public string[] Codes { get; } = ["Automatic", "Cauchy Reed-Solomon", "FFT Reed-Solomon (fast)"];
 
@@ -93,12 +97,35 @@ public sealed partial class CreateViewModel : OperationViewModel
 
     public string[] CauchyConventions { get; } = ["par3cmdline (x = I, compatible)", "PAR3 specification draft (x = I + 1)"];
 
-    /// <summary>Completes when the latest scan and plan are done (the UI checks wait for it).</summary>
-    public Task Planned { get; private set; } = Task.CompletedTask;
+    private Task _scanTask = Task.CompletedTask;
+    private Task _sizeTask = Task.CompletedTask;
+    private int _sizeVersion;
 
-    /// <summary>The set that Create will make with the current choices.</summary>
+    /// <summary>Completes when the latest scan, plan and file sizes are done (the UI checks wait for it).</summary>
+    public Task Planned => WhenPlannedAsync();
+
+    private async Task WhenPlannedAsync()
+    {
+        while (true)
+        {
+            var scan = _scanTask;
+            var size = _sizeTask;
+            await scan;
+            await size;
+            if (scan == _scanTask && size == _sizeTask)
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>The set that Create will make with the current choices (blocks and recovery; computed at once).</summary>
     [ObservableProperty]
     private ParCreatePlan? _plan;
+
+    /// <summary>The same plan with the exact size of every file (computed in the background, null meanwhile).</summary>
+    [ObservableProperty]
+    private ParCreatePlan? _sizedPlan;
 
     // ---------------------------------------------------------------- choices
 
@@ -165,7 +192,7 @@ public sealed partial class CreateViewModel : OperationViewModel
     [ObservableProperty]
     private bool _insideArchive;
 
-    public bool IsPar3 => FormatIndex == 1;
+    public bool IsPar3 => FormatIndex == 0;
 
     public bool IsPar1 => FormatIndex == 2;
 
@@ -178,9 +205,9 @@ public sealed partial class CreateViewModel : OperationViewModel
 
     public string OutputPlaceholder => "recovery" + Extension;
 
-    private string Extension => FormatIndex switch { 1 => ".par3", 2 => ".par", _ => ".par2" };
+    private string Extension => FormatIndex switch { 0 => ".par3", 2 => ".par", _ => ".par2" };
 
-    private ParFormat Format => FormatIndex switch { 1 => ParFormat.Par3, 2 => ParFormat.Par1, _ => ParFormat.Par2 };
+    private ParFormat Format => FormatIndex switch { 0 => ParFormat.Par3, 2 => ParFormat.Par1, _ => ParFormat.Par2 };
 
     // ---------------------------------------------------------------- the linked sliders and boxes
 
@@ -269,11 +296,26 @@ public sealed partial class CreateViewModel : OperationViewModel
 
     public string RedundancyText => Plan is { InputBlocks: > 0 } plan ? $"{plan.RedundancyPercent:0.00}%" : $"{_redundancy:0.00}%";
 
-    public string EfficiencyText => Plan is { InputBlocks: > 0 } plan ? $"{plan.Efficiency * 100:0.0}%" : "–";
+    /// <summary>How full the input blocks are (the last block of each file is partly empty).</summary>
+    public string BlockFillText => Plan is { InputBlocks: > 0 } plan ? $"blocks {plan.BlockFill * 100:0.0}% full" : string.Empty;
 
+    /// <summary>Everything that will be written: index, recovery files (and PAR3 data parts).</summary>
+    public string ParFilesText => Plan is not { Files.Count: > 0 }
+        ? "–"
+        : SizedPlan?.ParFileBytes is long total ? $"{Formatting.Bytes(total)} in {SizedPlan.OutputFiles!.Count:N0} file(s)" : Plan.Errors.Count > 0 ? "–" : "calculating…";
+
+    /// <summary>The recovery blocks alone.</summary>
     public string RecoveryDataText => Plan is not { RecoveryBlocks: > 0 } plan
         ? "No recovery data"
-        : $"{Formatting.Bytes(plan.RecoveryBytes)} in {plan.RecoveryFiles.Count:N0} file(s)";
+        : $"{Formatting.Bytes(plan.RecoveryBytes)} ({plan.RecoveryBlocks:N0} block(s) of {Formatting.Bytes(plan.BlockSize)})";
+
+    /// <summary>The share of what is written that is recovery data for real file data (see ParCreatePlan.Efficiency).</summary>
+    public string EfficiencyText => Plan is not { RecoveryBlocks: > 0 } ? "–" : SizedPlan?.Efficiency is double e ? $"{e * 100:0.0}%" : Plan.Errors.Count > 0 ? "–" : "calculating…";
+
+    /// <summary>For "Automatic": which code it picks for this set.</summary>
+    public string? CodeChoiceText => CodeIndex == 0 && Plan is { RecoveryBlocks: > 0 } plan
+        ? $"Automatic picks {(plan.Code.StartsWith("FFT", StringComparison.Ordinal) ? "the FFT code" : "the Cauchy code")} for this set."
+        : null;
 
     /// <summary>Whole files that can be rebuilt when missing: "3 to 5 of 5" (largest files first … smallest first).</summary>
     public string RebuildText
@@ -292,9 +334,9 @@ public sealed partial class CreateViewModel : OperationViewModel
 
     public string CodeText => Plan?.Code ?? string.Empty;
 
-    public string RecoveryFilesHeader => $"Recovery files ({RecoveryFiles.Count:N0})";
+    public string RecoveryFilesHeader => $"Files that will be written ({RecoveryFiles.Count:N0})";
 
-    public bool HasWarnings => Warnings.Count > 0;
+    public bool HasWarnings => Warnings.Count > 0 || Errors.Count > 0;
 
     public decimal RecoveryCountMaximum => IsPar1 ? Math.Max(0, 255 - (Plan?.Files.Count ?? 0)) : IsPar3 ? 1 << 24 : 65535;
 
@@ -339,6 +381,16 @@ public sealed partial class CreateViewModel : OperationViewModel
 
     partial void OnInterleaveChanged(decimal? value) => Replan();
 
+    partial void OnCommentChanged(string? value) => Replan();
+
+    partial void OnStoreDataChanged(bool value) => Replan();
+
+    partial void OnUnixPermissionsChanged(bool value) => Replan();
+
+    partial void OnFatPermissionsChanged(bool value) => Replan();
+
+    partial void OnBaseDirectoryChanged(string? value) => Replan();
+
     /// <summary>Scans the inputs in the background, then plans.</summary>
     private void Rescan()
     {
@@ -351,7 +403,7 @@ public sealed partial class CreateViewModel : OperationViewModel
 
         int version = ++_scanVersion;
         var request = BuildRequest(exact: false);
-        Planned = ScanAsync(version, request);
+        _scanTask = ScanAsync(version, request);
     }
 
     private async Task ScanAsync(int version, ParCreateRequest request)
@@ -374,11 +426,18 @@ public sealed partial class CreateViewModel : OperationViewModel
         }
     }
 
-    /// <summary>Plans from the scanned file list and updates everything shown.</summary>
+    /// <summary>
+    /// Plans from the scanned file list and updates everything shown; the exact file sizes follow in the background
+    /// (they need the set's metadata built, which takes longer for very large sets).
+    /// </summary>
     private void Replan()
     {
-        Plan = ParClient.Plan(BuildRequest(exact: false), _files);
+        var request = BuildRequest(exact: false);
+        Plan = ParClient.Plan(request, _files, withFileSizes: false);
         var plan = Plan;
+        SizedPlan = null;
+        int sizeVersion = ++_sizeVersion;
+        _sizeTask = SizeAsync(sizeVersion, request, _files);
         foreach (var row in Inputs)
         {
             var mine = plan.Files.Where(f => f.Input == row.Path).ToList();
@@ -387,10 +446,55 @@ public sealed partial class CreateViewModel : OperationViewModel
             row.Blocks = $"{mine.Sum(f => f.Blocks):N0}";
         }
 
-        RecoveryFiles.Clear();
-        foreach (var f in plan.RecoveryFiles)
+        ShowFiles(plan);
+        foreach (var name in new[]
         {
-            RecoveryFiles.Add(new RecoveryFileRow(Path.GetFileName(f.Path), $"{f.Count:N0}", Formatting.Bytes(f.Count * plan.BlockSize)));
+            nameof(BlockSlider), nameof(BlockSliderMaximum), nameof(BlockCount), nameof(BlockSize), nameof(Redundancy), nameof(RecoveryCount),
+            nameof(HasInputs), nameof(InputSummary), nameof(BlockSizeText), nameof(RedundancyText), nameof(BlockFillText), nameof(RecoveryDataText),
+            nameof(RebuildText), nameof(CodeText), nameof(CodeChoiceText), nameof(RecoveryCountMaximum),
+        })
+        {
+            OnPropertyChanged(name);
+        }
+
+        CreateCommand.NotifyCanExecuteChanged();
+    }
+
+    /// <summary>Computes the exact file sizes after a short pause (so dragging a slider does not compute every step).</summary>
+    private async Task SizeAsync(int version, ParCreateRequest request, IReadOnlyList<ParPlanFile> files)
+    {
+        await Task.Delay(120);
+        if (version != _sizeVersion)
+        {
+            return;
+        }
+
+        var sized = await Task.Run(() => ParClient.Plan(request, files, withFileSizes: true));
+        if (version == _sizeVersion)
+        {
+            SizedPlan = sized;
+            ShowFiles(sized);
+        }
+    }
+
+    /// <summary>The files to be written (with sizes once known), the warnings and the derived texts.</summary>
+    private void ShowFiles(ParCreatePlan plan)
+    {
+        RecoveryFiles.Clear();
+        if (plan.OutputFiles is { } sizes)
+        {
+            foreach (var f in sizes)
+            {
+                string what = f.RecoveryBlocks > 0 ? $"{f.RecoveryBlocks:N0} block(s)" : f == sizes[0] ? "index" : "data";
+                RecoveryFiles.Add(new RecoveryFileRow(Path.GetFileName(f.Path), what, Formatting.Bytes(f.Bytes)));
+            }
+        }
+        else
+        {
+            foreach (var f in plan.RecoveryFiles)
+            {
+                RecoveryFiles.Add(new RecoveryFileRow(Path.GetFileName(f.Path), $"{f.Count:N0} block(s)", "…"));
+            }
         }
 
         Warnings.Clear();
@@ -399,17 +503,16 @@ public sealed partial class CreateViewModel : OperationViewModel
             Warnings.Add(w);
         }
 
-        foreach (var name in new[]
+        Errors.Clear();
+        foreach (var e in plan.Errors)
         {
-            nameof(BlockSlider), nameof(BlockSliderMaximum), nameof(BlockCount), nameof(BlockSize), nameof(Redundancy), nameof(RecoveryCount),
-            nameof(HasInputs), nameof(InputSummary), nameof(BlockSizeText), nameof(RedundancyText), nameof(EfficiencyText), nameof(RecoveryDataText),
-            nameof(RebuildText), nameof(CodeText), nameof(RecoveryFilesHeader), nameof(HasWarnings), nameof(RecoveryCountMaximum),
-        })
+            Errors.Add(e);
+        }
+
+        foreach (var name in new[] { nameof(ParFilesText), nameof(EfficiencyText), nameof(RecoveryFilesHeader), nameof(HasWarnings) })
         {
             OnPropertyChanged(name);
         }
-
-        CreateCommand.NotifyCanExecuteChanged();
     }
 
     /// <summary>
@@ -544,7 +647,7 @@ public sealed partial class CreateViewModel : OperationViewModel
             return;
         }
 
-        await Planned;
+        await _scanTask;
         var request = BuildRequest(exact: true);
         var report = await RunAsync("Creating", ctx => ParClient.Create(request, ctx));
         if (report != null)

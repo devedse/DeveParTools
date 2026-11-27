@@ -127,6 +127,12 @@ public sealed class Par1File
     }
 
     /// <summary>Writes a PAR1 file with the given header fields, file list and data (computes both hashes).</summary>
+    /// <summary>
+    /// The size of a file written by <see cref="Write"/>: the 0x60-byte header, a 0x38-byte entry plus the UTF-16 name
+    /// for every file, then the data.
+    /// </summary>
+    public static long SizeOf(IEnumerable<string> names, long dataSize) => HeaderSize + names.Sum(n => 0x38L + Encoding.Unicode.GetByteCount(n)) + dataSize;
+
     public static void Write(string path, ulong volumeNumber, IReadOnlyList<Par1FileEntry> files, Action<Stream> writeData, long dataSize)
     {
         var list = new MemoryStream();
@@ -252,6 +258,24 @@ public sealed class Par1VerifyResult
 /// <summary>Create, verify and repair PAR 1.0 sets (whole files are the recovery unit).</summary>
 public static class Par1Set
 {
+    /// <summary>
+    /// The files <see cref="Create"/> writes and their exact sizes, without reading the inputs: the index file holds the
+    /// file list and the comment (UTF-16), every volume the file list and one block the size of the largest file.
+    /// </summary>
+    public static IReadOnlyList<OutputFileSize> PlanFileSizes(Par1CreateOptions options)
+    {
+        var names = options.InputFiles.Select(Path.GetFileName).Select(n => n!).ToList();
+        long largest = options.InputFiles.Select(f => new FileInfo(f).Length).DefaultIfEmpty(0).Max();
+        var baseName = options.OutputPath.EndsWith(".par", StringComparison.OrdinalIgnoreCase) ? options.OutputPath[..^4] : options.OutputPath;
+        var sizes = new List<OutputFileSize> { new(baseName + ".par", Par1File.SizeOf(names, Encoding.Unicode.GetByteCount(options.Comment ?? string.Empty)), 0) };
+        for (int v = 1; v <= options.RecoveryVolumes; v++)
+        {
+            sizes.Add(new OutputFileSize(baseName + Par1File.VolumeExtension(v), Par1File.SizeOf(names, largest), 1));
+        }
+
+        return sizes;
+    }
+
     /// <summary>Creates the .par index file and <see cref="Par1CreateOptions.RecoveryVolumes"/> .pXX volumes.</summary>
     /// <remarks>
     /// PAR1 stores bare file names (no directories) and <see cref="Verify"/> looks for the files next to the .par file,

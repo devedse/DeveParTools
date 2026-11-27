@@ -88,8 +88,11 @@ state. Colour is never the only cue: states with similar colours also get a glyp
 - **Recovery:** the redundancy slider and the recovery block box are linked in the same way.
 - **Recovery files:** growing (1, 2, 4, 8…), equal, or never larger than the largest input file, with an optional
   file count.
-- **Summary:** recovery data size, efficiency (how full the blocks are), how many missing files can be rebuilt
-  completely, the code, a preview of the recovery files, and warnings such as PAR2's 32,768-block limit.
+- **Summary:** the exact size of every file that will be written (index and recovery files, including all
+  checksums and copies of the file list), the recovery data in it, the efficiency (how much of what is written
+  protects your data; tiny blocks mostly write overhead), how many missing files can be rebuilt completely, the code,
+  and errors or warnings such as PAR2's 32,768-block limit. Every option has a tooltip that explains it.
+- **Default format:** PAR3.
 
 The file list shows the size and blocks of every file and folder. PAR2 is the most compatible. PAR3 protects folder
 trees, is much faster for large sets thanks to the FFT code, and can store permissions. **Advanced options** has the

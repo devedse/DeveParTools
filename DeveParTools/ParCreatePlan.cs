@@ -58,20 +58,46 @@ public sealed class ParCreatePlan
     /// <summary>The most input blocks the format allows for these files (the smallest block size): for a block count slider.</summary>
     public required long MaxInputBlocks { get; init; }
 
-    /// <summary>Problems that make Create fail or behave differently, in plain words.</summary>
+    /// <summary>Things worth knowing that do not stop Create (a slow code, deduplication not counted), in plain words.</summary>
     public IReadOnlyList<string> Warnings { get; init; } = [];
+
+    /// <summary>Problems that make Create refuse the request (too many blocks, a block size it does not accept, …).</summary>
+    public IReadOnlyList<string> Errors { get; init; } = [];
 
     /// <summary>Recovery blocks as a percentage of the input blocks.</summary>
     public double RedundancyPercent => InputBlocks == 0 ? 0 : 100.0 * RecoveryBlocks / InputBlocks;
 
-    /// <summary>Recovery data in bytes (blocks × block size; the files add a little metadata).</summary>
+    /// <summary>Recovery data in bytes: recovery blocks × block size (without the packets around them).</summary>
     public long RecoveryBytes => RecoveryBlocks * BlockSize;
 
     /// <summary>
-    /// How much of the input blocks is real data: total bytes ÷ (blocks × block size). Below 100% the last block of
-    /// each file is partly empty, so recovery blocks protect less data than their size.
+    /// How full the input blocks are: total bytes ÷ (blocks × block size). Below 100% the last block of each file is
+    /// partly empty, so recovery blocks protect less data than their size.
     /// </summary>
-    public double Efficiency => InputBlocks == 0 ? 0 : (double)TotalBytes / ((double)InputBlocks * BlockSize);
+    public double BlockFill => InputBlocks == 0 ? 0 : (double)TotalBytes / ((double)InputBlocks * BlockSize);
+
+    /// <summary>
+    /// Every file Create writes (index file first, then the recovery files, then PAR3 data parts) with its exact size,
+    /// or null when the sizes were not asked for (<see cref="ParClient.Plan"/>) or the set cannot be created as asked.
+    /// </summary>
+    public IReadOnlyList<OutputFileSize>? OutputFiles { get; init; }
+
+    /// <summary>The total size of all PAR files (null without <see cref="OutputFiles"/>).</summary>
+    public long? ParFileBytes => OutputFiles?.Sum(f => f.Bytes);
+
+    /// <summary>
+    /// How much of what is written protects real data: the input data the recovery blocks stand for
+    /// (recovery blocks × <see cref="BlockFill"/> × block size) ÷ the size of all PAR files.
+    /// </summary>
+    /// <remarks>
+    /// <para>The rest is overhead: partly empty blocks, packet headers, the checksum of every input block, the file list,
+    /// and the copies of that set description in every recovery file (so any one of them can be used on its own).
+    /// It is large with many small blocks. Example (PAR3): 6.6 MiB in 32,262 blocks of 216 bytes with 100% recovery
+    /// writes about 25 MB, because every block costs 24 bytes of checksum per copy and each of the 15 recovery files
+    /// holds two copies: efficiency around 25%. The same data in 2,000 blocks writes about 7 MB: over 90%.</para>
+    /// <para>Null without <see cref="OutputFiles"/>.</para>
+    /// </remarks>
+    public double? Efficiency => ParFileBytes is > 0 and var total ? RecoveryBlocks * BlockFill * BlockSize / total : null;
 
     /// <summary>
     /// How many whole files can be rebuilt when they are missing completely: at least (the largest files go first)
@@ -152,13 +178,64 @@ public static partial class ParClient
     /// and files. See <see cref="ParCreatePlan"/>.
     /// </summary>
     /// <param name="files">The result of <see cref="ScanInputs"/> for this request (scanned now when null).</param>
-    public static ParCreatePlan Plan(ParCreateRequest request, IReadOnlyList<ParPlanFile>? files = null)
+    /// <param name="withFileSizes">
+    /// Also compute <see cref="ParCreatePlan.OutputFiles"/>: the exact size of every file. That builds the set's metadata
+    /// (names, checksum lists, the file tree) without reading the files, which takes longer for very large sets, so the
+    /// app first plans without it and adds the sizes in the background.
+    /// </param>
+    public static ParCreatePlan Plan(ParCreateRequest request, IReadOnlyList<ParPlanFile>? files = null, bool withFileSizes = true)
     {
-        files ??= ScanInputs(request);
+        var plan = PlanBlocks(request, files ?? ScanInputs(request));
+        // No sizes when Create would refuse, or when a scanned file has gone (they would be for other files).
+        if (!withFileSizes || plan.Files.Count == 0 || plan.Errors.Count > 0 || !plan.Files.All(f => File.Exists(f.Path)))
+        {
+            return plan;
+        }
+
+        // Exactly the planned numbers, and only the inputs that exist (the creators refuse missing ones).
+        var exact = request with
+        {
+            Inputs = request.Inputs.Where(i => File.Exists(i) || Directory.Exists(i)).ToList(),
+            BlockSize = plan.Format == ParFormat.Par1 ? null : plan.BlockSize,
+            RecoveryBlockCount = plan.RecoveryBlocks,
+        };
+        try
+        {
+            ParCreatePlan Sized(IReadOnlyList<OutputFileSize> sizes, IReadOnlyList<string> warnings) => new()
+            {
+                Format = plan.Format,
+                Files = plan.Files,
+                BlockSize = plan.BlockSize,
+                InputBlocks = plan.InputBlocks,
+                RecoveryBlocks = plan.RecoveryBlocks,
+                RecoveryFiles = plan.RecoveryFiles,
+                Code = plan.Code,
+                MaxInputBlocks = plan.MaxInputBlocks,
+                Warnings = warnings,
+                Errors = plan.Errors,
+                OutputFiles = sizes,
+            };
+
+            var sized = Sized(PlanFileSizes(exact, plan.Format), plan.Warnings);
+            return sized.Efficiency < 0.5 && sized.RecoveryBlocks > 0
+                ? Sized(sized.OutputFiles!, [.. plan.Warnings, $"Only {sized.Efficiency:P0} of what is written is recovery data for your files. The rest is overhead: "
+                    + "partly empty blocks, a checksum per block, and copies of the file list and checksums in every recovery file. Fewer, larger blocks lower it."])
+                : sized;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            // An input disappeared or cannot be read: the block plan is still right, the sizes are just unknown.
+            return plan;
+        }
+    }
+
+    private static ParCreatePlan PlanBlocks(ParCreateRequest request, IReadOnlyList<ParPlanFile> files)
+    {
         var format = request.Format ?? FromExtension(request.OutputPath) ?? ParFormat.Par2;
         var lengths = files.Select(f => f.Length).ToList();
         long largest = lengths.DefaultIfEmpty(0).Max();
         var warnings = new List<string>();
+        var errors = new List<string>();
         int Recovery(long blocks, int minimum) => blocks == 0 ? 0 : request.RecoveryBlockCount ?? Math.Max(minimum, (int)Math.Ceiling(blocks * request.RedundancyPercent / 100.0));
 
         switch (format)
@@ -170,13 +247,13 @@ public static partial class ParClient
                 var baseName = request.OutputPath.EndsWith(".par", StringComparison.OrdinalIgnoreCase) ? request.OutputPath[..^4] : request.OutputPath;
                 if (files.Count + recovery > 255)
                 {
-                    warnings.Add($"PAR1 allows at most 255 files and recovery files together ({files.Count:N0} + {recovery:N0}).");
+                    errors.Add($"PAR1 allows at most 255 files and recovery files together ({files.Count:N0} + {recovery:N0}).");
                 }
 
                 var outputDir = Path.GetDirectoryName(Path.GetFullPath(request.OutputPath));
                 if (files.Any(f => !string.Equals(Path.GetDirectoryName(f.Path), outputDir, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)))
                 {
-                    warnings.Add("PAR1 stores bare file names: every file must be in the folder of the .par file.");
+                    errors.Add("PAR1 stores bare file names: every file must be in the folder of the .par file.");
                 }
 
                 return new ParCreatePlan
@@ -190,6 +267,7 @@ public static partial class ParClient
                     Code = "Reed-Solomon (GF(2^8), one block per file)",
                     MaxInputBlocks = files.Count,
                     Warnings = warnings,
+                    Errors = errors,
                 };
             }
 
@@ -199,7 +277,7 @@ public static partial class ParClient
                 long size = request.BlockSize ?? Par2Creator.ChooseSliceSize(nonEmpty, request.BlockCount ?? 2000);
                 if (size <= 0 || size % 4 != 0)
                 {
-                    warnings.Add("The PAR2 block size must be a positive multiple of 4.");
+                    errors.Add("The PAR2 block size must be a positive multiple of 4.");
                     size = Math.Max(4, (size + 3) / 4 * 4);
                 }
 
@@ -208,12 +286,12 @@ public static partial class ParClient
                 int recovery = Recovery(blocks, 0);
                 if (blocks > Par2Math.MaxInputSlices)
                 {
-                    warnings.Add($"PAR2 allows at most {Par2Math.MaxInputSlices:N0} input blocks; this is {blocks:N0}. Use a larger block size.");
+                    errors.Add($"PAR2 allows at most {Par2Math.MaxInputSlices:N0} input blocks; this is {blocks:N0}. Use a larger block size.");
                 }
 
                 if ((long)request.FirstRecoveryBlock + recovery > 65535)
                 {
-                    warnings.Add("PAR2 recovery block numbers must stay below 65,535: use fewer recovery blocks or a lower first block.");
+                    errors.Add("PAR2 recovery block numbers must stay below 65,535: use fewer recovery blocks or a lower first block.");
                 }
 
                 return new ParCreatePlan
@@ -227,6 +305,7 @@ public static partial class ParClient
                     Code = "Reed-Solomon (GF(2^16))",
                     MaxInputBlocks = Math.Min(Par2Math.MaxInputSlices, nonEmpty.Sum(l => (l + 3) / 4)),
                     Warnings = warnings,
+                    Errors = errors,
                 };
             }
 
@@ -235,7 +314,7 @@ public static partial class ParClient
                 ulong size = request.BlockSize is long bs ? (ulong)bs : Par3Creator.ChooseBlockSize(lengths.Sum(), request.BlockCount ?? 2000);
                 if (size == 0 || size % 8 != 0)
                 {
-                    warnings.Add("The PAR3 block size must be a positive multiple of 8.");
+                    errors.Add("The PAR3 block size must be a positive multiple of 8.");
                     size = Math.Max(8, (size + 7) / 8 * 8);
                 }
 
@@ -245,7 +324,7 @@ public static partial class ParClient
                 var code = Par3Creator.ResolveCode(request.Par3Code, (ulong)blocks, recovery);
                 if (code == Par3Code.Fft && Math.Max(recovery, request.Par3MaxRecoveryBlocks ?? 0) > blocks)
                 {
-                    warnings.Add("The FFT code needs at least as many input blocks as recovery blocks: use the Cauchy code or fewer recovery blocks.");
+                    errors.Add("The FFT code needs at least as many input blocks as recovery blocks: use the Cauchy code or fewer recovery blocks.");
                 }
                 else if (code == Par3Code.Cauchy && (ulong)blocks + (ulong)request.FirstRecoveryBlock + (ulong)recovery > 65535)
                 {
@@ -254,7 +333,13 @@ public static partial class ParClient
 
                 if (request.Par3Dedup != Par3Dedup.None)
                 {
-                    warnings.Add("Deduplication can lower the number of input blocks; these numbers are without it.");
+                    warnings.Add("Deduplication stores blocks with the same content once, but which blocks are the same is only known when the files are read. "
+                        + "So these numbers are without it: the real set can have fewer blocks and smaller recovery files.");
+                }
+
+                if (request.Par3StoreData)
+                {
+                    warnings.Add($"Store data copies all {FormatBytes(files.Sum(f => f.Length))} of your files into the PAR files, on top of the recovery data.");
                 }
 
                 return new ParCreatePlan
@@ -268,9 +353,25 @@ public static partial class ParClient
                     Code = Par3Creator.DescribeCode(code, (ulong)blocks, recovery, (ulong)request.FirstRecoveryBlock, request.Par3MaxRecoveryBlocks, request.Par3Interleave),
                     MaxInputBlocks = Math.Min(Par3MaxPlannedBlocks, (long)Par3Creator.CountBlocks(lengths, Par3MinBlockSize, request.Par3PackTails)),
                     Warnings = warnings,
+                    Errors = errors,
                 };
             }
         }
+    }
+
+    /// <summary>Bytes in KiB/MiB/GiB for messages: 1536 → "1.5 KiB".</summary>
+    internal static string FormatBytes(long bytes)
+    {
+        string[] units = ["bytes", "KiB", "MiB", "GiB", "TiB"];
+        double v = bytes;
+        int u = 0;
+        while (v >= 1024 && u < units.Length - 1)
+        {
+            v /= 1024;
+            u++;
+        }
+
+        return u == 0 ? $"{bytes:N0} bytes" : $"{v:0.##} {units[u]}";
     }
 
     /// <summary>The recovery file scheme a request asks for.</summary>

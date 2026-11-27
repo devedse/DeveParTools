@@ -66,7 +66,7 @@ public sealed class ParRepairReport
 }
 
 /// <summary>Options for <see cref="ParClient.Create"/>. Format-specific options are ignored by other formats.</summary>
-public sealed class ParCreateRequest
+public sealed record ParCreateRequest
 {
     /// <summary>Files (and, for PAR3, directories) to protect.</summary>
     public required IReadOnlyList<string> Inputs { get; init; }
@@ -270,63 +270,86 @@ public static partial class ParClient
         {
             case ParFormat.Par1:
             {
-                var files = ExpandFiles(request.Inputs, request.Recursive);
-                int volumes = request.RecoveryBlockCount ?? Math.Max(1, (int)Math.Ceiling(files.Count * request.RedundancyPercent / 100));
-                var written = Par1Set.Create(new Par1CreateOptions { InputFiles = files, OutputPath = request.OutputPath, RecoveryVolumes = volumes, Comment = request.Comment }, context);
+                var options = ToPar1Options(request);
+                var written = Par1Set.Create(options, context);
                 // Every file is one block; the recovery volumes are as large as the largest file.
-                return new ParCreateReport(format, written, files.Max(f => new FileInfo(f).Length), files.Count, volumes, "PAR1 Reed-Solomon (GF(2^8), one block per file)");
+                return new ParCreateReport(format, written, options.InputFiles.Max(f => new FileInfo(f).Length), options.InputFiles.Count, options.RecoveryVolumes, "PAR1 Reed-Solomon (GF(2^8), one block per file)");
             }
 
             case ParFormat.Par2:
             {
-                var r = Par2Creator.Create(new Par2CreateOptions
-                {
-                    InputFiles = ExpandFiles(request.Inputs, request.Recursive),
-                    OutputPath = request.OutputPath,
-                    BaseDirectory = request.BaseDirectory,
-                    SliceSize = request.BlockSize,
-                    SliceCount = request.BlockCount ?? 2000,
-                    RecoverySliceCount = request.RecoveryBlockCount,
-                    RedundancyPercent = request.RedundancyPercent,
-                    FirstExponent = request.FirstRecoveryBlock,
-                    Scheme = SchemeOf(request),
-                    VolumeCount = request.VolumeCount,
-                    Comment = request.Comment,
-                }, context);
+                var r = Par2Creator.Create(ToPar2Options(request), context);
                 return new ParCreateReport(format, r.WrittenFiles, r.SliceSize, r.InputSlices, r.RecoverySlices, "PAR2 Reed-Solomon (GF(2^16))");
             }
 
             default:
             {
-                var r = Par3Creator.Create(new Par3CreateOptions
-                {
-                    Inputs = request.Inputs,
-                    OutputPath = request.OutputPath,
-                    BaseDirectory = request.BaseDirectory,
-                    Recursive = request.Recursive,
-                    BlockSize = request.BlockSize is long bs ? (ulong)bs : null,
-                    BlockCount = request.BlockCount ?? 2000,
-                    RecoveryBlockCount = request.RecoveryBlockCount,
-                    RedundancyPercent = request.RedundancyPercent,
-                    FirstRecoveryBlock = (ulong)request.FirstRecoveryBlock,
-                    MaxRecoveryBlocks = request.Par3MaxRecoveryBlocks,
-                    Code = request.Par3Code,
-                    Dedup = request.Par3Dedup,
-                    PackTails = request.Par3PackTails,
-                    StoreData = request.Par3StoreData,
-                    VolumeCount = request.VolumeCount,
-                    Scheme = SchemeOf(request),
-                    Comment = request.Comment,
-                    UnixPermissions = request.Par3UnixPermissions,
-                    FatPermissions = request.Par3FatPermissions,
-                    Reproducible = request.Par3Reproducible,
-                    Interleave = request.Par3Interleave,
-                    CauchyConvention = request.Par3CauchyConvention,
-                }, context);
+                var r = Par3Creator.Create(ToPar3Options(request), context);
                 return new ParCreateReport(format, r.WrittenFiles, (long)r.BlockSize, (long)r.InputBlocks, r.RecoveryBlocks, r.CodeDescription);
             }
         }
     }
+
+    /// <summary>The files <see cref="Create"/> writes for a request and their exact sizes (see the formats' PlanFileSizes).</summary>
+    internal static IReadOnlyList<OutputFileSize> PlanFileSizes(ParCreateRequest request, ParFormat format) => format switch
+    {
+        ParFormat.Par1 => Par1Set.PlanFileSizes(ToPar1Options(request)),
+        ParFormat.Par2 => Par2Creator.PlanFileSizes(ToPar2Options(request)),
+        _ => Par3Creator.PlanFileSizes(ToPar3Options(request)),
+    };
+
+    private static Par1CreateOptions ToPar1Options(ParCreateRequest request)
+    {
+        var files = ExpandFiles(request.Inputs, request.Recursive);
+        return new Par1CreateOptions
+        {
+            InputFiles = files,
+            OutputPath = request.OutputPath,
+            RecoveryVolumes = request.RecoveryBlockCount ?? Math.Max(1, (int)Math.Ceiling(files.Count * request.RedundancyPercent / 100)),
+            Comment = request.Comment,
+        };
+    }
+
+    private static Par2CreateOptions ToPar2Options(ParCreateRequest request) => new()
+    {
+        InputFiles = ExpandFiles(request.Inputs, request.Recursive),
+        OutputPath = request.OutputPath,
+        BaseDirectory = request.BaseDirectory,
+        SliceSize = request.BlockSize,
+        SliceCount = request.BlockCount ?? 2000,
+        RecoverySliceCount = request.RecoveryBlockCount,
+        RedundancyPercent = request.RedundancyPercent,
+        FirstExponent = request.FirstRecoveryBlock,
+        Scheme = SchemeOf(request),
+        VolumeCount = request.VolumeCount,
+        Comment = request.Comment,
+    };
+
+    private static Par3CreateOptions ToPar3Options(ParCreateRequest request) => new()
+    {
+        Inputs = request.Inputs,
+        OutputPath = request.OutputPath,
+        BaseDirectory = request.BaseDirectory,
+        Recursive = request.Recursive,
+        BlockSize = request.BlockSize is long bs ? (ulong)bs : null,
+        BlockCount = request.BlockCount ?? 2000,
+        RecoveryBlockCount = request.RecoveryBlockCount,
+        RedundancyPercent = request.RedundancyPercent,
+        FirstRecoveryBlock = (ulong)request.FirstRecoveryBlock,
+        MaxRecoveryBlocks = request.Par3MaxRecoveryBlocks,
+        Code = request.Par3Code,
+        Dedup = request.Par3Dedup,
+        PackTails = request.Par3PackTails,
+        StoreData = request.Par3StoreData,
+        VolumeCount = request.VolumeCount,
+        Scheme = SchemeOf(request),
+        Comment = request.Comment,
+        UnixPermissions = request.Par3UnixPermissions,
+        FatPermissions = request.Par3FatPermissions,
+        Reproducible = request.Par3Reproducible,
+        Interleave = request.Par3Interleave,
+        CauchyConvention = request.Par3CauchyConvention,
+    };
 
     /// <summary>
     /// Adds recovery blocks to an existing set whose input files are all present. The new blocks go to new recovery

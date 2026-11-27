@@ -104,6 +104,9 @@ public sealed class Par3CreateResult
     public required string CodeDescription { get; init; }
 
     public required IReadOnlyList<string> WrittenFiles { get; init; }
+
+    /// <summary>Set by <see cref="Par3Creator.PlanFileSizes"/>: the files and sizes that would be written.</summary>
+    internal IReadOnlyList<OutputFileSize>? PlannedSizes { get; init; }
 }
 
 /// <summary>Creates PAR 3.0 recovery sets.</summary>
@@ -146,7 +149,23 @@ public static class Par3Creator
         public List<byte[]> OptionPackets { get; } = new();
     }
 
-    public static Par3CreateResult Create(Par3CreateOptions options, OperationContext? context = null)
+    public static Par3CreateResult Create(Par3CreateOptions options, OperationContext? context = null) => Run(options, context, sizesOnly: false);
+
+    /// <summary>
+    /// The files <see cref="Create"/> writes and their exact sizes, without reading the input files: the same steps
+    /// build the same packets, with zero checksums (the sizes do not depend on them), and then the sizes are added up
+    /// instead of written. Deduplication needs the contents, so it is left out (with it the set can be smaller).
+    /// </summary>
+    /// <remarks>
+    /// <para>The index file holds every vital packet once (Start, Matrix, the block checksums in External Data packets,
+    /// options, File, Directory and Root packets, the comment) plus the creator. A recovery file holds its recovery
+    /// blocks (an 88-byte packet header + the block each), copies of all vital packets (see <see cref="VitalCopiesPerFile"/>)
+    /// and the creator. The block checksums are 24 bytes per input block, and every recovery file carries them: with
+    /// 32,000 blocks of 216 bytes that is 768 KB per copy, which dwarfs a recovery file of a few blocks.</para>
+    /// </remarks>
+    public static IReadOnlyList<OutputFileSize> PlanFileSizes(Par3CreateOptions options) => Run(options, null, sizesOnly: true).PlannedSizes!;
+
+    private static Par3CreateResult Run(Par3CreateOptions options, OperationContext? context, bool sizesOnly)
     {
         context ??= OperationContext.Default;
         var observer = context.Observer;
@@ -169,9 +188,21 @@ public static class Par3Creator
             throw new ArgumentException("Block size must be a positive multiple of 8.");
         }
 
-        // 2. Hash every file once: block checksums, tails, file hash, 16 KiB rolling hash.
-        observer.Stage("Hashing");
-        HashFiles(files, blockSize, context);
+        // 2. Hash every file once: block checksums, tails, file hash, 16 KiB rolling hash. (Sizes only: just the shapes.)
+        if (sizesOnly)
+        {
+            foreach (var f in files)
+            {
+                ulong tail = (ulong)f.Length % blockSize;
+                f.BlockChecks = new BlockChecksum[(ulong)f.Length / blockSize];
+                f.InlineTail = tail is > 0 and < Par3Chunk.InlineLimit ? new byte[tail] : null;
+            }
+        }
+        else
+        {
+            observer.Stage("Hashing");
+            HashFiles(files, blockSize, context);
+        }
 
         // 3. Block numbering (with optional deduplication) and tail packing.
         var blockPieces = new List<List<(ulong BlockOffset, ulong Length, PieceSource Source)>>();
@@ -184,7 +215,7 @@ public static class Par3Creator
             for (int b = 0; b < full; b++)
             {
                 var check = f.BlockChecks[b];
-                if (options.Dedup == Par3Dedup.Blocks && dedup.TryGetValue(check.Hash, out var existing) && blockChecks[(int)existing]!.Value.Crc64 == check.Crc64)
+                if (options.Dedup == Par3Dedup.Blocks && !sizesOnly && dedup.TryGetValue(check.Hash, out var existing) && blockChecks[(int)existing]!.Value.Crc64 == check.Crc64)
                 {
                     f.BlockIndices[b] = existing;
                     continue;
@@ -236,8 +267,12 @@ public static class Par3Creator
         {
             if (blockChecks[i] == null)
             {
-                blockSource.Read(i, 0, buf);
-                blockChecks[i] = new BlockChecksum(Crc64Iso.Compute(buf), Fingerprint.Compute(buf));
+                if (!sizesOnly)
+                {
+                    blockSource.Read(i, 0, buf);
+                }
+
+                blockChecks[i] = sizesOnly ? default : new BlockChecksum(Crc64Iso.Compute(buf), Fingerprint.Compute(buf));
             }
         }
 
@@ -266,7 +301,7 @@ public static class Par3Creator
 
         // 5. Packets.
         observer.Stage("Writing metadata");
-        ulong unique = options.Reproducible ? ReproducibleUnique(files, blockSize, generator) : BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
+        ulong unique = sizesOnly ? 0 : options.Reproducible ? ReproducibleUnique(files, blockSize, generator) : BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
         var startBody = Par3PacketWriter.StartBody(default, default, blockSize, generator);
         var setId = Par3PacketWriter.ComputeSetId(unique, startBody);
         var vital = new List<byte[]>
@@ -320,9 +355,30 @@ public static class Par3Creator
         var creatorPacket = Par3PacketWriter.Text(setId, Par3PacketTypes.Creator, options.Creator);
 
         // 6. Recovery data.
+        var volumes = PlanVolumes(outputPath, options.Scheme, options.VolumeCount, options.FirstRecoveryBlock, recoveryCount, ".vol", LimitBlocks(files.Select(f => f.Length).DefaultIfEmpty(0).Max(), blockSize));
+        if (sizesOnly)
+        {
+            long vitalBytes = vital.Sum(p => (long)p.Length);
+            long creatorBytes = creatorPacket.Length;
+            var sizes = new List<OutputFileSize> { new(outputPath, vitalBytes + creatorBytes, 0) };
+            if (recoveryCount > 0)
+            {
+                int copies = VitalCopiesPerFile(vital.Count, recoveryCount, blockCount, volumes.Count);
+                long header = Par3PacketWriter.RecoveryDataHeader(setId, rootChecksum, matrixChecksum, 0, (long)blockSize).Length;
+                sizes.AddRange(volumes.Select(v => new OutputFileSize(v.Path, v.Count * (header + (long)blockSize) + copies * vitalBytes + creatorBytes, v.Count)));
+            }
+
+            if (options.StoreData && blockCount > 0)
+            {
+                long header = Par3PacketWriter.DataHeader(setId, 0, (long)blockSize).Length;
+                sizes.AddRange(PlanDataParts(outputPath, options, blockCount).Select(p => new OutputFileSize(p.Path, p.Count * (header + (long)blockSize) + vitalBytes + creatorBytes, 0)));
+            }
+
+            return new Par3CreateResult { SetId = setId, BlockSize = blockSize, InputBlocks = blockCount, RecoveryBlocks = recoveryCount, CodeDescription = Describe(fftLayout, generator), WrittenFiles = [], PlannedSizes = sizes };
+        }
+
         var map = context.CreateBlockMap((int)blockCount, recoveryCount);
         var written = new List<string> { outputPath };
-        var volumes = PlanVolumes(outputPath, options.Scheme, options.VolumeCount, options.FirstRecoveryBlock, recoveryCount, ".vol", LimitBlocks(files.Select(f => f.Length).DefaultIfEmpty(0).Max(), blockSize));
         var recoveryIndices = Enumerable.Range(0, recoveryCount).Select(i => options.FirstRecoveryBlock + (ulong)i).ToList();
         if (recoveryCount > 0)
         {
@@ -727,6 +783,21 @@ public static class Par3Creator
         return result;
     }
 
+    /// <summary>
+    /// Copies of the vital packets in every recovery file: <see cref="VitalCopies"/> for a loss rate of recovery ÷ input
+    /// blocks (at least 1%), spread over the files, at least one each. Example: 50 vital packets at 100% redundancy need
+    /// 26 copies; over 15 files that is 2 copies in every file.
+    /// </summary>
+    internal static int VitalCopiesPerFile(int vitalPackets, int recoveryCount, ulong blockCount, int files)
+    {
+        int copies = VitalCopies(vitalPackets, Math.Max(0.01, (double)recoveryCount / Math.Max(1, (double)blockCount)));
+        return Math.Max(1, (copies + files - 1) / Math.Max(1, files));
+    }
+
+    /// <summary>The data parts of archive mode: equal parts when a file count is given, else 1, 2, 4, ... blocks per part.</summary>
+    private static List<Volume> PlanDataParts(string outputPath, Par3CreateOptions options, ulong blockCount)
+        => PlanVolumes(outputPath, options.VolumeCount is > 0 ? RecoveryFileScheme.Uniform : RecoveryFileScheme.Exponential, options.VolumeCount, 0, (int)blockCount, ".part", long.MaxValue);
+
     /// <summary>Copies of each vital packet needed for a 1-in-a-million loss chance (spec Appendix D).</summary>
     internal static int VitalCopies(int vitalPackets, double failureRate)
     {
@@ -784,8 +855,7 @@ public static class Par3Creator
             }
 
             // Vital packets after the recovery data, repeated per spec Appendix D.
-            int copies = VitalCopies(vital.Count, Math.Max(0.01, (double)recoveryCount / Math.Max(1, (double)blockCount)));
-            int perFile = Math.Max(1, (copies + volumes.Count - 1) / Math.Max(1, volumes.Count));
+            int perFile = VitalCopiesPerFile(vital.Count, recoveryCount, blockCount, volumes.Count);
             foreach (var s in streams)
             {
                 s.Seek(0, SeekOrigin.End);
@@ -811,8 +881,7 @@ public static class Par3Creator
 
     private static List<string> WriteDataPackets(InputSetId setId, string outputPath, ulong blockCount, Par3BlockSource blocks, ulong blockSize, List<byte[]> vital, byte[] creator, Par3CreateOptions options)
     {
-        // Data parts: equal parts when a file count is given, else 1, 2, 4, ... blocks per part.
-        var parts = PlanVolumes(outputPath, options.VolumeCount is > 0 ? RecoveryFileScheme.Uniform : RecoveryFileScheme.Exponential, options.VolumeCount, 0, (int)blockCount, ".part", long.MaxValue);
+        var parts = PlanDataParts(outputPath, options, blockCount);
         var buf = new byte[blockSize];
         foreach (var part in parts)
         {
