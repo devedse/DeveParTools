@@ -5,6 +5,7 @@ using DeveParTools.Core.Codes;
 using DeveParTools.Core.Galois;
 using DeveParTools.Core.IO;
 using DeveParTools.Core.Operations;
+using DeveParTools.Core.Util;
 
 namespace DeveParTools.Par1;
 
@@ -65,12 +66,14 @@ public sealed class Par1File
         var control = MD5.HashData(fs);
         bool controlOk = control.AsSpan().SequenceEqual(h.AsSpan(0x10, 16));
 
+        // The header fields are unsigned 64-bit values. Read as long, a damaged value of 2^63 or more turns negative,
+        // and "offset + size" could overflow, so every range is checked as "size <= length - offset".
         long count = (long)BinaryPrimitives.ReadUInt64LittleEndian(h.AsSpan(0x38));
         long listOffset = (long)BinaryPrimitives.ReadUInt64LittleEndian(h.AsSpan(0x40));
         long listSize = (long)BinaryPrimitives.ReadUInt64LittleEndian(h.AsSpan(0x48));
         long dataOffset = (long)BinaryPrimitives.ReadUInt64LittleEndian(h.AsSpan(0x50));
         long dataSize = (long)BinaryPrimitives.ReadUInt64LittleEndian(h.AsSpan(0x58));
-        if (listOffset < HeaderSize || listOffset + listSize > fs.Length || count < 0 || count > 1 << 16)
+        if (listOffset < HeaderSize || listSize < 0 || listSize > fs.Length - listOffset || count < 0 || count > 1 << 16)
         {
             return null;
         }
@@ -101,7 +104,7 @@ public sealed class Par1File
 
         ulong volume = BinaryPrimitives.ReadUInt64LittleEndian(h.AsSpan(0x30));
         string? comment = null;
-        if (volume == 0 && dataSize > 0 && dataOffset + dataSize <= fs.Length)
+        if (volume == 0 && dataSize > 0 && dataOffset >= 0 && dataSize <= fs.Length - dataOffset)
         {
             var c = new byte[dataSize];
             fs.Position = dataOffset;
@@ -183,6 +186,15 @@ public sealed class Par1File
 /// files are padded with zeros up to the largest file. Example: volume 1 is the plain XOR of all files
 /// (every coefficient is j^0 = 1); volume 2 is <c>1·D1 ^ 2·D2 ^ 3·D3 ...</c>.
 /// </summary>
+/// <remarks>
+/// <para><b>Known flaw of the format.</b> Repairing L missing files with L volumes inverts the L×L matrix
+/// <c>A[r][c] = j_c^(v_r − 1)</c>. For consecutive volumes this is a Vandermonde matrix and always invertible, but
+/// for volumes with gaps it can be singular (the flaw Plank corrected in 2003). The smallest example: files 7 and 24
+/// missing, only volumes 1 and 4 left. Then</para>
+/// <code>det A = 7^0·24^3 − 7^3·24^0 = 24^3 + 7^3 = 0     because (24/7)^3 = 1 in GF(2^8)</code>
+/// <para>(24/7 = 214 = 2^85 has order 3), so those two files cannot be rebuilt from those two volumes, although
+/// the counts match. <see cref="Par1Set.Repair"/> then fails instead of writing wrong data.</para>
+/// </remarks>
 public static class Par1Math
 {
     public static GaloisField8 Field => GaloisField8.Default;
@@ -239,6 +251,19 @@ public sealed class Par1VerifyResult
 /// <summary>Create, verify and repair PAR 1.0 sets (whole files are the recovery unit).</summary>
 public static class Par1Set
 {
+    /// <summary>Creates the .par index file and <see cref="Par1CreateOptions.RecoveryVolumes"/> .pXX volumes.</summary>
+    /// <remarks>
+    /// PAR1 stores bare file names (no directories) and <see cref="Verify"/> looks for the files next to the .par file,
+    /// so every input must be in the directory of <see cref="Par1CreateOptions.OutputPath"/> and no two inputs may
+    /// have the same name. For example, with the output "/data/set.par":
+    /// <code>
+    /// /data/a.bin, /data/b.bin        ok
+    /// /data/a.bin, /data/sub/c.bin    ArgumentException: "/data/sub/c.bin" is not in "/data"
+    /// /data/a.bin, /other/a.bin       ArgumentException: the name "a.bin" occurs twice
+    /// </code>
+    /// </remarks>
+    /// <exception cref="ArgumentException">No inputs, too many files plus volumes, duplicate names, or an input outside
+    /// the directory of the .par file.</exception>
     public static IReadOnlyList<string> Create(Par1CreateOptions options, OperationContext? context = null)
     {
         context ??= OperationContext.Default;
@@ -246,6 +271,23 @@ public static class Par1Set
         if (files.Count == 0 || files.Count + options.RecoveryVolumes > 255 || options.RecoveryVolumes < 0)
         {
             throw new ArgumentException("PAR1 needs 1..255 files plus volumes in total.");
+        }
+
+        var duplicate = files.GroupBy(Path.GetFileName, StringComparer.Ordinal).FirstOrDefault(g => g.Count() > 1);
+        if (duplicate != null)
+        {
+            throw new ArgumentException($"PAR1 stores bare file names, but the name '{duplicate.Key}' occurs more than once: {string.Join(", ", duplicate)}.", nameof(options));
+        }
+
+        var outputDir = Path.GetDirectoryName(Path.GetFullPath(options.OutputPath))!;
+        foreach (var f in files)
+        {
+            // GetRelativePath compares with the platform's case rules; it gives just the name only for a file
+            // directly inside outputDir.
+            if (Path.GetRelativePath(outputDir, f) != Path.GetFileName(f))
+            {
+                throw new ArgumentException($"PAR1 stores bare file names, so every input must be in the directory of the .par file ('{outputDir}'), but '{f}' is not.", nameof(options));
+            }
         }
 
         context.Observer.Stage("Hashing");
@@ -330,6 +372,8 @@ public static class Par1Set
             }
         }
 
+        // Directory order is arbitrary; volume order makes the result (and the block map) deterministic.
+        volumes.Sort((a, b) => a.VolumeNumber.CompareTo(b.VolumeNumber));
         var map = context.CreateBlockMap(index.Files.Count, volumes.Count);
         for (int i = 0; i < volumes.Count; i++)
         {
@@ -342,7 +386,7 @@ public static class Par1Set
         for (int i = 0; i < index.Files.Count; i++)
         {
             var e = index.Files[i];
-            var target = Path.Combine(dir, Path.GetFileName(e.Name));
+            var target = TargetPathOf(dir, e.Name);
             var fv = new Par1FileVerification { Entry = e, TargetPath = target };
             map.Ownership[i] = [new BlockLocation(target, 0, (int)Math.Min(int.MaxValue, e.Size))];
             if (!File.Exists(target))
@@ -354,7 +398,8 @@ public static class Par1Set
                 fv.Status = new FileInfo(target).Length == e.Size && Md5Of(target).AsSpan().SequenceEqual(e.Md5) ? Par1FileStatus.Complete : Par1FileStatus.Damaged;
             }
 
-            if (fv.Status != Par1FileStatus.Complete)
+            // A file without a usable name can never be restored, so a copy of it elsewhere does not help.
+            if (fv.Status != Par1FileStatus.Complete && target.Length > 0)
             {
                 // Renamed copy? Compare size and the 16 KiB hash first (cheap), then the full MD5.
                 foreach (var c in candidates)
@@ -383,6 +428,22 @@ public static class Par1Set
         return result;
     }
 
+    /// <summary>
+    /// Where the file of a stored name belongs: in <paramref name="dir"/>, under the part of the name after the last
+    /// '/' or '\' (PAR1 has no directories). Names that are not a plain file name ("", ".", "..", "C:x", ...) give an
+    /// empty path, so a crafted .par file cannot make Repair write outside the directory.
+    /// </summary>
+    /// <example><c>"a.bin"</c> → "dir/a.bin"; <c>"sub\a.bin"</c> → "dir/a.bin"; <c>".."</c> → "".</example>
+    internal static string TargetPathOf(string dir, string storedName)
+    {
+        var name = storedName[(storedName.LastIndexOfAny(['/', '\\']) + 1)..];
+        return PathSafety.TryResolveUnder(dir, name, out var path, out _) ? path : string.Empty;
+    }
+
+    /// <summary>
+    /// Restores renamed copies, then rebuilds the missing saved files from the recovery volumes. Returns true when
+    /// every file is complete afterwards.
+    /// </summary>
     public static bool Repair(Par1VerifyResult verify, OperationContext? context = null)
     {
         context ??= OperationContext.Default;
@@ -459,7 +520,7 @@ public static class Par1Set
         {
             var f = saved[missing[j]];
             var data = d[j].AsSpan(0, (int)f.Entry.Size);
-            if (!MD5.HashData(data).AsSpan().SequenceEqual(f.Entry.Md5))
+            if (f.TargetPath.Length == 0 || !MD5.HashData(data).AsSpan().SequenceEqual(f.Entry.Md5))
             {
                 ok = false;
                 continue;
