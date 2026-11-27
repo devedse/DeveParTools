@@ -154,8 +154,9 @@
             </ItemsControl.ItemTemplate>
           </ItemsControl>
           <ScrollViewer Grid.Row="2" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
-            <c:BlockGrid x:Name="Grid" Map="{Binding Map}" Version="{Binding MapVersion}" CellSize="{Binding CellSize}"
-                         Highlight="{Binding Highlight}" HiddenStates="{Binding HiddenStates}" SelectedBlock="{Binding SelectedBlock}" />
+            <c:BlockGrid Map="{Binding Map}" Version="{Binding MapVersion}" CellSize="{Binding CellSize}"
+                         Highlight="{Binding Highlight}" HiddenStates="{Binding HiddenStates}" SelectedBlock="{Binding SelectedBlock}"
+                         SelectedBlockDescription="{Binding SelectedBlockInfo}" />
           </ScrollViewer>
           <TextBlock Grid.Row="3" Classes="Caption" Text="{Binding SelectedBlockInfo}" TextWrapping="Wrap" />
         </Grid>

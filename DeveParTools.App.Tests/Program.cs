@@ -125,6 +125,10 @@ if (shell.Verify.Report is not { AllFilesComplete: false, RepairPossible: true }
 }
 
 Check(shell.Verify.Report is { AllFilesComplete: false, RepairPossible: true }, "damage detected, repair possible");
+shell.Verify.SelectedBlock = 0;
+Settle();
+Check(shell.Verify.SelectedBlockInfo?.StartsWith("Block", StringComparison.Ordinal) == true, "the grid describes the selected block to the view model: " + shell.Verify.SelectedBlockInfo?.Split('\n')[0]);
+shell.Verify.SelectedBlock = -1;
 shell.Verify.SelectedFile = shell.Verify.Files.First(f => !f.IsOk);
 Save(window, output, "verify-damaged");
 Application.Current!.RequestedThemeVariant = ThemeVariant.Dark;
@@ -411,7 +415,7 @@ static void Save(Window window, string output, string name)
 }
 
 /// <summary>Dialogs for the checks: confirms everything, picks nothing.</summary>
-internal sealed class ConfirmingDialogs : IFileDialogs
+internal sealed class ConfirmingDialogs : IViewServices
 {
     public Task<IReadOnlyList<string>> OpenFilesAsync(string title, bool multiple, IReadOnlyList<string>? patterns = null) => Task.FromResult<IReadOnlyList<string>>([]);
 

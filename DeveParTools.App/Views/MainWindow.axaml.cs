@@ -7,27 +7,10 @@ using FluentAvalonia.UI.Controls;
 
 namespace DeveParTools.App.Views;
 
-/// <summary>The shell window: navigation selection, Mica backdrop and the native file pickers.</summary>
-public sealed partial class MainWindow : Window, IFileDialogs
+/// <summary>The shell window: the Mica backdrop, and the view services (pickers, dialogs, links) for the view models.</summary>
+public sealed partial class MainWindow : Window, IViewServices
 {
-    public MainWindow()
-    {
-        InitializeComponent();
-        Navigation.SelectionChanged += (_, e) =>
-        {
-            if (DataContext is ShellViewModel shell && e.SelectedItem is FANavigationViewItem { Tag: string tag } && Enum.TryParse<AppPage>(tag, out var page))
-            {
-                shell.Page = page;
-            }
-        };
-        // Select the page the view model starts on (Verify, or Create when started with --create).
-        Opened += (_, _) =>
-        {
-            var items = Navigation.MenuItems.Concat(Navigation.FooterMenuItems).OfType<FANavigationViewItem>().ToList();
-            var tag = (DataContext as ShellViewModel)?.Page.ToString();
-            Navigation.SelectedItem = items.FirstOrDefault(i => (string?)i.Tag == tag) ?? items.FirstOrDefault();
-        };
-    }
+    public MainWindow() => InitializeComponent();
 
     protected override void OnDataContextChanged(EventArgs e)
     {
@@ -35,19 +18,6 @@ public sealed partial class MainWindow : Window, IFileDialogs
         if (DataContext is ShellViewModel shell)
         {
             shell.SetDialogs(this);
-            // Keep the navigation selection in sync when the page is changed from code (e.g. opening a file).
-            shell.PropertyChanged += (_, e) =>
-            {
-                if (e.PropertyName == nameof(ShellViewModel.Page))
-                {
-                    var tag = shell.Page.ToString();
-                    var item = Navigation.MenuItems.Concat(Navigation.FooterMenuItems).OfType<FANavigationViewItem>().FirstOrDefault(i => (string?)i.Tag == tag);
-                    if (item != null && !ReferenceEquals(Navigation.SelectedItem, item))
-                    {
-                        Navigation.SelectedItem = item;
-                    }
-                }
-            };
         }
     }
 

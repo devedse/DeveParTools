@@ -44,3 +44,14 @@ public sealed class PercentConverter : IValueConverter
 
     public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) => throw new NotSupportedException();
 }
+
+/// <summary>Resolves an icon resource key (e.g. "IconSettings") to an icon for a navigation item.</summary>
+public sealed class ResourceIconSourceConverter : IValueConverter
+{
+    public static readonly ResourceIconSourceConverter Instance = new();
+
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => ResourceGeometryConverter.Instance.Convert(value, typeof(Geometry), parameter, culture) is Geometry g ? new FluentAvalonia.UI.Controls.FAPathIconSource { Data = g } : null;
+
+    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) => throw new NotSupportedException();
+}

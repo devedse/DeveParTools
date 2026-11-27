@@ -7,8 +7,8 @@ using DeveParTools.Core.Operations;
 
 namespace DeveParTools.App.ViewModels;
 
-/// <summary>File and folder pickers and confirmations, provided by the window.</summary>
-public interface IFileDialogs
+/// <summary>What view models need from the view: file and folder pickers, confirmations and opening links (the window implements it, tests fake it).</summary>
+public interface IViewServices
 {
     Task<IReadOnlyList<string>> OpenFilesAsync(string title, bool multiple, IReadOnlyList<string>? patterns = null);
 
@@ -86,7 +86,7 @@ public abstract partial class OperationViewModel : ObservableObject, IParOperati
 
     public SettingsViewModel Settings { get; }
 
-    public IFileDialogs? Dialogs { get; set; }
+    public IViewServices? Dialogs { get; set; }
 
     public ObservableCollection<LogLine> Log { get; } = new();
 
@@ -120,6 +120,7 @@ public abstract partial class OperationViewModel : ObservableObject, IParOperati
     [ObservableProperty]
     private int _selectedBlock = -1;
 
+    /// <summary>The selected block's details, written by the grid (BlockGrid.SelectedBlockDescription, one way to here).</summary>
     [ObservableProperty]
     private string? _selectedBlockInfo;
 
@@ -131,11 +132,6 @@ public abstract partial class OperationViewModel : ObservableObject, IParOperati
 
     [ObservableProperty]
     private int _recoveryUsed;
-
-    /// <summary>Formats a block description for the details pane (set by the view, which owns the grid).</summary>
-    public Func<int, string>? DescribeBlock { get; set; }
-
-    partial void OnSelectedBlockChanged(int value) => SelectedBlockInfo = value >= 0 ? DescribeBlock?.Invoke(value) : null;
 
     private void UpdateHidden() => HiddenStates = Legend.Where(l => !l.IsVisible).Select(l => l.State).ToHashSet();
 
@@ -212,10 +208,6 @@ public abstract partial class OperationViewModel : ObservableObject, IParOperati
             var rec = map.CountRecoveryStates();
             RecoveryTotal = map.RecoveryBlockCount;
             RecoveryUsed = rec[(int)RecoveryBlockState.Used];
-            if (SelectedBlock >= 0)
-            {
-                SelectedBlockInfo = DescribeBlock?.Invoke(SelectedBlock);
-            }
         }
     }
 

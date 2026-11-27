@@ -29,6 +29,12 @@ public sealed class BlockGrid : Control
     public static readonly StyledProperty<IReadOnlySet<BlockState>?> HiddenStatesProperty = AvaloniaProperty.Register<BlockGrid, IReadOnlySet<BlockState>?>(nameof(HiddenStates));
     public static readonly StyledProperty<int> SelectedBlockProperty = AvaloniaProperty.Register<BlockGrid, int>(nameof(SelectedBlock), -1, defaultBindingMode: Avalonia.Data.BindingMode.TwoWay);
 
+    /// <summary>
+    /// The selected block's details (<see cref="Describe"/>), kept up to date while the map changes. Binds one way
+    /// to the view model, which shows it without having to know how the grid groups blocks.
+    /// </summary>
+    public static readonly StyledProperty<string?> SelectedBlockDescriptionProperty = AvaloniaProperty.Register<BlockGrid, string?>(nameof(SelectedBlockDescription), defaultBindingMode: Avalonia.Data.BindingMode.OneWayToSource);
+
     private byte[] _states = [];
     private int _columns = 1;
     private int _group = 1;
@@ -56,6 +62,38 @@ public sealed class BlockGrid : Control
     public IReadOnlySet<BlockState>? HiddenStates { get => GetValue(HiddenStatesProperty); set => SetValue(HiddenStatesProperty, value); }
 
     public int SelectedBlock { get => GetValue(SelectedBlockProperty); set => SetValue(SelectedBlockProperty, value); }
+
+    public string? SelectedBlockDescription { get => GetValue(SelectedBlockDescriptionProperty); set => SetValue(SelectedBlockDescriptionProperty, value); }
+
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+    {
+        base.OnPropertyChanged(change);
+        if (change.Property == SelectedBlockProperty || change.Property == VersionProperty || change.Property == MapProperty)
+        {
+            UpdateSelectedBlockDescription();
+        }
+    }
+
+    private void UpdateSelectedBlockDescription()
+    {
+        var map = Map;
+        if (SelectedBlock < 0 || map is null || map.InputBlockCount == 0)
+        {
+            SelectedBlockDescription = null;
+            return;
+        }
+
+        // A fresh snapshot of the states (rendering may not have happened yet), and the grouping for the current width.
+        int n = map.InputBlockCount;
+        if (_states.Length != n)
+        {
+            _states = new byte[n];
+        }
+
+        map.CopyStates(_states);
+        Layout(n, Bounds.Width > 0 ? Bounds.Width : 600);
+        SelectedBlockDescription = Describe(SelectedBlock);
+    }
 
     /// <summary>Most important state first: what the grid shows for a group of blocks.</summary>
     public static int Severity(BlockState s) => s switch

@@ -2,6 +2,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:ui="using:FluentAvalonia.UI.Controls"
         xmlns:vm="using:DeveParTools.App.ViewModels"
+        xmlns:c="using:DeveParTools.App.Controls"
         x:Class="DeveParTools.App.Views.MainWindow"
         x:DataType="vm:ShellViewModel"
         Title="DeveParTools"
@@ -10,31 +11,23 @@
         WindowStartupLocation="CenterScreen"
         TransparencyLevelHint="Mica"
         Background="{DynamicResource SolidBackgroundFillColorBaseBrush}">
-  <ui:FANavigationView x:Name="Navigation"
-                       PaneDisplayMode="Auto"
+  <ui:FANavigationView PaneDisplayMode="Auto"
                        IsBackButtonVisible="False"
                        IsSettingsVisible="False"
                        IsPaneToggleButtonVisible="True"
                        OpenPaneLength="220"
                        CompactModeThresholdWidth="820"
                        ExpandedModeThresholdWidth="1100"
-                       PaneTitle="DeveParTools">
-    <ui:FANavigationView.MenuItems>
-      <ui:FANavigationViewItem Content="Verify &amp; repair" Tag="Verify" AutomationProperties.Name="Verify and repair">
-        <ui:FANavigationViewItem.IconSource><ui:FAPathIconSource Data="{StaticResource IconSafe}" /></ui:FANavigationViewItem.IconSource>
-      </ui:FANavigationViewItem>
-      <ui:FANavigationViewItem Content="Create" Tag="Create" AutomationProperties.Name="Create">
-        <ui:FANavigationViewItem.IconSource><ui:FAPathIconSource Data="{StaticResource IconAdd}" /></ui:FANavigationViewItem.IconSource>
-      </ui:FANavigationViewItem>
-      <ui:FANavigationViewItem Content="Benchmark" Tag="Benchmark" AutomationProperties.Name="Benchmark">
-        <ui:FANavigationViewItem.IconSource><ui:FAPathIconSource Data="{StaticResource IconActivity}" /></ui:FANavigationViewItem.IconSource>
-      </ui:FANavigationViewItem>
-    </ui:FANavigationView.MenuItems>
-    <ui:FANavigationView.FooterMenuItems>
-      <ui:FANavigationViewItem Content="Settings" Tag="Settings" AutomationProperties.Name="Settings">
-        <ui:FANavigationViewItem.IconSource><ui:FAPathIconSource Data="{StaticResource IconSettings}" /></ui:FANavigationViewItem.IconSource>
-      </ui:FANavigationViewItem>
-    </ui:FANavigationView.FooterMenuItems>
+                       PaneTitle="DeveParTools"
+                       MenuItemsSource="{Binding MenuPages}"
+                       FooterMenuItemsSource="{Binding FooterPages}"
+                       SelectedItem="{Binding SelectedNavigation}">
+    <ui:FANavigationView.MenuItemTemplate>
+      <DataTemplate x:DataType="vm:NavigationItem">
+        <ui:FANavigationViewItem Content="{Binding Title}" AutomationProperties.Name="{Binding Title}"
+                                 IconSource="{Binding IconKey, Converter={x:Static c:ResourceIconSourceConverter.Instance}}" />
+      </DataTemplate>
+    </ui:FANavigationView.MenuItemTemplate>
     <ContentControl Content="{Binding CurrentPage}" />
   </ui:FANavigationView>
 </Window>
