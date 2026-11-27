@@ -10,6 +10,7 @@ public sealed class Par3InteropTests
         var exe = ExternalTool.Find("DEVEPARTOOLS_PAR3CMDLINE", "par3");
         if (exe == null)
         {
+            yield return [string.Empty, Par3Code.Cauchy, "-e1"];
             yield break;
         }
 
@@ -56,6 +57,11 @@ public sealed class Par3InteropTests
     [DynamicData(nameof(Codes))]
     public void WeCreate_TheyVerifyAndRepair(string exe, Par3Code code, string flag)
     {
+        if (exe.Length == 0)
+        {
+            Assert.Inconclusive("par3cmdline not found (set DEVEPARTOOLS_PAR3CMDLINE or put par3 on the PATH).");
+        }
+
         var dir = NewDir();
         var files = MakeFiles(dir, 1);
         Par3Creator.Create(new Par3CreateOptions { Inputs = files.Keys.ToList(), OutputPath = Path.Combine(dir, "ours.par3"), BlockCount = 40, RecoveryBlockCount = 12, Code = code });
@@ -76,6 +82,11 @@ public sealed class Par3InteropTests
     [DynamicData(nameof(Codes))]
     public void TheyCreate_WeVerifyAndRepair(string exe, Par3Code code, string flag)
     {
+        if (exe.Length == 0)
+        {
+            Assert.Inconclusive("par3cmdline not found (set DEVEPARTOOLS_PAR3CMDLINE or put par3 on the PATH).");
+        }
+
         var dir = NewDir();
         var files = MakeFiles(dir, 2);
         var (rc, output) = ExternalTool.Run(exe, dir, "c", "-b40", "-c12", flag, "theirs.par3", "a.bin", "sub/b.bin", "t.bin");

@@ -18,6 +18,11 @@ public sealed class Par2InteropTests
         {
             yield return ["par2cmdline-turbo", turbo];
         }
+
+        if (reference == null && turbo == null)
+        {
+            yield return ["(none)", string.Empty];
+        }
     }
 
     private static string NewDir()
@@ -58,6 +63,11 @@ public sealed class Par2InteropTests
     [DynamicData(nameof(Tools))]
     public void WeCreate_TheyVerifyAndRepair(string toolName, string exe)
     {
+        if (exe.Length == 0)
+        {
+            Assert.Inconclusive("par2cmdline not found (set DEVEPARTOOLS_PAR2CMDLINE or put par2 on the PATH).");
+        }
+
         var dir = NewDir();
         var files = MakeFiles(dir, 1);
         Par2Creator.Create(new Par2CreateOptions
@@ -85,6 +95,11 @@ public sealed class Par2InteropTests
     [DynamicData(nameof(Tools))]
     public void TheyCreate_WeVerifyAndRepair(string toolName, string exe)
     {
+        if (exe.Length == 0)
+        {
+            Assert.Inconclusive("par2cmdline not found (set DEVEPARTOOLS_PAR2CMDLINE or put par2 on the PATH).");
+        }
+
         var dir = NewDir();
         var files = MakeFiles(dir, 2);
         var (code, output) = ExternalTool.Run(exe, dir, ["c", "-s8192", "-r25", "set.par2", .. files.Keys.Select(Path.GetFileName)!]);

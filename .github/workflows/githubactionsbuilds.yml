@@ -1,9 +1,14 @@
-# Purpose: build, test (incl. interop against par2cmdline), measure coverage, package and release DeveParTools.
+# Purpose: build, test (incl. interop against par2cmdline and par3cmdline), measure coverage, package and release DeveParTools.
 name: GitHubActionsBuilds
 
 on:
   push:
   workflow_dispatch:
+
+env:
+  PAR3CMDLINE_COMMIT: 6673827
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_NOLOGO: 1
 
 jobs:
   generate_version_number:
@@ -40,6 +45,14 @@ jobs:
     - name: Install par2cmdline (interop oracle)
       if: runner.os == 'macOS'
       run: brew install par2
+    - name: Build par3cmdline (interop oracle)
+      if: runner.os == 'Linux' && runner.arch == 'X64'
+      run: |
+        git clone https://github.com/Parchive/par3cmdline.git /tmp/par3cmdline
+        git -C /tmp/par3cmdline checkout ${{ env.PAR3CMDLINE_COMMIT }}
+        cmake -S /tmp/par3cmdline/src -B /tmp/par3build -DCMAKE_BUILD_TYPE=Release
+        cmake --build /tmp/par3build -j
+        echo "DEVEPARTOOLS_PAR3CMDLINE=/tmp/par3build/par3cmd/par3" >> $GITHUB_ENV
     - name: Show CPU features
       shell: bash
       run: |
@@ -51,9 +64,11 @@ jobs:
     - name: dotnet test
       shell: bash
       run: |
-        for p in DeveParTools.Core.Tests DeveParTools.Par2.Tests DeveParTools.InteropTests; do
+        for p in DeveParTools.Core.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests; do
           dotnet test --project $p/$p.csproj -c Release --no-build --verbosity normal
         done
+        # Interop tests are inconclusive (skipped) where the reference tools are not available.
+        dotnet test --project DeveParTools.InteropTests/DeveParTools.InteropTests.csproj -c Release --no-build --verbosity normal --ignore-exit-code 8
 
   build_linux_with_codecov:
     needs: generate_version_number
@@ -69,6 +84,13 @@ jobs:
         dotnet-version: 10.0.x
     - name: Install par2cmdline (interop oracle)
       run: sudo apt-get update -y && sudo apt-get install -y par2
+    - name: Build par3cmdline (interop oracle)
+      run: |
+        git clone https://github.com/Parchive/par3cmdline.git /tmp/par3cmdline
+        git -C /tmp/par3cmdline checkout ${{ env.PAR3CMDLINE_COMMIT }}
+        cmake -S /tmp/par3cmdline/src -B /tmp/par3build -DCMAKE_BUILD_TYPE=Release
+        cmake --build /tmp/par3build -j
+        echo "DEVEPARTOOLS_PAR3CMDLINE=/tmp/par3build/par3cmd/par3" >> $GITHUB_ENV
     - name: Install tools
       run: dotnet tool install --global dotnet-coverage
     - name: dotnet restore
@@ -79,7 +101,7 @@ jobs:
       run: |
         mkdir -p TestResults
         dotnet-coverage collect --settings coverage.runsettings.xml -f cobertura -o TestResults/coverage.cobertura.xml \
-          "bash -c 'for p in DeveParTools.Core.Tests DeveParTools.Par2.Tests DeveParTools.InteropTests; do dotnet test --project \$p/\$p.csproj -c Release --no-build || exit 1; done'"
+          "bash -c 'for p in DeveParTools.Core.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests DeveParTools.InteropTests; do dotnet test --project \$p/\$p.csproj -c Release --no-build || exit 1; done'"
     - name: Run CodeCov
       uses: codecov/codecov-action@v7
       with:
