@@ -69,14 +69,25 @@ public static class PathSafety
     }
 
     /// <summary>Relative '/'-separated name of <paramref name="path"/> below <paramref name="baseDirectory"/>.</summary>
+    /// <example>
+    /// <c>ToStoredName("/data", "/data/dir/file.bin")</c> is <c>"dir/file.bin"</c>; <c>"/data/..notes"</c> gives
+    /// <c>"..notes"</c> (a file name that merely starts with two dots); <c>"/other/file.bin"</c> throws, because the
+    /// relative path <c>"../other/file.bin"</c> leaves the base directory.
+    /// </example>
     public static string ToStoredName(string baseDirectory, string path)
     {
         var rel = Path.GetRelativePath(baseDirectory, path);
-        if (rel.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(rel))
+        if (LeavesTheBase(rel) || Path.IsPathRooted(rel))
         {
             throw new ArgumentException($"'{path}' is not below the base directory '{baseDirectory}'.");
         }
 
         return rel.Replace(Path.DirectorySeparatorChar, '/');
     }
+
+    /// <summary>True when the relative path's first segment is "..".</summary>
+    private static bool LeavesTheBase(string relativePath)
+        => relativePath == ".."
+           || relativePath.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+           || relativePath.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal);
 }

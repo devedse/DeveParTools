@@ -324,13 +324,9 @@ internal readonly unsafe struct Lanes4 : IBlake3Lanes<Vector128<uint>>
             return Ssse3.Shuffle(x.AsByte(), Vector128.Create((byte)2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13)).AsUInt32();
         }
 
-        if (AdvSimd.IsSupported)
-        {
-            // rev32 on 16-bit elements swaps the two halves of every word.
-            return AdvSimd.ReverseElement16(x.AsInt32()).AsUInt32();
-        }
-
-        return Vector128.ShiftRightLogical(x, 16) | Vector128.ShiftLeft(x, 16);
+        // ARM64: rev32 on 16-bit elements swaps the two halves of every word. Elsewhere (neither SSSE3 nor AdvSimd):
+        // two shifts and an OR.
+        return AdvSimd.IsSupported ? AdvSimd.ReverseElement16(x.AsInt32()).AsUInt32() : RorShift(x, 16, 16);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -351,12 +347,7 @@ internal readonly unsafe struct Lanes4 : IBlake3Lanes<Vector128<uint>>
             return Ssse3.Shuffle(x.AsByte(), mask).AsUInt32();
         }
 
-        if (AdvSimd.Arm64.IsSupported)
-        {
-            return AdvSimd.Arm64.VectorTableLookup(x.AsByte(), mask).AsUInt32();
-        }
-
-        return Vector128.ShiftRightLogical(x, 8) | Vector128.ShiftLeft(x, 24);
+        return AdvSimd.Arm64.IsSupported ? AdvSimd.Arm64.VectorTableLookup(x.AsByte(), mask).AsUInt32() : RorShift(x, 8, 24);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -413,20 +404,22 @@ internal readonly unsafe struct Lanes4 : IBlake3Lanes<Vector128<uint>>
             return;
         }
 
-        if (AdvSimd.Arm64.IsSupported)
-        {
-            // zip1/zip2 are ARM's unpacklo/unpackhi.
-            var t0 = AdvSimd.Arm64.ZipLow(r0, r1).AsUInt64();
-            var t1 = AdvSimd.Arm64.ZipHigh(r0, r1).AsUInt64();
-            var t2 = AdvSimd.Arm64.ZipLow(r2, r3).AsUInt64();
-            var t3 = AdvSimd.Arm64.ZipHigh(r2, r3).AsUInt64();
-            r0 = AdvSimd.Arm64.ZipLow(t0, t2).AsUInt32();
-            r1 = AdvSimd.Arm64.ZipHigh(t0, t2).AsUInt32();
-            r2 = AdvSimd.Arm64.ZipLow(t1, t3).AsUInt32();
-            r3 = AdvSimd.Arm64.ZipHigh(t1, t3).AsUInt32();
-            return;
-        }
+        if (!AdvSimd.Arm64.IsSupported) { TransposePortable(ref r0, ref r1, ref r2, ref r3); return; }
 
+        // zip1/zip2 are ARM's unpacklo/unpackhi.
+        var u0 = AdvSimd.Arm64.ZipLow(r0, r1).AsUInt64();
+        var u1 = AdvSimd.Arm64.ZipHigh(r0, r1).AsUInt64();
+        var u2 = AdvSimd.Arm64.ZipLow(r2, r3).AsUInt64();
+        var u3 = AdvSimd.Arm64.ZipHigh(r2, r3).AsUInt64();
+        r0 = AdvSimd.Arm64.ZipLow(u0, u2).AsUInt32();
+        r1 = AdvSimd.Arm64.ZipHigh(u0, u2).AsUInt32();
+        r2 = AdvSimd.Arm64.ZipLow(u1, u3).AsUInt32();
+        r3 = AdvSimd.Arm64.ZipHigh(u1, u3).AsUInt32();
+    }
+
+    [ExcludeFromCodeCoverage(Justification = "Portable fallback for CPUs with Vector128 acceleration but neither SSE2 nor ARM64 AdvSimd (other architectures); no test or CI machine is one.")]
+    private static void TransposePortable(ref Vector128<uint> r0, ref Vector128<uint> r1, ref Vector128<uint> r2, ref Vector128<uint> r3)
+    {
         var a = r0;
         var b = r1;
         var c = r2;
