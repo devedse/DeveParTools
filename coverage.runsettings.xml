@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Configuration>
+  <CodeCoverage>
+    <ModulePaths>
+      <Include>
+        <ModulePath>.*DeveParTools\.Core\.dll$</ModulePath>
+        <ModulePath>.*DeveParTools\.Par1\.dll$</ModulePath>
+        <ModulePath>.*DeveParTools\.Par2\.dll$</ModulePath>
+        <ModulePath>.*DeveParTools\.Par3\.dll$</ModulePath>
+        <ModulePath>.*DeveParTools\.dll$</ModulePath>
+      </Include>
+    </ModulePaths>
+    <Attributes>
+      <Exclude>
+        <Attribute>^System\.Diagnostics\.CodeAnalysis\.ExcludeFromCodeCoverageAttribute$</Attribute>
+      </Exclude>
+    </Attributes>
+  </CodeCoverage>
+</Configuration>

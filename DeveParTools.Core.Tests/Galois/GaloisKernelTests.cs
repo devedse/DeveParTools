@@ -1,6 +1,6 @@
 using DeveParTools.Core.Galois;
 
-namespace DeveParTools.Tests.Galois;
+namespace DeveParTools.Core.Tests.Galois;
 
 [TestClass]
 public sealed unsafe class GaloisKernelTests

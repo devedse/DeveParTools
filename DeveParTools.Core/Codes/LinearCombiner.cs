@@ -72,19 +72,7 @@ public static unsafe class LinearCombiner
 
         int sym = field.SymbolSize;
         int batch = Math.Max(1, Math.Min(options.SourcesPerBatch, Math.Max(1, inputCount)));
-
-        // Slice length: all outputs + two input batches must fit the budget. Multiple of 64 and of the symbol size.
-        long align = LeastCommonMultiple(64, sym);
-        long perByte = outputCount + 2L * batch;
-        long slice = Math.Max(align, options.MemoryBudget / perByte);
-        slice = Math.Min(slice, RoundUp(regionLength, align));
-        slice = Math.Max(align, slice / align * align);
-        if (slice > int.MaxValue / 2)
-        {
-            slice = int.MaxValue / 2 / align * align;
-        }
-
-        int sliceLen = (int)slice;
+        int sliceLen = PlanSliceLength(sym, inputCount, outputCount, regionLength, options);
         long passes = (regionLength + sliceLen - 1) / sliceLen;
         int batches = Math.Max(1, (inputCount + batch - 1) / batch);
         long totalSteps = passes * batches;
@@ -189,6 +177,27 @@ public static unsafe class LinearCombiner
             NativeMemory.AlignedFree(inA);
             NativeMemory.AlignedFree(inB);
         }
+    }
+
+    /// <summary>
+    /// Length of the region slices processed per pass: all outputs plus two input batches must fit in the memory
+    /// budget. A multiple of 64 bytes and of the symbol size. When it is ≥ the region length, everything is done in
+    /// one pass and every input byte is read exactly once (in order), which callers use to hash while encoding.
+    /// </summary>
+    public static int PlanSliceLength(int symbolSize, int inputCount, int outputCount, long regionLength, LinearCombineOptions options)
+    {
+        int batch = Math.Max(1, Math.Min(options.SourcesPerBatch, Math.Max(1, inputCount)));
+        long align = LeastCommonMultiple(64, symbolSize);
+        long perByte = Math.Max(1, outputCount) + 2L * batch;
+        long slice = Math.Max(align, options.MemoryBudget / perByte);
+        slice = Math.Min(slice, RoundUp(Math.Max(1, regionLength), align));
+        slice = Math.Max(align, slice / align * align);
+        if (slice > int.MaxValue / 2)
+        {
+            slice = int.MaxValue / 2 / align * align;
+        }
+
+        return (int)slice;
     }
 
     private static void ReadBatch(IRegionSource sources, int first, int count, long offset, int len, int stride, byte* buffer)

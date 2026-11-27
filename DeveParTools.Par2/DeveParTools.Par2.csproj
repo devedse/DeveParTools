@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <Description>PAR 2.0 (Parity Volume Set 2.0) create, verify and repair for DeveParTools.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\DeveParTools.Core\DeveParTools.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="DeveParTools.Par2.Tests" />
+  </ItemGroup>
+</Project>

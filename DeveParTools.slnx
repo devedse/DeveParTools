@@ -1,4 +1,11 @@
 <Solution>
-  <Project Path="DeveParTools.Core/DeveParTools.Core.csproj" />
-  <Project Path="DeveParTools.Tests/DeveParTools.Tests.csproj" />
+  <Folder Name="/Library/">
+    <Project Path="DeveParTools.Core/DeveParTools.Core.csproj" />
+    <Project Path="DeveParTools.Par2/DeveParTools.Par2.csproj" />
+  </Folder>
+  <Folder Name="/Tests/">
+    <Project Path="DeveParTools.Core.Tests/DeveParTools.Core.Tests.csproj" />
+    <Project Path="DeveParTools.Par2.Tests/DeveParTools.Par2.Tests.csproj" />
+    <Project Path="DeveParTools.InteropTests/DeveParTools.InteropTests.csproj" />
+  </Folder>
 </Solution>

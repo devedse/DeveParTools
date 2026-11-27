@@ -1,7 +1,7 @@
 using System.Text;
 using DeveParTools.Core.Hashing;
 
-namespace DeveParTools.Tests.Hashing;
+namespace DeveParTools.Core.Tests.Hashing;
 
 [TestClass]
 public sealed class CrcTests

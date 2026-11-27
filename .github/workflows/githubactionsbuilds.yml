@@ -1,0 +1,89 @@
+# Purpose: build, test (incl. interop against par2cmdline), measure coverage, package and release DeveParTools.
+name: GitHubActionsBuilds
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  generate_version_number:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      build_number: ${{ steps.buildnumber.outputs.build_number }}
+    steps:
+    - name: Generate build number
+      id: buildnumber
+      uses: onyxmueller/build-tag-number@v1
+      with:
+        token: ${{secrets.github_token}}
+
+  # Unit + interop tests on every OS/architecture, so every SIMD path the runner supports is exercised
+  # (x64: SSSE3/AVX2/AVX-512/GFNI when available; arm64: NEON).
+  test:
+    needs: generate_version_number
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v7
+    - name: Setup .NET Core
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: 10.0.x
+    - name: Install par2cmdline (interop oracle)
+      if: runner.os == 'Linux'
+      run: sudo apt-get update -y && sudo apt-get install -y par2
+    - name: Install par2cmdline (interop oracle)
+      if: runner.os == 'macOS'
+      run: brew install par2
+    - name: Show CPU features
+      shell: bash
+      run: |
+        if [ -f /proc/cpuinfo ]; then grep -m1 -o -w -E 'avx2|avx512bw|gfni' /proc/cpuinfo | sort -u || true; fi
+    - name: dotnet restore
+      run: dotnet restore DeveParTools.slnx
+    - name: dotnet build
+      run: dotnet build DeveParTools.slnx -c Release --no-restore /p:Version=1.0.${{needs.generate_version_number.outputs.build_number}}
+    - name: dotnet test
+      shell: bash
+      run: |
+        for p in DeveParTools.Core.Tests DeveParTools.Par2.Tests DeveParTools.InteropTests; do
+          dotnet test --project $p/$p.csproj -c Release --no-build --verbosity normal
+        done
+
+  build_linux_with_codecov:
+    needs: generate_version_number
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+    - uses: actions/checkout@v7
+    - name: Setup .NET Core
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: 10.0.x
+    - name: Install par2cmdline (interop oracle)
+      run: sudo apt-get update -y && sudo apt-get install -y par2
+    - name: Install tools
+      run: dotnet tool install --global dotnet-coverage
+    - name: dotnet restore
+      run: dotnet restore DeveParTools.slnx
+    - name: dotnet build
+      run: dotnet build DeveParTools.slnx -c Release --no-restore /p:Version=1.0.${{needs.generate_version_number.outputs.build_number}}
+    - name: dotnet test with coverage
+      run: |
+        mkdir -p TestResults
+        dotnet-coverage collect --settings coverage.runsettings.xml -f cobertura -o TestResults/coverage.cobertura.xml \
+          "bash -c 'for p in DeveParTools.Core.Tests DeveParTools.Par2.Tests DeveParTools.InteropTests; do dotnet test --project \$p/\$p.csproj -c Release --no-build || exit 1; done'"
+    - name: Run CodeCov
+      uses: codecov/codecov-action@v7
+      with:
+        directory: ./TestResults
+        fail_ci_if_error: false
+        use_oidc: true
+        verbose: true

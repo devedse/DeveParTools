@@ -1,7 +1,7 @@
 using DeveParTools.Core.Codes;
 using DeveParTools.Core.Galois;
 
-namespace DeveParTools.Tests.Codes;
+namespace DeveParTools.Core.Tests.Codes;
 
 [TestClass]
 public sealed class MatrixAndCombinerTests
@@ -175,5 +175,51 @@ public sealed class MatrixAndCombinerTests
                 Assert.AreEqual(r == c ? f.One : f.Zero, m[r, c], $"({r},{c})");
             }
         }
+    }
+}
+
+[TestClass]
+public sealed class GfMatrixDocumentedExampleTests
+{
+    [TestMethod]
+    public void WorkedExampleFromDocumentation()
+    {
+        var f = new Gf8Field(GaloisField8.Default);
+        var a = new GfMatrix<byte>(2, 2, f);
+        a[0, 0] = 1; a[0, 1] = 2; a[1, 0] = 3; a[1, 1] = 4;
+        Assert.IsTrue(a.TryInvert());
+        CollectionAssert.AreEqual(new byte[] { 2, 1, 0x8F, 0x8E }, a.Data);
+    }
+
+    [TestMethod]
+    public void PivotingExampleFromDocumentation()
+    {
+        var f = new Gf8Field(GaloisField8.Default);
+        var a = new GfMatrix<byte>(2, 2, f);
+        a[0, 1] = 1; a[1, 0] = 1;
+        Assert.IsTrue(a.TryInvert());
+        CollectionAssert.AreEqual(new byte[] { 0, 1, 1, 0 }, a.Data);
+    }
+
+    [TestMethod]
+    public void NonSquareCannotBeInverted()
+    {
+        var f = new Gf8Field(GaloisField8.Default);
+        Assert.ThrowsExactly<InvalidOperationException>(() => new GfMatrix<byte>(2, 3, f).TryInvert());
+    }
+
+    [TestMethod]
+    public void SelectRowsAndColumns()
+    {
+        var f = new Gf8Field(GaloisField8.Default);
+        var a = new GfMatrix<byte>(3, 3, f);
+        for (int i = 0; i < 9; i++)
+        {
+            a.Data[i] = (byte)i;
+        }
+
+        CollectionAssert.AreEqual(new byte[] { 6, 7, 8, 0, 1, 2 }, a.SelectRows([2, 0]).Data);
+        CollectionAssert.AreEqual(new byte[] { 2, 0, 5, 3, 8, 6 }, a.SelectColumns([2, 0]).Data);
+        Assert.ThrowsExactly<ArgumentException>(() => a.Multiply(new GfMatrix<byte>(2, 2, f)));
     }
 }
