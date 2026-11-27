@@ -18,7 +18,7 @@ public sealed class Par2ExtendOptions
     /// <summary>Exponent of the first new recovery slice. Default: one past the highest exponent in the set.</summary>
     public int? FirstExponent { get; init; }
 
-    public Par2VolumeScheme Scheme { get; init; } = Par2VolumeScheme.Exponential;
+    public RecoveryFileScheme Scheme { get; init; } = RecoveryFileScheme.Exponential;
 
     public int? VolumeCount { get; init; }
 

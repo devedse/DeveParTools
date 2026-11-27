@@ -49,8 +49,8 @@ public sealed class ExtendTests
         Assert.AreEqual(6, extended.RecoveryBlocks);
         Assert.AreEqual(created.SetId, extended.SetId);
         Assert.AreEqual(2, extended.WrittenFiles.Count);
-        StringAssert.Contains(extended.WrittenFiles[0], "set.vol04+03.par3");
-        StringAssert.Contains(extended.WrittenFiles[1], "set.vol07+03.par3");
+        StringAssert.Contains(extended.WrittenFiles[0], "set.vol04+02.par3");
+        StringAssert.Contains(extended.WrittenFiles[1], "set.vol06+04.par3");
         Assert.AreEqual(convention == Par3CauchyConvention.Specification, stages.Contains("Encoding (specification convention)"), string.Join(", ", stages));
         Assert.IsFalse(Directory.EnumerateFiles(dir.Path, "*.tmp").Any(), "the probe file is removed");
 

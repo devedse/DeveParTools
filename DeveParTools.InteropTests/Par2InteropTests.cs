@@ -179,8 +179,8 @@ public sealed class Par2InteropTests
         {
             "exponential" => options,
             "exponential-2-volumes" => new Par2CreateOptions { InputFiles = options.InputFiles, OutputPath = options.OutputPath, SliceSize = 4096, RecoverySliceCount = 20, VolumeCount = 2 },
-            "uniform-3-volumes" => new Par2CreateOptions { InputFiles = options.InputFiles, OutputPath = options.OutputPath, SliceSize = 4096, RecoverySliceCount = 20, Scheme = Par2VolumeScheme.Uniform, VolumeCount = 3 },
-            "limit-size" => new Par2CreateOptions { InputFiles = options.InputFiles, OutputPath = options.OutputPath, SliceSize = 65536, RecoverySliceCount = 12, Scheme = Par2VolumeScheme.LimitSize },
+            "uniform-3-volumes" => new Par2CreateOptions { InputFiles = options.InputFiles, OutputPath = options.OutputPath, SliceSize = 4096, RecoverySliceCount = 20, Scheme = RecoveryFileScheme.Uniform, VolumeCount = 3 },
+            "limit-size" => new Par2CreateOptions { InputFiles = options.InputFiles, OutputPath = options.OutputPath, SliceSize = 65536, RecoverySliceCount = 12, Scheme = RecoveryFileScheme.LimitSize },
             "first-exponent-1000" => new Par2CreateOptions { InputFiles = options.InputFiles, OutputPath = options.OutputPath, SliceSize = 4096, RecoverySliceCount = 20, FirstExponent = 1000 },
             "slice-count" => new Par2CreateOptions { InputFiles = options.InputFiles, OutputPath = options.OutputPath, SliceCount = 37, RecoverySliceCount = 8 },
             _ => options,

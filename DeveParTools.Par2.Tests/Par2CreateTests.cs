@@ -10,17 +10,17 @@ public sealed class Par2CreateTests
     private static List<Par2Packet> Packets(string path) => Par2PacketReader.ReadFile(path).Packets;
 
     [TestMethod]
-    [DataRow(Par2VolumeScheme.Exponential, 10, 0, 0, "vol00+1 vol01+2 vol03+4 vol07+3", DisplayName = "exponential (par2cmdline default)")]
-    [DataRow(Par2VolumeScheme.Exponential, 10, 2, 0, "vol00+4 vol04+6", DisplayName = "exponential with 2 files (par2cmdline -n2)")]
-    [DataRow(Par2VolumeScheme.Exponential, 3, 3, 0, "vol0+1 vol1+2", DisplayName = "exponential: no empty files")]
-    [DataRow(Par2VolumeScheme.Exponential, 4, 0, 98, "vol098+1 vol099+2 vol101+1", DisplayName = "exponential from exponent 98 (digits of 102)")]
-    [DataRow(Par2VolumeScheme.Exponential, 1, 1, 0, "vol0+1", DisplayName = "one slice")]
-    [DataRow(Par2VolumeScheme.Uniform, 10, 3, 0, "vol00+4 vol04+3 vol07+3", DisplayName = "uniform with 3 files")]
-    [DataRow(Par2VolumeScheme.Uniform, 10, 0, 0, "vol00+10", DisplayName = "uniform without a count: one file")]
-    [DataRow(Par2VolumeScheme.Uniform, 2, 5, 0, "vol0+1 vol1+1", DisplayName = "uniform: at most one file per slice")]
-    [DataRow(Par2VolumeScheme.LimitSize, 10, 0, 0, "vol00+1 vol01+2 vol03+3 vol06+3 vol09+1", DisplayName = "limited to the largest file (3 slices)")]
-    [DataRow(Par2VolumeScheme.LimitSize, 3, 7, 0, "vol0+1 vol1+2", DisplayName = "limit: the volume count is not used")]
-    public void VolumeSchemes_DistributeAndNameTheVolumes(Par2VolumeScheme scheme, int recovery, int volumeCount, int firstExponent, string expected)
+    [DataRow(RecoveryFileScheme.Exponential, 10, 0, 0, "vol00+1 vol01+2 vol03+4 vol07+3", DisplayName = "exponential (par2cmdline default)")]
+    [DataRow(RecoveryFileScheme.Exponential, 10, 2, 0, "vol00+4 vol04+6", DisplayName = "exponential with 2 files (par2cmdline -n2)")]
+    [DataRow(RecoveryFileScheme.Exponential, 3, 3, 0, "vol0+1 vol1+2", DisplayName = "exponential: no empty files")]
+    [DataRow(RecoveryFileScheme.Exponential, 4, 0, 98, "vol098+1 vol099+2 vol101+1", DisplayName = "exponential from exponent 98 (digits of 102)")]
+    [DataRow(RecoveryFileScheme.Exponential, 1, 1, 0, "vol0+1", DisplayName = "one slice")]
+    [DataRow(RecoveryFileScheme.Uniform, 10, 3, 0, "vol00+4 vol04+3 vol07+3", DisplayName = "uniform with 3 files")]
+    [DataRow(RecoveryFileScheme.Uniform, 10, 0, 0, "vol00+10", DisplayName = "uniform without a count: one file")]
+    [DataRow(RecoveryFileScheme.Uniform, 2, 5, 0, "vol0+1 vol1+1", DisplayName = "uniform: at most one file per slice")]
+    [DataRow(RecoveryFileScheme.LimitSize, 10, 0, 0, "vol00+1 vol01+2 vol03+3 vol06+3 vol09+1", DisplayName = "limited to the largest file (3 slices)")]
+    [DataRow(RecoveryFileScheme.LimitSize, 3, 7, 0, "vol0+1 vol1+2", DisplayName = "limit: the volume count is not used")]
+    public void VolumeSchemes_DistributeAndNameTheVolumes(RecoveryFileScheme scheme, int recovery, int volumeCount, int firstExponent, string expected)
     {
         using var dir = new TempDir();
 

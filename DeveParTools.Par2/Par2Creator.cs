@@ -10,26 +10,6 @@ using DeveParTools.Par2.Packets;
 
 namespace DeveParTools.Par2;
 
-/// <summary>How recovery slices are distributed over the .volXX+YY.par2 files.</summary>
-public enum Par2VolumeScheme
-{
-    /// <summary>
-    /// 1, 2, 4, 8, ... slices per file (par2cmdline default). With <see cref="Par2CreateOptions.VolumeCount"/> = n,
-    /// exactly n files: low, 2·low, 4·low, ... with the smallest power of two "low" for which they hold everything
-    /// (par2cmdline -n).
-    /// </summary>
-    Exponential,
-
-    /// <summary>The same number of slices in every file (see <see cref="Par2CreateOptions.VolumeCount"/>).</summary>
-    Uniform,
-
-    /// <summary>
-    /// Exponential, but no file holds more data than the largest input file (so the number of slices per file is
-    /// capped at largest file ÷ slice size). <see cref="Par2CreateOptions.VolumeCount"/> is not used.
-    /// </summary>
-    LimitSize,
-}
-
 public sealed class Par2CreateOptions
 {
     public required IReadOnlyList<string> InputFiles { get; init; }
@@ -53,11 +33,12 @@ public sealed class Par2CreateOptions
 
     public int FirstExponent { get; init; }
 
-    public Par2VolumeScheme Scheme { get; init; } = Par2VolumeScheme.Exponential;
+    /// <summary>How the recovery slices are spread over the volume files.</summary>
+    public RecoveryFileScheme Scheme { get; init; } = RecoveryFileScheme.Exponential;
 
     /// <summary>
-    /// Number of volume files for <see cref="Par2VolumeScheme.Uniform"/> (default 1) and
-    /// <see cref="Par2VolumeScheme.Exponential"/> (default: as many as the doubling needs). At most one file per
+    /// Number of volume files for <see cref="RecoveryFileScheme.Uniform"/> (default 1) and
+    /// <see cref="RecoveryFileScheme.Exponential"/> (default: as many as the doubling needs). At most one file per
     /// recovery slice.
     /// </summary>
     public int? VolumeCount { get; init; }
@@ -194,7 +175,7 @@ public static class Par2Creator
         }
 
         // 3. Volume files.
-        var volumes = PlanVolumes(outputPath, options, recoveryCount, sliceSize, inputs.Select(i => i.Length).DefaultIfEmpty(0).Max());
+        var volumes = PlanVolumes(outputPath, options.Scheme, options.VolumeCount, options.FirstExponent, recoveryCount, sliceSize, inputs.Select(i => i.Length).DefaultIfEmpty(0).Max());
         if (!options.WriteIndexFile && volumes.FirstOrDefault(v => File.Exists(v.Path)) is { } existing)
         {
             throw new IOException($"'{existing.Path}' already exists.");
@@ -413,36 +394,34 @@ public static class Par2Creator
     }
 
     /// <summary>
-    /// Distributes the recovery slices over volume files and names them like par2cmdline:
-    /// "set.vol{first exponent}+{count}.par2", both numbers zero-padded to the widest value that occurs (the
-    /// exponent after the last file included).
+    /// Distributes the recovery slices over volume files (see <see cref="RecoveryFileSizing"/>) and names them like
+    /// par2cmdline: "set.vol{first exponent}+{count}.par2", both numbers zero-padded to the widest value that occurs
+    /// (the exponent after the last file included).
     /// </summary>
     /// <remarks>
-    /// Slices per file for 10 recovery slices (first exponent 0):
-    /// <code>
-    /// Exponential               1, 2, 4, 3      set.vol00+1.par2, set.vol01+2.par2, set.vol03+4.par2, set.vol07+3.par2
-    /// Exponential, 2 volumes    4, 6            low = 4: the smallest power of two with low·(2² − 1) ≥ 10
-    /// Uniform, 3 volumes        4, 3, 3
-    /// LimitSize, largest input = 3 slices:      1, 2, 3, 3, 1
-    /// </code>
+    /// 10 recovery slices from exponent 0, exponential: set.vol00+1.par2, set.vol01+2.par2, set.vol03+4.par2,
+    /// set.vol07+3.par2. Used by <see cref="Create"/> and, to preview a set before creating it, by
+    /// <c>ParClient.Plan</c>.
     /// </remarks>
-    private static List<Volume> PlanVolumes(string outputPath, Par2CreateOptions options, int recoveryCount, long sliceSize, long largestFile)
+    /// <param name="outputPath">The index file, e.g. "/data/set.par2".</param>
+    /// <param name="largestFile">Length of the largest input file (for <see cref="RecoveryFileScheme.LimitSize"/>).</param>
+    public static IReadOnlyList<RecoveryFilePlan> PlanRecoveryFiles(string outputPath, RecoveryFileScheme scheme, int? volumeCount, int firstExponent, int recoveryCount, long sliceSize, long largestFile)
+        => PlanVolumes(outputPath, scheme, volumeCount, firstExponent, recoveryCount, sliceSize, largestFile)
+            .Select(v => new RecoveryFilePlan(v.Path, v.FirstExponent, v.Count)).ToList();
+
+    private static List<Volume> PlanVolumes(string outputPath, RecoveryFileScheme scheme, int? volumeCount, int firstExponent, int recoveryCount, long sliceSize, long largestFile)
     {
         var volumes = new List<Volume>();
-        if (recoveryCount == 0)
+        var counts = RecoveryFileSizing.Counts(recoveryCount, scheme, volumeCount, Math.Max(1, largestFile / sliceSize));
+        if (counts.Count == 0)
         {
             return volumes;
         }
 
-        var counts = options.Scheme == Par2VolumeScheme.Uniform
-            ? UniformCounts(recoveryCount, options.VolumeCount ?? 1)
-            : ExponentialCounts(recoveryCount, options.Scheme == Par2VolumeScheme.LimitSize ? null : options.VolumeCount,
-                options.Scheme == Par2VolumeScheme.LimitSize ? (int)Math.Max(1, Math.Min(int.MaxValue, largestFile / sliceSize)) : int.MaxValue);
-
         var baseName = outputPath.EndsWith(".par2", StringComparison.OrdinalIgnoreCase) ? outputPath[..^5] : outputPath;
-        int lowDigits = Digits(options.FirstExponent + recoveryCount);
+        int lowDigits = Digits(firstExponent + recoveryCount);
         int countDigits = Digits(counts.Max());
-        int exp = options.FirstExponent;
+        int exp = firstExponent;
         foreach (var c in counts)
         {
             var name = $"{baseName}.vol{exp.ToString(CultureInfo.InvariantCulture).PadLeft(lowDigits, '0')}+{c.ToString(CultureInfo.InvariantCulture).PadLeft(countDigits, '0')}.par2";
@@ -451,50 +430,6 @@ public static class Par2Creator
         }
 
         return volumes;
-    }
-
-    /// <summary>n files (at most one per slice), the first ones one slice larger: 10 in 3 → 4, 3, 3.</summary>
-    private static List<int> UniformCounts(int recoveryCount, int volumeCount)
-    {
-        int n = Math.Clamp(volumeCount, 1, recoveryCount);
-        var counts = new List<int>(n);
-        int remaining = recoveryCount;
-        for (int i = 0; i < n; i++)
-        {
-            int c = (remaining + (n - i) - 1) / (n - i);
-            counts.Add(c);
-            remaining -= c;
-        }
-
-        return counts;
-    }
-
-    /// <summary>
-    /// low, 2·low, 4·low, ... (each at most <paramref name="limit"/>) until all slices are placed. low = 1, or for
-    /// a given file count n the smallest power of two with low·(2^n − 1) ≥ the slice count (as par2cmdline -n).
-    /// </summary>
-    private static List<int> ExponentialCounts(int recoveryCount, int? volumeCount, int limit)
-    {
-        long next = 1;
-        if (volumeCount is int n)
-        {
-            long capacity = (1L << Math.Clamp(n, 1, 31)) - 1;
-            while (next * capacity < recoveryCount)
-            {
-                next *= 2;
-            }
-        }
-
-        var counts = new List<int>();
-        for (int remaining = recoveryCount; remaining > 0;)
-        {
-            int c = (int)Math.Min(Math.Min(next, remaining), limit);
-            counts.Add(c);
-            remaining -= c;
-            next = Math.Min(int.MaxValue, next * 2);
-        }
-
-        return counts;
     }
 
     private static int Digits(int v) => v.ToString(CultureInfo.InvariantCulture).Length;

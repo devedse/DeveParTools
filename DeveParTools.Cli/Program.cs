@@ -61,8 +61,8 @@ namespace DeveParTools.Cli
             var blockSize = new Option<long?>("--block-size", "-s") { Description = "Block size in bytes (multiple of 4 for PAR2, 8 for PAR3)." };
             var first = new Option<int>("--first") { Description = "First recovery block number (exponent)." };
             var volumes = new Option<int?>("--volumes", "-n") { Description = "Number of recovery files." };
-            var uniform = new Option<bool>("--uniform", "-u") { Description = "Same number of recovery blocks in every recovery file." };
-            var limit = new Option<bool>("--limit", "-l") { Description = "PAR2: no recovery file larger than the largest input file." };
+            var uniform = new Option<bool>("--uniform", "-u") { Description = "Same number of recovery blocks in every recovery file (PAR2, PAR3)." };
+            var limit = new Option<bool>("--limit", "-l") { Description = "No recovery file larger than the largest input file (PAR2, PAR3)." };
             var comment = new Option<string?>("--comment") { Description = "Comment stored in the set." };
             var basePath = new Option<string?>("--base", "-B") { Description = "Base directory that stored names are relative to." };
             var noRecurse = new Option<bool>("--no-recurse") { Description = "Do not descend into sub-directories." };

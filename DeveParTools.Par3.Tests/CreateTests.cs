@@ -14,8 +14,10 @@ public sealed class CreateTests
     private static Par3CreateOptions Options(TempDir dir, ulong? blockSize = 1024, int? recovery = 4, Par3Code code = Par3Code.Cauchy, IReadOnlyList<string>? inputs = null,
         string? output = null, string? baseDir = null, bool recursive = true, int blockCount = 2000, double redundancy = 10, ulong firstRecovery = 0, int? maxRecovery = null,
         Par3Dedup dedup = Par3Dedup.None, bool packTails = true, bool storeData = false, int? volumes = null, string? comment = null, string creator = Par3Creator.DefaultCreator,
-        bool unix = false, bool fat = false, bool reproducible = true, int interleave = 0, Par3CauchyConvention convention = Par3CauchyConvention.Par3cmdline) => new()
+        bool unix = false, bool fat = false, bool reproducible = true, int interleave = 0, Par3CauchyConvention convention = Par3CauchyConvention.Par3cmdline,
+        RecoveryFileScheme scheme = RecoveryFileScheme.Exponential) => new()
     {
+        Scheme = scheme,
         Inputs = inputs ?? [dir.Path],
         OutputPath = output ?? dir["set.par3"],
         BaseDirectory = baseDir,
@@ -424,8 +426,15 @@ public sealed class CreateTests
         var r = Create(Options(dir, recovery: 10));
         CollectionAssert.AreEqual(new[] { "set.par3", "set.vol00+01.par3", "set.vol01+02.par3", "set.vol03+04.par3", "set.vol07+03.par3" }, r.WrittenFiles.Select(Path.GetFileName).ToArray());
 
+        // 3 files, exponential (as par2cmdline -n): low = 2 is the smallest power of two with low·(1 + 2 + 4) ≥ 10.
         r = Create(Options(dir, recovery: 10, volumes: 3, firstRecovery: 95));
+        CollectionAssert.AreEqual(new[] { "set.par3", "set.vol095+02.par3", "set.vol097+04.par3", "set.vol101+04.par3" }, r.WrittenFiles.Select(Path.GetFileName).ToArray());
+
+        // Equal files, and files no larger than the largest input (20,000 bytes = 19 blocks of 1024: no limit here).
+        r = Create(Options(dir, recovery: 10, volumes: 3, firstRecovery: 95, scheme: RecoveryFileScheme.Uniform));
         CollectionAssert.AreEqual(new[] { "set.par3", "set.vol095+04.par3", "set.vol099+03.par3", "set.vol102+03.par3" }, r.WrittenFiles.Select(Path.GetFileName).ToArray());
+        r = Create(Options(dir, blockSize: 8192, recovery: 5, scheme: RecoveryFileScheme.LimitSize));
+        CollectionAssert.AreEqual(new[] { "set.par3", "set.vol00+01.par3", "set.vol01+02.par3", "set.vol03+02.par3" }, r.WrittenFiles.Select(Path.GetFileName).ToArray(), "at most 2 blocks (20,000 / 8192) per file");
 
         // Every volume has the vital packets: each one alone is enough to verify.
         foreach (var v in r.WrittenFiles.Skip(1))
@@ -443,19 +452,21 @@ public sealed class CreateTests
     [TestMethod]
     public void PlanVolumes_Naming()
     {
-        static string[] Plan(int count, int? volumes = null, ulong first = 0, string marker = ".vol")
-            => Par3Creator.PlanVolumes("/x/set.par3", new Par3CreateOptions { Inputs = [], OutputPath = "/x/set.par3", VolumeCount = volumes, FirstRecoveryBlock = first }, count, marker)
+        static string[] Plan(int count, int? volumes = null, ulong first = 0, string marker = ".vol", RecoveryFileScheme scheme = RecoveryFileScheme.Exponential, long limit = long.MaxValue)
+            => Par3Creator.PlanVolumes("/x/set.par3", scheme, volumes, first, count, marker, limit)
                 .Select(v => $"{Path.GetFileName(v.Path)}:{v.First}:{v.Count}").ToArray();
 
         CollectionAssert.AreEqual(Array.Empty<string>(), Plan(0));
         CollectionAssert.AreEqual(Array.Empty<string>(), Plan(0, 3));
         CollectionAssert.AreEqual(new[] { "set.vol00+01.par3:0:1" }, Plan(1));
         CollectionAssert.AreEqual(new[] { "set.vol00+01.par3:0:1", "set.vol01+02.par3:1:2", "set.vol03+02.par3:3:2" }, Plan(5));
-        CollectionAssert.AreEqual(new[] { "set.vol00+02.par3:0:2", "set.vol02+02.par3:2:2", "set.vol04+01.par3:4:1" }, Plan(5, 3));
+        CollectionAssert.AreEqual(new[] { "set.vol00+01.par3:0:1", "set.vol01+02.par3:1:2", "set.vol03+02.par3:3:2" }, Plan(5, 3), "exponential with 3 files: 1, 2, 4 capacity");
+        CollectionAssert.AreEqual(new[] { "set.vol00+02.par3:0:2", "set.vol02+02.par3:2:2", "set.vol04+01.par3:4:1" }, Plan(5, 3, scheme: RecoveryFileScheme.Uniform));
+        CollectionAssert.AreEqual(new[] { "set.vol00+01.par3:0:1", "set.vol01+02.par3:1:2", "set.vol03+02.par3:3:2", "set.vol05+01.par3:5:1" }, Plan(6, 3, scheme: RecoveryFileScheme.LimitSize, limit: 2), "limit: at most 2 per file, the count is not used");
         CollectionAssert.AreEqual(new[] { "set.vol00+01.par3:0:1", "set.vol01+01.par3:1:1" }, Plan(2, 10), "at most one volume per block");
-        Assert.AreEqual("set.part0998+03.par3:0:3", Plan(3, 1, 998, ".part").Single());
+        Assert.AreEqual("set.part0998+03.par3:0:3", Plan(3, 1, 998, ".part", RecoveryFileScheme.Uniform).Single());
         Assert.AreEqual("set.vol0998+03.par3:0:3", Plan(3, 1, 998).Single());
-        Assert.AreEqual("noext.vol00+01.par3:0:1", Par3Creator.PlanVolumes("/x/noext", new Par3CreateOptions { Inputs = [], OutputPath = "/x/noext" }, 1, ".vol").Select(v => $"{Path.GetFileName(v.Path)}:{v.First}:{v.Count}").Single());
+        Assert.AreEqual("noext.vol00+01.par3:0:1", Par3Creator.PlanVolumes("/x/noext", RecoveryFileScheme.Exponential, null, 0, 1, ".vol", long.MaxValue).Select(v => $"{Path.GetFileName(v.Path)}:{v.First}:{v.Count}").Single());
     }
 
     [TestMethod]

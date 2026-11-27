@@ -90,8 +90,10 @@ public sealed class ParCreateRequest
 
     public int? VolumeCount { get; init; }
 
+    /// <summary>The same number of recovery blocks in every recovery file (PAR2 and PAR3).</summary>
     public bool UniformVolumes { get; init; }
 
+    /// <summary>No recovery file holds more blocks than the largest input file has (PAR2 and PAR3).</summary>
     public bool LimitVolumeSize { get; init; }
 
     public string? Comment { get; init; }
@@ -177,7 +179,7 @@ public sealed record ParInsertReport(string ArchiveFormat, long OriginalLength, 
 public sealed record ParCreateReport(ParFormat Format, IReadOnlyList<string> WrittenFiles, long BlockSize, long InputBlocks, int RecoveryBlocks, string Description);
 
 /// <summary>One entry point for every PAR version: detects the format and dispatches to the format libraries.</summary>
-public static class ParClient
+public static partial class ParClient
 {
     /// <summary>
     /// Detects the format of a PAR file from its first 8 bytes. If the file does not exist (for example a deleted
@@ -271,7 +273,8 @@ public static class ParClient
                 var files = ExpandFiles(request.Inputs, request.Recursive);
                 int volumes = request.RecoveryBlockCount ?? Math.Max(1, (int)Math.Ceiling(files.Count * request.RedundancyPercent / 100));
                 var written = Par1Set.Create(new Par1CreateOptions { InputFiles = files, OutputPath = request.OutputPath, RecoveryVolumes = volumes, Comment = request.Comment }, context);
-                return new ParCreateReport(format, written, 0, files.Count, volumes, "PAR1 Reed-Solomon (GF(2^8), one block per file)");
+                // Every file is one block; the recovery volumes are as large as the largest file.
+                return new ParCreateReport(format, written, files.Max(f => new FileInfo(f).Length), files.Count, volumes, "PAR1 Reed-Solomon (GF(2^8), one block per file)");
             }
 
             case ParFormat.Par2:
@@ -286,7 +289,7 @@ public static class ParClient
                     RecoverySliceCount = request.RecoveryBlockCount,
                     RedundancyPercent = request.RedundancyPercent,
                     FirstExponent = request.FirstRecoveryBlock,
-                    Scheme = request.UniformVolumes ? Par2VolumeScheme.Uniform : request.LimitVolumeSize ? Par2VolumeScheme.LimitSize : Par2VolumeScheme.Exponential,
+                    Scheme = SchemeOf(request),
                     VolumeCount = request.VolumeCount,
                     Comment = request.Comment,
                 }, context);
@@ -312,6 +315,7 @@ public static class ParClient
                     PackTails = request.Par3PackTails,
                     StoreData = request.Par3StoreData,
                     VolumeCount = request.VolumeCount,
+                    Scheme = SchemeOf(request),
                     Comment = request.Comment,
                     UnixPermissions = request.Par3UnixPermissions,
                     FatPermissions = request.Par3FatPermissions,

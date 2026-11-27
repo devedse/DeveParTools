@@ -1,3 +1,4 @@
+using DeveParTools.Core.Operations;
 using DeveParTools.Par2.Packets;
 using DeveParTools.Par2.Tests.TestSupport;
 
@@ -75,12 +76,12 @@ public sealed class Par2ExtendTests
         StringAssert.Contains(clash.Message, "Recovery slice 1 already exists");
         Assert.ThrowsExactly<ArgumentException>(() => Par2Extender.Extend(new Par2ExtendOptions { Par2Path = P("set.par2"), RecoverySliceCount = 0 }));
 
-        var more = Par2Extender.Extend(new Par2ExtendOptions { Par2Path = P("set.par2"), RedundancyPercent = 20, FirstExponent = 500, OutputPath = P("extra.par2"), Scheme = Par2VolumeScheme.Uniform });
+        var more = Par2Extender.Extend(new Par2ExtendOptions { Par2Path = P("set.par2"), RedundancyPercent = 20, FirstExponent = 500, OutputPath = P("extra.par2"), Scheme = RecoveryFileScheme.Uniform });
         Assert.AreEqual(7, more.RecoverySlices, "ceil(32 slices × 20%)");
         StringAssert.EndsWith(more.WrittenFiles.Single(), "extra.vol500+7.par2");
 
         // The same volume again: refuse to overwrite.
-        Assert.ThrowsExactly<IOException>(() => Par2Extender.Extend(new Par2ExtendOptions { Par2Path = P("set.par2"), RedundancyPercent = 20, FirstExponent = 500, OutputPath = P("extra.par2"), Scheme = Par2VolumeScheme.Uniform }));
+        Assert.ThrowsExactly<IOException>(() => Par2Extender.Extend(new Par2ExtendOptions { Par2Path = P("set.par2"), RedundancyPercent = 20, FirstExponent = 500, OutputPath = P("extra.par2"), Scheme = RecoveryFileScheme.Uniform }));
     }
 
     [TestMethod]

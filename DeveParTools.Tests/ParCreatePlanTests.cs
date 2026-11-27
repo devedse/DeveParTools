@@ -1,0 +1,259 @@
+using DeveParTools.Core.Operations;
+using DeveParTools.Par3;
+
+namespace DeveParTools.Tests;
+
+/// <summary><see cref="ParClient.Plan"/> must predict exactly what <see cref="ParClient.Create"/> makes.</summary>
+[TestClass]
+public sealed class ParCreatePlanTests
+{
+    private string _dir = null!;
+
+    [TestInitialize]
+    public void Init()
+    {
+        _dir = Path.Combine(Path.GetTempPath(), "deveparttools-plan-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(_dir);
+    }
+
+    [TestCleanup]
+    public void Cleanup()
+    {
+        try
+        {
+            Directory.Delete(_dir, true);
+        }
+        catch (IOException)
+        {
+        }
+    }
+
+    private string Write(string name, int length, int seed = 1)
+    {
+        var path = Path.Combine(_dir, name);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var data = new byte[length];
+        new Random(seed + length).NextBytes(data);
+        File.WriteAllBytes(path, data);
+        return path;
+    }
+
+    /// <summary>Creates with the plan's exact numbers and compares block size, counts and recovery file names.</summary>
+    private void AssertPlanMatchesCreate(ParCreateRequest request)
+    {
+        var plan = ParClient.Plan(request);
+        Assert.IsEmpty(plan.Warnings, string.Join("; ", plan.Warnings));
+        var report = ParClient.Create(request);
+        Assert.AreEqual(plan.BlockSize, report.BlockSize, "block size");
+        Assert.AreEqual(plan.InputBlocks, report.InputBlocks, "input blocks");
+        Assert.AreEqual(plan.RecoveryBlocks, report.RecoveryBlocks, "recovery blocks");
+        var written = report.WrittenFiles.Select(Path.GetFileName).ToHashSet();
+        foreach (var f in plan.RecoveryFiles)
+        {
+            Assert.Contains(Path.GetFileName(f.Path), written, $"{f.Path} in {string.Join(", ", written)}");
+        }
+
+        Assert.AreEqual(plan.RecoveryFiles.Sum(f => f.Count), plan.RecoveryBlocks);
+        if (plan.Format == ParFormat.Par3)
+        {
+            Assert.AreEqual(plan.Code, report.Description);
+        }
+
+        foreach (var f in report.WrittenFiles)
+        {
+            File.Delete(f);
+        }
+    }
+
+    [TestMethod]
+    [DataRow(ParFormat.Par2, 2000, 10.0, false, false, null)]
+    [DataRow(ParFormat.Par2, 37, 33.0, true, false, 3)]
+    [DataRow(ParFormat.Par2, 500, 5.0, false, true, null)]
+    [DataRow(ParFormat.Par2, 1, 100.0, false, false, 2)]
+    [DataRow(ParFormat.Par3, 2000, 10.0, false, false, null)]
+    [DataRow(ParFormat.Par3, 300, 12.5, true, false, 4)]
+    [DataRow(ParFormat.Par3, 64, 50.0, false, true, null)]
+    [DataRow(ParFormat.Par3, 5000, 1.0, false, false, 2)]
+    public void Plan_MatchesCreate(ParFormat format, int blockCount, double redundancy, bool uniform, bool limit, int? volumes)
+    {
+        string[] inputs =
+        [
+            Write("big.bin", 300_000),
+            Write("medium.bin", 77_777),
+            Write("dir/small.bin", 1_234),
+            Write("dir/tiny.bin", 41),
+            Write("dir/sub/other.bin", 20_000),
+        ];
+        var extension = format == ParFormat.Par2 ? ".par2" : ".par3";
+        AssertPlanMatchesCreate(new ParCreateRequest
+        {
+            Inputs = format == ParFormat.Par3 ? [inputs[0], inputs[1], Path.Combine(_dir, "dir")] : inputs,
+            OutputPath = Path.Combine(_dir, "set" + extension),
+            BlockCount = blockCount,
+            RedundancyPercent = redundancy,
+            UniformVolumes = uniform,
+            LimitVolumeSize = limit,
+            VolumeCount = volumes,
+        });
+    }
+
+    [TestMethod]
+    public void Plan_MatchesCreate_Par3TailPackingCodesAndExplicitNumbers()
+    {
+        var files = Enumerable.Range(0, 12).Select(i => Write($"f{i}.bin", 1000 + i * 357, i)).ToArray();
+        foreach (var pack in new[] { true, false })
+        {
+            AssertPlanMatchesCreate(new ParCreateRequest { Inputs = files, OutputPath = Path.Combine(_dir, "a.par3"), BlockSize = 1024, Par3PackTails = pack, RecoveryBlockCount = 5 });
+        }
+
+        AssertPlanMatchesCreate(new ParCreateRequest { Inputs = files, OutputPath = Path.Combine(_dir, "b.par3"), BlockCount = 400, Par3Code = Par3Code.Fft, RedundancyPercent = 20, FirstRecoveryBlock = 3, Par3MaxRecoveryBlocks = 256 });
+        AssertPlanMatchesCreate(new ParCreateRequest { Inputs = files, OutputPath = Path.Combine(_dir, "c.par3"), BlockCount = 400, Par3Code = Par3Code.Cauchy, RedundancyPercent = 20, Par3Interleave = 0 });
+        AssertPlanMatchesCreate(new ParCreateRequest { Inputs = files, OutputPath = Path.Combine(_dir, "d.par3"), BlockCount = 2000, Par3Code = Par3Code.Fft, RecoveryBlockCount = 40, Par3Interleave = 1 });
+    }
+
+    [TestMethod]
+    public void Plan_MatchesCreate_Par1()
+    {
+        var files = new[] { Write("a.bin", 5000), Write("b.bin", 7000), Write("c.bin", 100) };
+        var request = new ParCreateRequest { Inputs = files, OutputPath = Path.Combine(_dir, "set.par"), RedundancyPercent = 50 };
+        var plan = ParClient.Plan(request);
+        Assert.AreEqual(7000, plan.BlockSize);
+        Assert.AreEqual(3, plan.InputBlocks);
+        Assert.AreEqual(3, plan.MaxInputBlocks);
+        Assert.AreEqual(2, plan.RecoveryBlocks, "ceil(3 × 50%)");
+        CollectionAssert.AreEqual(new[] { "set.p01", "set.p02" }, plan.RecoveryFiles.Select(f => Path.GetFileName(f.Path)).ToArray());
+        Assert.IsTrue(plan.Files.All(f => f.Blocks == 1));
+        AssertPlanMatchesCreate(request);
+    }
+
+    [TestMethod]
+    public void Plan_DocumentedPar2Example()
+    {
+        var request = new ParCreateRequest { Inputs = [Write("a.bin", 1_000_000), Write("b.bin", 10_000)], OutputPath = Path.Combine(_dir, "set.par2"), BlockCount = 100 };
+        var plan = ParClient.Plan(request);
+        Assert.AreEqual(ParFormat.Par2, plan.Format);
+        Assert.AreEqual(10_104, plan.BlockSize);
+        Assert.AreEqual(100, plan.InputBlocks);
+        Assert.AreEqual(10, plan.RecoveryBlocks);
+        CollectionAssert.AreEqual(new[] { 1, 2, 4, 3 }, plan.RecoveryFiles.Select(f => f.Count).ToArray());
+        Assert.AreEqual(1_010_000 / (100 * 10_104.0), plan.Efficiency, 1e-9);
+        Assert.AreEqual(10.0, plan.RedundancyPercent, 1e-9);
+        Assert.AreEqual(101_040, plan.RecoveryBytes);
+        Assert.AreEqual(1_010_000, plan.TotalBytes);
+        Assert.AreEqual(1_000_000, plan.LargestFile);
+        Assert.AreEqual("Reed-Solomon (GF(2^16))", plan.Code);
+        Assert.AreEqual(32768, plan.MaxInputBlocks);
+        Assert.AreEqual((0, 1), plan.RebuildableFiles, "a.bin (99 blocks) never fits in 10 recovery blocks; b.bin (1 block) does");
+    }
+
+    [TestMethod]
+    public void RebuildableFiles_MinTakesTheLargestFirst_MaxTheSmallest()
+    {
+        var plan = new ParCreatePlan
+        {
+            Format = ParFormat.Par3,
+            Files = [new("a", 0, "a", 0), new("b", 100, "b", 1), new("c", 300, "c", 3), new("d", 500, "d", 5), new("e", 30, "e", 0)],
+            BlockSize = 100,
+            InputBlocks = 9,
+            RecoveryBlocks = 6,
+            RecoveryFiles = [],
+            Code = "x",
+            MaxInputBlocks = 9,
+        };
+
+        // Largest first: d (5) fits, c (3) does not → 1 + 2 free files. Smallest first: b (1) + c (3) fit, d does not → 2 + 2.
+        Assert.AreEqual((3, 4), plan.RebuildableFiles);
+        Assert.AreEqual(930.0 / 900, plan.Efficiency, 1e-9);
+        var empty = new ParCreatePlan { Format = ParFormat.Par2, Files = [], BlockSize = 4, InputBlocks = 0, RecoveryBlocks = 0, RecoveryFiles = [], Code = "x", MaxInputBlocks = 0 };
+        Assert.AreEqual(0, empty.Efficiency);
+        Assert.AreEqual(0, empty.RedundancyPercent);
+        Assert.AreEqual(0, empty.LargestFile);
+        Assert.AreEqual((0, 0), empty.RebuildableFiles);
+    }
+
+    [TestMethod]
+    public void ScanInputs_ExpandsFolders_LikeCreatePerFormat()
+    {
+        Write("tree/a.bin", 10);
+        Write("tree/old.par2", 10);
+        Write("tree/old.par3", 10);
+        Write("tree/sub/b.bin", 20);
+        var single = Write("single.bin", 30);
+        var output = Path.Combine(_dir, "tree", "set.par3");
+
+        string[] Names(ParFormat format, bool recursive, string outputPath) => ParClient.ScanInputs(new ParCreateRequest
+        {
+            Inputs = [Path.Combine(_dir, "tree"), single, single, Path.Combine(_dir, "missing.bin")],
+            OutputPath = outputPath,
+            Format = format,
+            Recursive = recursive,
+        }).Select(f => Path.GetRelativePath(_dir, f.Path).Replace('\\', '/')).ToArray();
+
+        CollectionAssert.AreEqual(new[] { "tree/a.bin", "tree/sub/b.bin", "single.bin" }, Names(ParFormat.Par2, true, output), "PAR2 leaves PAR files out of folders");
+        CollectionAssert.AreEqual(new[] { "tree/a.bin", "tree/old.par2", "tree/sub/b.bin", "single.bin" }, Names(ParFormat.Par3, true, output), "PAR3 leaves only .par3 files out");
+        CollectionAssert.AreEqual(new[] { "tree/a.bin", "tree/old.par2", "single.bin" }, Names(ParFormat.Par3, false, output));
+        File.WriteAllBytes(output, [1, 2, 3]);
+        CollectionAssert.AreEqual(new[] { "tree/old.par2", "single.bin" }, Names(ParFormat.Par3, false, Path.Combine(_dir, "tree", "a.bin")), "the output itself is not an input");
+
+        var scanned = ParClient.ScanInputs(new ParCreateRequest { Inputs = [single], OutputPath = Path.Combine(_dir, "x.par2") });
+        Assert.AreEqual(new ParPlanFile(single, 30, single, 0), scanned.Single());
+        Assert.AreEqual(8, ParClient.Plan(new ParCreateRequest { Inputs = [single], OutputPath = Path.Combine(_dir, "x.par2") }, scanned).InputBlocks, "a scanned list can be passed in: 30 bytes in blocks of 4");
+    }
+
+    [TestMethod]
+    public void Plan_Warnings()
+    {
+        var a = Write("a.bin", 600_000); // 150,000 PAR2 blocks of 4 bytes, 75,000 PAR3 blocks of 8 bytes
+        var other = Write("elsewhere/b.bin", 10);
+        string Only(ParCreateRequest r) => string.Join(" | ", ParClient.Plan(r).Warnings);
+
+        StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par2"), BlockSize = 6 }), "multiple of 4");
+        StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par2"), BlockSize = 0 }), "multiple of 4");
+        StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par2"), BlockSize = 4 }), "at most 32,768 input blocks");
+        StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par2"), FirstRecoveryBlock = 65530, RecoveryBlockCount = 10 }), "below 65,535");
+        StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par3"), BlockSize = 12 }), "multiple of 8");
+        StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par3"), BlockCount = 10, Par3Code = Par3Code.Fft, RecoveryBlockCount = 20 }), "FFT code needs");
+        StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par3"), BlockSize = 8, Par3Code = Par3Code.Cauchy, RecoveryBlockCount = 1 }), "GF(2^32)");
+        StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par3"), Par3Dedup = Par3Dedup.Blocks }), "Deduplication");
+        StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a, other], OutputPath = Path.Combine(_dir, "s.par") }), "bare file names");
+        StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par"), RecoveryBlockCount = 255 }), "at most 255");
+    }
+
+    [TestMethod]
+    public void Plan_WithoutFiles_HasNoBlocks()
+    {
+        foreach (var output in new[] { "e.par", "e.par2", "e.par3" })
+        {
+            var plan = ParClient.Plan(new ParCreateRequest { Inputs = [], OutputPath = Path.Combine(_dir, output) });
+            Assert.AreEqual(0, plan.InputBlocks, output);
+            Assert.AreEqual(0, plan.RecoveryBlocks, output);
+            Assert.IsEmpty(plan.RecoveryFiles, output);
+        }
+
+        // An empty file has no PAR2 blocks; unknown extensions plan as PAR2.
+        var empty = Write("empty.bin", 0);
+        var p2 = ParClient.Plan(new ParCreateRequest { Inputs = [empty], OutputPath = Path.Combine(_dir, "set.out") });
+        Assert.AreEqual(ParFormat.Par2, p2.Format);
+        Assert.AreEqual(0, p2.InputBlocks);
+        Assert.AreEqual((1, 1), p2.RebuildableFiles, "an empty file is recreated from its description");
+    }
+
+    [TestMethod]
+    public void Plan_Par3_MaxInputBlocks_UsesTheSmallestBlockSize_AndIsCapped()
+    {
+        var a = Write("a.bin", 64 * 10 + 50);
+        var plan = ParClient.Plan(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par3") });
+        Assert.AreEqual(11, plan.MaxInputBlocks, "10 full blocks of 64 bytes + a 50-byte tail");
+        Assert.AreEqual(ParClient.Par3MaxPlannedBlocks, ParClient.Plan(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par3") },
+            [new ParPlanFile(a, 1L << 40, a)]).MaxInputBlocks);
+    }
+
+    [TestMethod]
+    public void Create_Par3_HonorsTheRecoveryFileScheme()
+    {
+        var a = Write("a.bin", 50_000);
+        var report = ParClient.Create(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "u.par3"), BlockSize = 1000, RecoveryBlockCount = 9, VolumeCount = 3, UniformVolumes = true });
+        CollectionAssert.AreEqual(new[] { "u.par3", "u.vol00+03.par3", "u.vol03+03.par3", "u.vol06+03.par3" }, report.WrittenFiles.Select(Path.GetFileName).ToArray());
+        Assert.AreEqual(RecoveryFileScheme.LimitSize, ParClient.SchemeOf(new ParCreateRequest { Inputs = [], OutputPath = "x", LimitVolumeSize = true }));
+    }
+}

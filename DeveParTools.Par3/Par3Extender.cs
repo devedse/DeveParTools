@@ -24,8 +24,11 @@ public sealed class Par3ExtendOptions
     /// <summary>Index of the first new recovery block. Default: one past the highest index already in the set.</summary>
     public ulong? FirstRecoveryBlock { get; init; }
 
-    /// <summary>Number of new recovery files (default: exponentially growing sizes).</summary>
+    /// <summary>Number of new recovery files (default: automatic, see <see cref="Scheme"/>).</summary>
     public int? VolumeCount { get; init; }
+
+    /// <summary>How the new recovery blocks are spread over the new files (the same rules as for creating).</summary>
+    public RecoveryFileScheme Scheme { get; init; } = RecoveryFileScheme.Exponential;
 
     /// <summary>Base name of the new recovery files. Default: the set's index file name.</summary>
     public string? OutputPath { get; init; }
@@ -112,7 +115,8 @@ public static class Par3Extender
         }
 
         var indexPath = options.OutputPath ?? IndexPathOf(options.Par3Path);
-        var volumes = Par3Creator.PlanVolumes(Path.GetFullPath(indexPath), new Par3CreateOptions { Inputs = [], OutputPath = indexPath, VolumeCount = options.VolumeCount, FirstRecoveryBlock = first }, count, ".vol");
+        long largest = set.Files.Select(f => (long)f.Length).DefaultIfEmpty(0).Max();
+        var volumes = Par3Creator.PlanVolumes(Path.GetFullPath(indexPath), options.Scheme, options.VolumeCount, first, count, ".vol", Par3Creator.LimitBlocks(largest, set.BlockSize));
         foreach (var v in volumes.Where(v => File.Exists(v.Path)))
         {
             throw new IOException($"'{v.Path}' already exists.");

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using DeveParTools.Core.Codes;
 using DeveParTools.Core.Galois;
@@ -66,8 +67,11 @@ public sealed class Par3CreateOptions
     /// <summary>Also store the input data in the PAR3 files ("archive" mode, .partXX+YY.par3 files).</summary>
     public bool StoreData { get; init; }
 
-    /// <summary>Number of recovery files; null = exponential sizing (1, 2, 4, ...).</summary>
+    /// <summary>Number of recovery files; null = automatic (see <see cref="Scheme"/>).</summary>
     public int? VolumeCount { get; init; }
+
+    /// <summary>How the recovery blocks are spread over the recovery files (the same rules as PAR2).</summary>
+    public RecoveryFileScheme Scheme { get; init; } = RecoveryFileScheme.Exponential;
 
     public string? Comment { get; init; }
 
@@ -250,32 +254,15 @@ public static class Par3Creator
             throw new ArgumentException("Recovery block count must not be negative.");
         }
 
-        var code = options.Code;
-        if (code == Par3Code.Auto)
-        {
-            code = blockCount + (ulong)recoveryCount <= 256 || (ulong)recoveryCount > blockCount ? Par3Code.Cauchy : Par3Code.Fft;
-        }
+        var code = ResolveCode(options.Code, blockCount, recoveryCount);
 
         if (code == Par3Code.Fft && (ulong)Math.Max(recoveryCount, options.MaxRecoveryBlocks ?? 0) > blockCount)
         {
             throw new ArgumentException("The FFT code needs at least as many input blocks as recovery blocks; use the Cauchy code.");
         }
 
-        byte[] generator;
-        Par3Fft.Layout? fftLayout = null;
         int maxRecovery = Math.Max(recoveryCount + (int)options.FirstRecoveryBlock, options.MaxRecoveryBlocks ?? 0);
-        if (code == Par3Code.Fft && recoveryCount > 0)
-        {
-            int cohorts = options.Interleave > 0 ? options.Interleave + 1 : Par3Fft.ChooseCohorts(blockCount, maxRecovery);
-            fftLayout = Par3Fft.Plan(blockCount, maxRecovery, cohorts);
-            generator = fftLayout.Field == null ? [] : fftLayout.Field.Bits == 8 ? [0x1D] : [0x2D, 0x00];
-        }
-        else
-        {
-            ulong needed = blockCount + options.FirstRecoveryBlock + (ulong)recoveryCount;
-            // Cauchy needs x_I = I+1 and y_R = MAX-R to never collide: blocks + recovery ≤ 2^bits - 1.
-            generator = needed <= 255 ? [0x1D] : needed <= 65535 ? [0x0B, 0x10] : [0x8D, 0, 0, 0];
-        }
+        var (fftLayout, generator) = ChooseField(code, blockCount, recoveryCount, options.FirstRecoveryBlock, maxRecovery, options.Interleave);
 
         // 5. Packets.
         observer.Stage("Writing metadata");
@@ -335,7 +322,7 @@ public static class Par3Creator
         // 6. Recovery data.
         var map = context.CreateBlockMap((int)blockCount, recoveryCount);
         var written = new List<string> { outputPath };
-        var volumes = PlanVolumes(outputPath, options, recoveryCount, ".vol");
+        var volumes = PlanVolumes(outputPath, options.Scheme, options.VolumeCount, options.FirstRecoveryBlock, recoveryCount, ".vol", LimitBlocks(files.Select(f => f.Length).DefaultIfEmpty(0).Max(), blockSize));
         var recoveryIndices = Enumerable.Range(0, recoveryCount).Select(i => options.FirstRecoveryBlock + (ulong)i).ToList();
         if (recoveryCount > 0)
         {
@@ -368,12 +355,105 @@ public static class Par3Creator
             BlockSize = blockSize,
             InputBlocks = blockCount,
             RecoveryBlocks = recoveryCount,
-            CodeDescription = fftLayout != null
-                ? $"FFT Reed-Solomon ({(fftLayout.Field == null ? "XOR" : $"GF(2^{fftLayout.Field.Bits})")}, {fftLayout.Cohorts} cohort(s))"
-                : $"Cauchy Reed-Solomon (GF(2^{generator.Length * 8}))",
+            CodeDescription = Describe(fftLayout, generator),
             WrittenFiles = written,
         };
     }
+
+    /// <summary>
+    /// The field and layout of the code: for FFT the cohorts and Leopard field (GF(2^8), GF(2^16), or XOR when only one
+    /// recovery block can ever exist), otherwise the smallest Cauchy field in which input and recovery indices cannot
+    /// collide: x_I = I+1 and y_R = MAX−R must differ, so blocks + recovery ≤ 2^bits − 1 (GF(2^8) up to 255,
+    /// GF(2^16) up to 65,535, then GF(2^32)).
+    /// </summary>
+    /// <param name="code">The resolved code (<see cref="ResolveCode"/>).</param>
+    /// <param name="maxRecovery">The most recovery blocks the set may ever have (FFT sizes its cohorts for it).</param>
+    internal static (Par3Fft.Layout? Fft, byte[] Generator) ChooseField(Par3Code code, ulong blockCount, int recoveryCount, ulong firstRecoveryBlock, int maxRecovery, int interleave)
+    {
+        if (code == Par3Code.Fft && recoveryCount > 0)
+        {
+            int cohorts = interleave > 0 ? interleave + 1 : Par3Fft.ChooseCohorts(blockCount, maxRecovery);
+            var layout = Par3Fft.Plan(blockCount, maxRecovery, cohorts);
+            return (layout, layout.Field == null ? [] : layout.Field.Bits == 8 ? [0x1D] : [0x2D, 0x00]);
+        }
+
+        ulong needed = blockCount + firstRecoveryBlock + (ulong)recoveryCount;
+        return (null, needed <= 255 ? [0x1D] : needed <= 65535 ? [0x0B, 0x10] : [0x8D, 0, 0, 0]);
+    }
+
+    /// <summary>
+    /// What <see cref="Create"/> would use for these numbers, e.g. "FFT Reed-Solomon (GF(2^16), 1 cohort(s))" or
+    /// "Cauchy Reed-Solomon (GF(2^8))". Used to preview a set before creating it.
+    /// </summary>
+    public static string DescribeCode(Par3Code code, ulong blockCount, int recoveryCount, ulong firstRecoveryBlock = 0, int? maxRecoveryBlocks = null, int interleave = 0)
+    {
+        var resolved = ResolveCode(code, blockCount, recoveryCount);
+        int maxRecovery = Math.Max(recoveryCount + (int)firstRecoveryBlock, maxRecoveryBlocks ?? 0);
+        var (fft, generator) = ChooseField(resolved, blockCount, recoveryCount, firstRecoveryBlock, maxRecovery, interleave);
+        return Describe(fft, generator);
+    }
+
+    private static string Describe(Par3Fft.Layout? fft, byte[] generator) => fft != null
+        ? $"FFT Reed-Solomon ({(fft.Field == null ? "XOR" : $"GF(2^{fft.Field.Bits})")}, {fft.Cohorts} cohort(s))"
+        : $"Cauchy Reed-Solomon (GF(2^{generator.Length * 8}))";
+
+    /// <summary>
+    /// The code that <see cref="Par3Code.Auto"/> stands for: Cauchy for small sets (code word up to 256 blocks, which
+    /// fits GF(2^8)) and when there are more recovery than input blocks (which the FFT code cannot do), else FFT.
+    /// </summary>
+    public static Par3Code ResolveCode(Par3Code code, ulong blockCount, int recoveryCount)
+        => code != Par3Code.Auto ? code
+            : blockCount + (ulong)recoveryCount <= 256 || (ulong)recoveryCount > blockCount ? Par3Code.Cauchy : Par3Code.Fft;
+
+    /// <summary>
+    /// Number of input blocks <see cref="Create"/> makes for files of these lengths (without deduplication, which
+    /// depends on the contents): every full block, plus one block per tail of 40+ bytes, or with tail packing the
+    /// tails packed first-fit (longest first) into shared blocks. Shorter tails are stored inside the PAR3 packets.
+    /// </summary>
+    /// <remarks>
+    /// Block size 100, files of 250, 130 and 70 bytes: full blocks 2 + 1 + 0 = 3; tails 50, 30 (too short), 70.
+    /// Packed: 70 opens a block, 50 does not fit next to it and opens another: 3 + 2 = 5 blocks. Without packing:
+    /// also 3 + 2 (one per long tail). With tails 60 and 40 they share one block: 60 + 40 = 100.
+    /// </remarks>
+    public static ulong CountBlocks(IEnumerable<long> fileLengths, ulong blockSize, bool packTails)
+    {
+        ulong full = 0;
+        var tails = new List<ulong>();
+        foreach (var length in fileLengths)
+        {
+            full += (ulong)length / blockSize;
+            ulong tail = (ulong)length % blockSize;
+            if (tail >= Par3Chunk.InlineLimit)
+            {
+                tails.Add(tail);
+            }
+        }
+
+        if (!packTails)
+        {
+            return full + (ulong)tails.Count;
+        }
+
+        var open = new List<ulong>();
+        foreach (var tail in tails.OrderByDescending(t => t))
+        {
+            int slot = open.FindIndex(used => blockSize - used >= tail);
+            if (slot < 0)
+            {
+                open.Add(tail);
+            }
+            else
+            {
+                open[slot] += tail;
+            }
+        }
+
+        return full + (ulong)open.Count;
+    }
+
+    /// <summary>The blocks one file of <paramref name="length"/> bytes needs: its full blocks, plus one for a tail of 40+ bytes.</summary>
+    public static ulong FileBlocks(long length, ulong blockSize)
+        => (ulong)length / blockSize + ((ulong)length % blockSize >= Par3Chunk.InlineLimit ? 1UL : 0UL);
 
     public static ulong ChooseBlockSize(long total, int targetCount)
     {
@@ -616,41 +696,31 @@ public static class Par3Creator
 
     internal sealed record Volume(string Path, int First, int Count);
 
-    internal static List<Volume> PlanVolumes(string outputPath, Par3CreateOptions options, int count, string marker)
-    {
-        var counts = new List<int>();
-        int remaining = count;
-        if (options.VolumeCount is int n && n > 0)
-        {
-            n = Math.Min(n, Math.Max(1, count));
-            for (int i = 0; i < n && remaining > 0; i++)
-            {
-                int c = (remaining + (n - i) - 1) / (n - i);
-                counts.Add(c);
-                remaining -= c;
-            }
-        }
-        else
-        {
-            int next = 1;
-            while (remaining > 0)
-            {
-                int c = Math.Min(next, remaining);
-                counts.Add(c);
-                remaining -= c;
-                next = (int)Math.Min(int.MaxValue / 2, (long)next * 2);
-            }
-        }
+    /// <summary>
+    /// The recovery files for <paramref name="recoveryCount"/> blocks from <paramref name="firstRecoveryBlock"/> on:
+    /// "set.vol{first}+{count}.par3", both numbers padded to at least 2 digits. Used by <see cref="Create"/>,
+    /// <see cref="Par3Extender"/> and, to preview a set before creating it, by <c>ParClient.Plan</c>.
+    /// </summary>
+    /// <param name="largestFile">Length of the largest input file (for <see cref="RecoveryFileScheme.LimitSize"/>).</param>
+    public static IReadOnlyList<RecoveryFilePlan> PlanRecoveryFiles(string outputPath, RecoveryFileScheme scheme, int? volumeCount, ulong firstRecoveryBlock, int recoveryCount, ulong blockSize, long largestFile)
+        => PlanVolumes(outputPath, scheme, volumeCount, firstRecoveryBlock, recoveryCount, ".vol", LimitBlocks(largestFile, blockSize))
+            .Select(v => new RecoveryFilePlan(v.Path, (long)firstRecoveryBlock + v.First, v.Count)).ToList();
 
+    /// <summary>The most blocks one recovery file may hold under <see cref="RecoveryFileScheme.LimitSize"/>: the largest file's full blocks.</summary>
+    internal static long LimitBlocks(long largestFile, ulong blockSize) => Math.Max(1, largestFile / (long)Math.Max(1, blockSize));
+
+    internal static List<Volume> PlanVolumes(string outputPath, RecoveryFileScheme scheme, int? volumeCount, ulong firstRecoveryBlock, int count, string marker, long limitBlocks)
+    {
+        var counts = RecoveryFileSizing.Counts(count, scheme, volumeCount, limitBlocks);
         var baseName = outputPath.EndsWith(".par3", StringComparison.OrdinalIgnoreCase) ? outputPath[..^5] : outputPath;
-        int first = (int)options.FirstRecoveryBlock;
-        int d1 = Math.Max(2, (first + count).ToString().Length);
-        int d2 = Math.Max(2, (counts.Count == 0 ? 0 : counts.Max()).ToString().Length);
+        ulong first = firstRecoveryBlock;
+        int d1 = Math.Max(2, (first + (ulong)count).ToString(CultureInfo.InvariantCulture).Length);
+        int d2 = Math.Max(2, (counts.Count == 0 ? 0 : counts.Max()).ToString(CultureInfo.InvariantCulture).Length);
         var result = new List<Volume>();
         int pos = 0;
         foreach (var c in counts)
         {
-            result.Add(new Volume($"{baseName}{marker}{(first + pos).ToString().PadLeft(d1, '0')}+{c.ToString().PadLeft(d2, '0')}.par3", pos, c));
+            result.Add(new Volume($"{baseName}{marker}{(first + (ulong)pos).ToString(CultureInfo.InvariantCulture).PadLeft(d1, '0')}+{c.ToString(CultureInfo.InvariantCulture).PadLeft(d2, '0')}.par3", pos, c));
             pos += c;
         }
 
@@ -741,7 +811,8 @@ public static class Par3Creator
 
     private static List<string> WriteDataPackets(InputSetId setId, string outputPath, ulong blockCount, Par3BlockSource blocks, ulong blockSize, List<byte[]> vital, byte[] creator, Par3CreateOptions options)
     {
-        var parts = PlanVolumes(outputPath, new Par3CreateOptions { Inputs = [], OutputPath = outputPath, VolumeCount = options.VolumeCount }, (int)blockCount, ".part");
+        // Data parts: equal parts when a file count is given, else 1, 2, 4, ... blocks per part.
+        var parts = PlanVolumes(outputPath, options.VolumeCount is > 0 ? RecoveryFileScheme.Uniform : RecoveryFileScheme.Exponential, options.VolumeCount, 0, (int)blockCount, ".part", long.MaxValue);
         var buf = new byte[blockSize];
         foreach (var part in parts)
         {
