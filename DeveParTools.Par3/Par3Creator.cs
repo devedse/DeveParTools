@@ -226,13 +226,13 @@ public static class Par3Creator
         var pieceArray = blockPieces.Select(p => (IReadOnlyList<(ulong, ulong, PieceSource)>)p).ToArray();
         var blockSource = new Par3BlockSource(pieceArray, handles);
 
-        // Checksums of tail-packed blocks.
+        // Checksums of tail-packed blocks (the tails at their offsets, zeros elsewhere).
         var buf = new byte[blockSize];
         for (int i = 0; i < blockChecks.Count; i++)
         {
             if (blockChecks[i] == null)
             {
-                blockSource.ReadBlock(i, 0, buf);
+                blockSource.Read(i, 0, buf);
                 blockChecks[i] = new BlockChecksum(Crc64Iso.Compute(buf), Fingerprint.Compute(buf));
             }
         }
@@ -589,7 +589,7 @@ public static class Par3Creator
         if (options.FatPermissions)
         {
             var info = isDirectory ? (FileSystemInfo)new DirectoryInfo(path) : new FileInfo(path);
-            const long epochDiff = 504911232000000000L; // 1600-01-01 → 0001-01-01 in 100 ns ticks
+            const long epochDiff = 504911232000000000L; // .NET ticks of 1601-01-01, the FILETIME epoch
             ushort attributes = (ushort)((int)info.Attributes & 0x2027);
             Add(Par3PacketWriter.FatPermissions(setId, (ulong)(info.CreationTimeUtc.Ticks - epochDiff), Par3FatPermissionsPacket.UnsetTime,
                 (ulong)(info.LastWriteTimeUtc.Ticks - epochDiff), attributes));
@@ -737,8 +737,6 @@ public static class Par3Creator
                 s.Dispose();
             }
         }
-
-        _ = options;
     }
 
     private static List<string> WriteDataPackets(InputSetId setId, string outputPath, ulong blockCount, Par3BlockSource blocks, ulong blockSize, List<byte[]> vital, byte[] creator, Par3CreateOptions options)
@@ -751,7 +749,7 @@ public static class Par3Creator
             for (int i = 0; i < part.Count; i++)
             {
                 ulong idx = (ulong)(part.First + i);
-                blocks.ReadBlock((int)idx, 0, buf);
+                blocks.Read((int)idx, 0, buf);
                 int len = buf.Length;
                 var header = Par3PacketWriter.DataHeader(setId, idx, len);
                 var hasher = new Blake3Hasher();

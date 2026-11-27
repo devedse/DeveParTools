@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using DeveParTools.Core.Codes;
 using DeveParTools.Core.Galois;
 using DeveParTools.Core.Hashing;
@@ -13,7 +14,10 @@ public sealed class Par3RepairOptions
     /// <summary>Delete damaged originals instead of keeping "name.1" backups.</summary>
     public bool PurgeBackups { get; init; }
 
-    /// <summary>Apply UNIX/FAT permission packets (mtime, mode, attributes) to repaired files.</summary>
+    /// <summary>
+    /// Apply UNIX/FAT permission packets (mtime, mode, attributes) to the files and directories of the set, also when
+    /// nothing needed repair (see <see cref="Par3Metadata"/> for what is applied and what is never applied).
+    /// </summary>
     public bool RestorePermissions { get; init; }
 
     /// <summary>Create links from Link packets (only links that stay inside the base directory).</summary>
@@ -63,13 +67,21 @@ public static class Par3Repairer
 
         if (verify.AllFilesComplete)
         {
+            // Nothing to rebuild, but permissions and links are restored when asked for.
+            RestoreMetadata(verify, options, observer);
             return new Par3RepairResult { Success = true, Message = "All files are already correct." };
         }
 
         var missing = Enumerable.Range(0, verify.Blocks.Length).Where(i => verify.Blocks[i] == null).ToList();
         if (!verify.RepairPossible)
         {
-            return new Par3RepairResult { Success = false, Message = $"Repair not possible: {missing.Count} block(s) missing but only {verify.RecoveryBlocksAvailable} recovery block(s) available." };
+            return new Par3RepairResult
+            {
+                Success = false,
+                Message = missing.Count > verify.RecoveryBlocksAvailable
+                    ? $"Repair not possible: {missing.Count} block(s) missing but only {verify.RecoveryBlocksAvailable} recovery block(s) available."
+                    : $"Repair not possible: the {verify.RecoveryBlocksAvailable} available recovery block(s) cannot rebuild the {missing.Count} missing block(s) (each FFT cohort only rebuilds its own blocks).",
+            };
         }
 
         observer.Stage("Repairing");
@@ -98,15 +110,29 @@ public static class Par3Repairer
                     // The Cauchy x_I convention differs between the spec text and par3cmdline; the block checksums tell
                     // which one the creator used.
                     bool ok = false;
-                    foreach (var convention in new[] { Par3CauchyConvention.Par3cmdline, Par3CauchyConvention.Specification })
+                    try
                     {
-                        bool usedMatrix = ReconstructBlocks(verify, missing, sink, handles, context, convention);
-                        fs.Flush(true);
-                        ok = RebuiltBlocksValid(verify, missing, fs, rebuilt);
-                        if (ok || !usedMatrix)
+                        foreach (var convention in new[] { Par3CauchyConvention.Par3cmdline, Par3CauchyConvention.Specification })
                         {
-                            break;
+                            bool usedMatrix = ReconstructBlocks(verify, missing, sink, handles, context, convention);
+                            fs.Flush(true);
+                            ok = RebuiltBlocksValid(verify, missing, fs, rebuilt);
+                            if (ok || !usedMatrix)
+                            {
+                                break;
+                            }
                         }
+                    }
+                    catch (InvalidOperationException e)
+                    {
+                        // E.g. a sparse random matrix whose rows are not independent on the missing blocks.
+                        foreach (var m in missing)
+                        {
+                            map?.Set(m, BlockState.Unrecoverable);
+                        }
+
+                        observer.Log(ParLogLevel.Error, e.Message);
+                        return new Par3RepairResult { Success = false, Message = $"Repair failed: {e.Message}" };
                     }
 
                     if (!ok)
@@ -156,16 +182,7 @@ public static class Par3Repairer
                 Directory.CreateDirectory(d);
             }
 
-            if (options.RestorePermissions)
-            {
-                Par3Metadata.Apply(verify, observer);
-            }
-
-            if (options.RestoreLinks)
-            {
-                Par3Metadata.CreateLinks(verify, observer);
-            }
-
+            RestoreMetadata(verify, options, observer);
             foreach (var m in missing)
             {
                 map?.Set(m, BlockState.Repaired);
@@ -187,6 +204,19 @@ public static class Par3Repairer
                 handles.Close(blockFile);
                 File.Delete(blockFile);
             }
+        }
+    }
+
+    private static void RestoreMetadata(Par3VerifyResult verify, Par3RepairOptions options, IParOperationObserver observer)
+    {
+        if (options.RestorePermissions)
+        {
+            Par3Metadata.Apply(verify, observer);
+        }
+
+        if (options.RestoreLinks)
+        {
+            Par3Metadata.CreateLinks(verify, observer);
         }
     }
 
@@ -232,30 +262,52 @@ public static class Par3Repairer
         var known = new Par3BlockSource(verify.Blocks.Select(b => b?.Pieces ?? (IReadOnlyList<(ulong, ulong, PieceSource)>)[]).ToArray(), handles);
         var options = context.Combine.Create(new Progress<double>(p => context.Observer.Progress(p, "Reconstructing")), context.MemoryBudget / 3);
 
-        var fft = set.RecoveryBlocks.Where(r => r.Matrix is Par3FftMatrixPacket).ToList();
-        var matrixBlocks = set.RecoveryBlocks.Where(r => r.Matrix is not Par3FftMatrixPacket).ToList();
-        if (fft.Count >= missing.Count && fft.Count > 0)
+        var plan = ChoosePlan(set, missing.Count);
+        if (plan.Fft != null)
         {
-            var packet = (Par3FftMatrixPacket)fft[0].Matrix;
-            int cohorts = (int)packet.Interleave + 1;
-            int m = 1 << packet.MaxRecoveryLog2;
-            var layout = set.Start.GfSize == 0
-                ? new Par3Fft.Layout(1, (int)set.BlockCount, 1, null)
-                : new Par3Fft.Layout(cohorts, (int)((set.BlockCount + (ulong)cohorts - 1) / (ulong)cohorts), m,
-                    set.Start.GfSize == 1 ? Core.Codes.Fft.LeopardField.FF8 : Core.Codes.Fft.LeopardField.FF16);
             var recoveryMap = new Dictionary<ulong, int>();
-            for (int i = 0; i < fft.Count; i++)
+            for (int i = 0; i < plan.Recovery.Count; i++)
             {
-                recoveryMap.TryAdd(fft[i].Index, i);
+                recoveryMap.TryAdd(plan.Recovery[i].Index, i);
             }
 
-            var reader = new RecoveryReader(fft, handles);
-            Par3Fft.Decode(layout, set.BlockCount, available, recoveryMap, known, reader, sink, bs, options);
+            var reader = new RecoveryReader(plan.Recovery, handles);
+            Par3Fft.Decode(plan.Fft, set.BlockCount, available, recoveryMap, known, reader, sink, bs, options);
             return false;
         }
 
-        Par3Fields.With(set.Start.GeneratorBytes, new MatrixRepair(verify, missing, matrixBlocks, known, sink, handles, options, convention));
+        Par3Fields.With(set.Start.GeneratorBytes, new MatrixRepair(verify, missing, plan.Recovery, known, sink, handles, options, convention));
         return true;
+    }
+
+    /// <summary>
+    /// How missing blocks are rebuilt: with the FFT code (<see cref="Plan.Fft"/> set) when its recovery blocks alone
+    /// are enough in number, otherwise with the linear-algebra repair over all Cauchy/Sparse/Explicit recovery blocks.
+    /// </summary>
+    private sealed record Plan(Par3Fft.Layout? Fft, List<Par3RecoveryBlock> Recovery);
+
+    private static Plan ChoosePlan(Par3InputSet set, int missing)
+    {
+        var fft = set.RecoveryBlocks.Where(r => r.Matrix is Par3FftMatrixPacket).ToList();
+        if (fft.Count > 0 && fft.Count >= missing && Par3Fft.FromPacket((Par3FftMatrixPacket)fft[0].Matrix, set.Start.GfSize, set.BlockCount) is { } layout)
+        {
+            return new Plan(layout, fft);
+        }
+
+        return new Plan(null, set.RecoveryBlocks.Where(r => r.Matrix is not Par3FftMatrixPacket).ToList());
+    }
+
+    /// <summary>
+    /// Whether the available recovery blocks can rebuild every missing block: per cohort for the FFT code, by count for
+    /// matrix codes (a Cauchy matrix can rebuild any L blocks from any L recovery blocks; sparse matrices usually can).
+    /// </summary>
+    internal static bool CanReconstruct(Par3VerifyResult verify)
+    {
+        int missing = verify.MissingBlocks;
+        var plan = ChoosePlan(verify.Set, missing);
+        return plan.Fft != null
+            ? Par3Fft.CanDecode(plan.Fft, verify.Set.BlockCount, verify.Blocks.Select(b => b != null).ToArray(), plan.Recovery.Select(r => r.Index))
+            : plan.Recovery.Count >= missing;
     }
 
     /// <summary>Generic linear-algebra repair for Cauchy / Sparse / Explicit matrices.</summary>
@@ -318,10 +370,9 @@ public static class Par3Repairer
                 }
             }
 
-            if (!a.TryInvert(options.CancellationToken))
-            {
-                throw new InvalidOperationException("Recovery matrix is singular.");
-            }
+            // The rows were chosen to be independent on the missing columns, so this square matrix is invertible.
+            bool inverted = a.TryInvert(options.CancellationToken);
+            Debug.Assert(inverted, "Independent rows give an invertible matrix.");
 
             var missingSet = new HashSet<int>(missing);
             var knownBlocks = Enumerable.Range(0, (int)set.BlockCount).Where(i => !missingSet.Contains(i)).ToList();
@@ -357,13 +408,14 @@ public static class Par3Repairer
                         return field.Zero;
                     }
 
+                    // Rows are generated in input order, so row i does not depend on how many rows follow; generating
+                    // rows up to the set's block count covers every input index a caller can ask for.
                     if (!_sparse.TryGetValue(s.Checksum, out var rows))
                     {
                         _sparse[s.Checksum] = rows = Par3Sparse.Generate(field, s, set.BlockCount);
                     }
 
-                    ulong row = input - s.First;
-                    return row < (ulong)rows.Count ? rows[(int)row][(int)r.Index] : field.Zero;
+                    return rows[(int)(input - s.First)][(int)r.Index];
                 }
 
                 case Par3ExplicitMatrixPacket e:
@@ -536,9 +588,7 @@ public static class Par3Repairer
                 }
                 else
                 {
-                    span.Clear();
-                    var avail = verify.Blocks[block]!;
-                    new Par3BlockSource([avail.Pieces], handles).ReadBlock(0, blockOffset + (long)done, span);
+                    new Par3BlockSource([verify.Blocks[block]!.Pieces], handles).Read(0, blockOffset + (long)done, span);
                 }
 
                 RandomAccess.Write(outStream.SafeFileHandle, span, dst + (long)done);

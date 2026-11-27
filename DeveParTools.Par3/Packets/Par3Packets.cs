@@ -29,6 +29,14 @@ public readonly record struct Fingerprint(UInt128 Value)
         return b;
     }
 
+    /// <summary>
+    /// Sort key for the "numerical order" of checksums in Directory and Root packets: the 16 bytes compared like
+    /// <c>memcmp</c> (first byte most significant), as par3cmdline sorts them. <see cref="Value"/> is the
+    /// little-endian reading of the bytes, so reversing its byte order gives that big-endian order.
+    /// </summary>
+    /// <example>Bytes <c>01 00 .. 00</c> sort after <c>00 FF .. FF</c>, although their little-endian values are 1 and 2^128 − 256.</example>
+    public UInt128 SortKey => BinaryPrimitives.ReverseEndianness(Value);
+
     public override string ToString() => Convert.ToHexStringLower(ToArray());
 }
 
@@ -138,6 +146,13 @@ public sealed record Par3RootPacket(ulong LowestUnusedBlock, byte Attributes, IR
 
 public sealed record Par3LinkPacket(bool IsSymbolic, string Name, string[] TargetPath, bool TargetIsAbsolute, IReadOnlyList<Fingerprint> Options) : Par3Packet;
 
+/// <summary>UNIX Permissions packet ("PAR UNX").</summary>
+/// <remarks>
+/// <para>Times are nanoseconds since 1970-01-01 UTC according to the specification, but par3cmdline writes whole
+/// seconds into the same field; <see cref="Par3Metadata.UnixTimeToUtc"/> reads both.</para>
+/// <para><see cref="Mode"/> holds the low 12 bits of <c>st_mode</c> (rwx for user/group/other, plus set-uid,
+/// set-gid and sticky); the top 4 bits must be zero. par3cmdline writes 0xFFFF when it did not store the mode.</para>
+/// </remarks>
 public sealed record Par3UnixPermissionsPacket(long Atime, long Ctime, long Mtime, uint Uid, uint Gid, ushort Mode, string Owner, string Group, IReadOnlyList<(string Name, string Value)> Xattrs) : Par3Packet
 {
     public const long UnsetTime = -1; // 2^64-1 as signed
@@ -145,9 +160,19 @@ public sealed record Par3UnixPermissionsPacket(long Atime, long Ctime, long Mtim
     public const ushort DefaultMode = 0x0180;
 }
 
+/// <summary>FAT Permissions packet ("PAR FAT").</summary>
+/// <remarks>
+/// Timestamps are Windows FILETIME values: 100 ns ticks since 1601-01-01 UTC (the specification text says 1600,
+/// but par3cmdline and the Windows API it is based on use 1601). <see cref="Attributes"/> may only use the bits
+/// ReadOnly (0x1), Hidden (0x2), System (0x4), Archive (0x20) and NotContentIndexed (0x2000); par3cmdline writes
+/// 0xFFFF when it did not store them.
+/// </remarks>
 public sealed record Par3FatPermissionsPacket(ulong Creation, ulong LastAccess, ulong LastWrite, ushort Attributes) : Par3Packet
 {
     public const ulong UnsetTime = ulong.MaxValue;
+
+    /// <summary>The attribute bits the specification defines.</summary>
+    public const ushort KnownAttributes = 0x2027;
 }
 
 /// <summary>
@@ -155,6 +180,19 @@ public sealed record Par3FatPermissionsPacket(ulong Creation, ulong LastAccess, 
 /// <see cref="FirstBlock"/>; a remaining tail is either inline (&lt; 40 bytes) or stored at
 /// (<see cref="TailBlock"/>, <see cref="TailOffset"/>).
 /// </summary>
+/// <remarks>
+/// Which optional fields follow the length depends only on the length and the block size. Examples with a block
+/// size of 1000 (field sizes in bytes in parentheses):
+/// <code>
+/// 6000 unprotected bytes:              [0 (8)] [6000 (8)]
+/// 3000 bytes in blocks 4, 5, 6:        [3000 (8)] [first block 4 (8)]
+/// 1010 bytes, 10-byte tail (&lt; 40):     [1010 (8)] [first block (8)] [the 10 tail bytes]
+/// 30 bytes (tiny file, inline only):   [30 (8)] [the 30 bytes]
+/// 2500 bytes, 500-byte tail stored     [2500 (8)] [first block (8)] [CRC-64 of the tail's first 40 bytes (8)]
+///   at offset 300 of block 9:          [BLAKE3 of the tail (16)] [tail block 9 (8)] [tail offset 300 (8)]
+/// 700 bytes (one tail, no full block): [700 (8)] [CRC-64 (8)] [BLAKE3 (16)] [tail block (8)] [tail offset (8)]
+/// </code>
+/// </remarks>
 public sealed record Par3Chunk
 {
     public bool Protected { get; init; } = true;
@@ -208,6 +246,11 @@ public sealed record Par3Chunk
             ulong first = 0;
             if (length >= blockSize)
             {
+                if (p + 8 > bytes.Length)
+                {
+                    throw new InvalidDataException("Truncated chunk description.");
+                }
+
                 first = BinaryPrimitives.ReadUInt64LittleEndian(bytes[p..]);
                 p += 8;
             }
