@@ -329,7 +329,14 @@ public sealed class CliTests
         var b = MakeFile("p2/b.bin", 5000);
         var par2 = Path.Combine(_dir, "p2", "b.par2");
         Assert.AreEqual(0, Run("create", par2, b).Code);
-        Assert.AreEqual(ExitCodes.InvalidArguments, Run("extend", par2, "-c", "1").Code);
+        var par2Extend = Run("extend", par2, "-c", "3", "--first", "1000");
+        Assert.AreEqual(0, par2Extend.Code, par2Extend.Err + par2Extend.Out);
+        StringAssert.Contains(par2Extend.Out, "Added 3 recovery block(s)");
+
+        var c = MakeFile("p1/c.bin", 500);
+        var par1 = Path.Combine(_dir, "p1", "c.par");
+        Assert.AreEqual(0, Run("create", par1, c).Code);
+        Assert.AreEqual(ExitCodes.InvalidArguments, Run("extend", par1, "-c", "1").Code);
     }
 
     [TestMethod]

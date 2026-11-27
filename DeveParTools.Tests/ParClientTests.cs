@@ -391,6 +391,13 @@ public sealed class ParClientTests
         Assert.IsTrue(extended.WrittenFiles.Single().EndsWith("one.vol10+03.par3", StringComparison.Ordinal), extended.WrittenFiles.Single());
         Assert.AreEqual(5, ParClient.Verify(par3).RecoveryBlocksAvailable);
 
+        var par2 = Path.Combine(_dir, "x", "one.par2");
+        ParClient.Create(new ParCreateRequest { Inputs = files, OutputPath = par2, RecoveryBlockCount = 2, BlockSize = 4096 });
+        var extended2 = ParClient.Extend(new ParExtendRequest { ParFile = par2, RedundancyPercent = 10, FirstRecoveryBlock = 7, VolumeCount = 1 });
+        Assert.AreEqual(ParFormat.Par2, extended2.Format);
+        Assert.AreEqual(2, extended2.RecoveryBlocks, "ceil(18 slices × 10%)");
+        Assert.AreEqual(4, ParClient.Verify(par2).RecoveryBlocksAvailable);
+
         var par1 = Path.Combine(_dir, "x", "one.par");
         ParClient.Create(new ParCreateRequest { Inputs = files, OutputPath = par1 });
         Assert.ThrowsExactly<NotSupportedException>(() => ParClient.Extend(new ParExtendRequest { ParFile = par1, RecoveryBlockCount = 1 }));

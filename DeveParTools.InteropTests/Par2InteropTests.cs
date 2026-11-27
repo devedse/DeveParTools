@@ -292,4 +292,29 @@ public sealed class Par2InteropTests
         (code, output) = ExternalTool.Run(exe, ws.Dir, "v", "set.par2");
         Assert.AreEqual(RepairNotPossible, code, $"{toolName}:\n{output}");
     }
+
+    /// <summary>par2cmdline creates a set, we add volumes, and par2cmdline repairs with only our volumes.</summary>
+    [TestMethod]
+    [DynamicData(nameof(Tools))]
+    public void TheyCreate_WeExtend_TheyRepairWithOurVolumes(string toolName, string exe)
+    {
+        SkipWithoutTool(exe);
+        using var ws = new Workspace();
+        var files = MakeFiles(ws, 9);
+        var (code, output) = ExternalTool.Run(exe, ws.Dir, ["c", "-s8192", "-c4", "set.par2", .. files.Keys.Select(Path.GetFileName)!]);
+        Assert.AreEqual(Success, code, $"{toolName} create failed:\n{output}");
+        var theirVolumes = Directory.GetFiles(ws.Dir, "set.vol*.par2");
+
+        var extended = Par2Extender.Extend(new Par2ExtendOptions { Par2Path = ws["set.par2"], RecoverySliceCount = 12 });
+        Assert.AreEqual(12, extended.RecoverySlices);
+        foreach (var v in theirVolumes)
+        {
+            File.Delete(v);
+        }
+
+        Damage(ws);
+        (code, output) = ExternalTool.Run(exe, ws.Dir, "r", "set.par2");
+        Assert.AreEqual(Success, code, $"{toolName} repair with our volumes failed:\n{output}");
+        AssertFiles(files);
+    }
 }

@@ -44,8 +44,8 @@ public sealed partial class VerifyViewModel : OperationViewModel
     [NotifyCanExecuteChangedFor(nameof(ExtendCommand))]
     private decimal? _extendPercent = 10;
 
-    /// <summary>Extending is offered for PAR3 sets whose input data is all there.</summary>
-    public bool CanOfferExtend => Report is { Format: ParFormat.Par3, MissingBlocks: 0 };
+    /// <summary>Extending is offered for complete PAR2 sets and for PAR3 sets whose input data is all there.</summary>
+    public bool CanOfferExtend => Report is { Format: ParFormat.Par3, MissingBlocks: 0 } or { Format: ParFormat.Par2, AllFilesComplete: true };
 
     public ObservableCollection<string> ExtraFiles { get; } = new();
 

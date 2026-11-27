@@ -30,9 +30,9 @@ fully managed C# with no native dependencies, and as fast as the native tools.
   - Multithreaded encoding and hashing.
   - PAR3's FFT Reed-Solomon code (a port of the Leopard algorithm) takes O(n log n) instead of O(n²).
   - BLAKE3 hashes up to 16 chunks at once with SIMD.
-- **Grow a set later.** `extend` adds recovery blocks to an existing PAR3 set, also one made by par3cmdline. The
-  Cauchy convention is detected from the existing recovery data, and FFT sets grow up to the maximum chosen at
-  creation (`--max-recovery`).
+- **Grow a set later.** `extend` adds recovery blocks to an existing PAR2 or PAR3 set, also one made by par2cmdline
+  or par3cmdline; the reference tools repair with the new blocks. For PAR3 Cauchy sets the coefficient convention is
+  detected from the existing recovery data, and FFT sets grow up to the maximum chosen at creation (`--max-recovery`).
 - **Archives that repair themselves ("PAR inside").** `insert` puts PAR3 recovery data inside a .zip, .7z or .rar.
   The archive keeps working in archive tools (Info-ZIP, 7-Zip, .NET's ZipArchive), can be verified and repaired like
   a PAR file, and `delete` restores the original bytes. It is compatible with par3cmdline's insert, delete, verify
@@ -109,7 +109,7 @@ devepar create backup.par3 projects/ -r 5 --code fft -n 4 # PAR3 with the FFT co
 devepar verify photos.par2 --map                         # block map in the terminal
 devepar repair photos.par2 ~/Downloads/IMG_0001.jpg      # also look for data in an extra file
 devepar verify backup.par3 --json                        # NDJSON events for scripts and other UIs
-devepar extend backup.par3 -r 5                          # add 5% more recovery data to an existing PAR3 set
+devepar extend backup.par3 -r 5                          # add 5% more recovery data to an existing set
 devepar insert photos.zip -r 3                           # the ZIP now carries recovery data for itself...
 devepar repair photos.zip                                # ...so it can repair itself
 devepar delete photos.zip                                # back to the original bytes

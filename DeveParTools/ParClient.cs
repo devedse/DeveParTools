@@ -328,12 +328,28 @@ public static class ParClient
     /// Adds recovery blocks to an existing set whose input files are all present. The new blocks go to new recovery
     /// files and work together with the existing ones.
     /// </summary>
+    /// <remarks>PAR2: every file must be complete at its stored name (the set is recreated with new exponents). PAR3: all input blocks must be available.</remarks>
     /// <exception cref="NotSupportedException">The format (PAR1) or the set's code cannot be extended.</exception>
     /// <exception cref="InvalidOperationException">Input data is missing: repair first.</exception>
     public static ParCreateReport Extend(ParExtendRequest request, OperationContext? context = null)
     {
         context ??= OperationContext.Default;
         var format = Detect(request.ParFile);
+        if (format == ParFormat.Par2)
+        {
+            var p2 = Par2Extender.Extend(new Par2ExtendOptions
+            {
+                Par2Path = request.ParFile,
+                BaseDirectory = request.BaseDirectory,
+                RecoverySliceCount = request.RecoveryBlockCount,
+                RedundancyPercent = request.RedundancyPercent,
+                FirstExponent = request.FirstRecoveryBlock is long e ? checked((int)e) : null,
+                VolumeCount = request.VolumeCount,
+                OutputPath = request.OutputPath,
+            }, context);
+            return new ParCreateReport(format, p2.WrittenFiles, p2.SliceSize, p2.InputSlices, p2.RecoverySlices, "PAR2 Reed-Solomon (GF(2^16))");
+        }
+
         if (format != ParFormat.Par3)
         {
             throw new NotSupportedException($"Extending {format} sets is not supported.");

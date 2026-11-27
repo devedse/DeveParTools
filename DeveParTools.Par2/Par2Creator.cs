@@ -65,6 +65,12 @@ public sealed class Par2CreateOptions
     public string? Comment { get; init; }
 
     public string Creator { get; init; } = Par2Creator.DefaultCreator;
+
+    /// <summary>
+    /// False: write only the recovery volumes, and refuse to overwrite existing ones. Used to add volumes to an existing
+    /// set (see <see cref="Par2Extender"/>), whose index file stays as it is.
+    /// </summary>
+    public bool WriteIndexFile { get; init; } = true;
 }
 
 public sealed class Par2CreateResult
@@ -189,6 +195,11 @@ public static class Par2Creator
 
         // 3. Volume files.
         var volumes = PlanVolumes(outputPath, options, recoveryCount, sliceSize, inputs.Select(i => i.Length).DefaultIfEmpty(0).Max());
+        if (!options.WriteIndexFile && volumes.FirstOrDefault(v => File.Exists(v.Path)) is { } existing)
+        {
+            throw new IOException($"'{existing.Path}' already exists.");
+        }
+
         for (int v = 0; v < volumes.Count; v++)
         {
             for (int k = 0; k < volumes[v].Count; k++)
@@ -312,8 +323,9 @@ public static class Par2Creator
         }
 
         var creator = Par2PacketWriter.Creator(setId, options.Creator);
-        using (var index = new FileStream(outputPath, FileMode.Create, FileAccess.Write))
+        if (options.WriteIndexFile)
         {
+            using var index = new FileStream(outputPath, FileMode.Create, FileAccess.Write);
             foreach (var p in critical)
             {
                 index.Write(p);
@@ -346,7 +358,7 @@ public static class Par2Creator
             SliceSize = sliceSize,
             InputSlices = totalSlices,
             RecoverySlices = recoveryCount,
-            WrittenFiles = [outputPath, .. volumes.Select(v => v.Path)],
+            WrittenFiles = options.WriteIndexFile ? [outputPath, .. volumes.Select(v => v.Path)] : volumes.Select(v => v.Path).ToList(),
         };
     }
 

@@ -31,11 +31,18 @@ internal static class ExternalTool
         return null;
     }
 
-    public static (int ExitCode, string Output) Run(string exe, string workingDir, params string[] args)
+    /// <summary>
+    /// Runs a reference tool. Its stdin is closed right away, because some tools ask questions on the console and would
+    /// otherwise wait forever. A tool that runs longer than <paramref name="timeoutSeconds"/> is killed and the test fails.
+    /// </summary>
+    public static (int ExitCode, string Output) Run(string exe, string workingDir, params string[] args) => Run(exe, workingDir, 120, args);
+
+    public static (int ExitCode, string Output) Run(string exe, string workingDir, int timeoutSeconds, params string[] args)
     {
         var psi = new ProcessStartInfo(exe)
         {
             WorkingDirectory = workingDir,
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -46,9 +53,16 @@ internal static class ExternalTool
         }
 
         using var p = Process.Start(psi)!;
+        p.StandardInput.Close();
         var stdout = p.StandardOutput.ReadToEndAsync();
         var stderr = p.StandardError.ReadToEndAsync();
-        p.WaitForExit();
+        if (!p.WaitForExit(TimeSpan.FromSeconds(timeoutSeconds)))
+        {
+            p.Kill(entireProcessTree: true);
+            p.WaitForExit();
+            throw new TimeoutException($"{Path.GetFileName(exe)} {string.Join(' ', args)} did not finish within {timeoutSeconds} s:\n{stdout.Result}{stderr.Result}");
+        }
+
         return (p.ExitCode, stdout.Result + stderr.Result);
     }
 }
