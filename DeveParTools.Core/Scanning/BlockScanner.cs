@@ -61,7 +61,8 @@ public static class BlockScanner
 {
     private const int ReadChunk = 4 << 20;
 
-    public static List<FoundBlock> Scan(string path, IBlockMatcher matcher, FileHandleCache handles, int threads, CancellationToken cancellationToken = default)
+    /// <param name="scanned">Called with the number of further bytes scanned (from several threads), for progress.</param>
+    public static List<FoundBlock> Scan(string path, IBlockMatcher matcher, FileHandleCache handles, int threads, CancellationToken cancellationToken = default, Action<long>? scanned = null)
     {
         long length = new FileInfo(path).Length;
         var results = new List<FoundBlock>();
@@ -76,7 +77,7 @@ public static class BlockScanner
             {
                 long start = s * per;
                 long end = Math.Min(positions, start + per);
-                parts[s] = ScanSegment(path, matcher, handles, start, end, cancellationToken);
+                parts[s] = ScanSegment(path, matcher, handles, start, end, cancellationToken, scanned);
             });
             foreach (var p in parts)
             {
@@ -105,7 +106,7 @@ public static class BlockScanner
     }
 
     /// <summary>Scan window start positions in [start, end).</summary>
-    private static List<FoundBlock> ScanSegment(string path, IBlockMatcher matcher, FileHandleCache handles, long start, long end, CancellationToken token)
+    private static List<FoundBlock> ScanSegment(string path, IBlockMatcher matcher, FileHandleCache handles, long start, long end, CancellationToken token, Action<long>? scanned)
     {
         int w = matcher.BlockSize;
         var found = new List<FoundBlock>();
@@ -124,6 +125,7 @@ public static class BlockScanner
             if (rel + w + 1 > bufLen)
             {
                 // Refill so that the window and one following byte are available.
+                scanned?.Invoke(pos - bufStart);
                 bufStart = pos;
                 bufLen = handles.ReadPadded(path, bufStart, buf.AsSpan(0, capacity + w));
                 rel = 0;
@@ -162,6 +164,7 @@ public static class BlockScanner
             pos++;
         }
 
+        scanned?.Invoke(Math.Max(0, Math.Min(pos, end) - bufStart));
         return found;
     }
 }

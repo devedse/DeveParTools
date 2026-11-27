@@ -105,6 +105,10 @@ Check(shell.Create.Plan is { InputBlocks: > 2500 and <= 3000, Files.Count: 5 } &
 Save(window, output, "create");
 Await(shell.Create.CreateCommand.ExecuteAsync(null));
 Check(File.Exists(Path.Combine(work, "backup.par3")), "PAR3 set created");
+Check(shell.Create.Stages.Select(st => st.Name).SequenceEqual(["Preparing", "Hashing", "Writing metadata", "Encoding", "Writing recovery files", "Writing the index file"])
+    && shell.Create.Stages.All(st => st.IsDone) && Math.Abs(shell.Create.Progress - 100) < 1e-9 && shell.Create.TotalText?.StartsWith("Done in", StringComparison.Ordinal) == true,
+    $"every step is shown and done: {string.Join(", ", shell.Create.Stages.Select(st => $"{st.Name} {st.PercentText} ({st.ShareText})"))}; {shell.Create.TotalText}");
+ExpandProgress(window);
 Save(window, output, "create-done");
 
 // Damage: overwrite part of a photo, delete another, shift the video.
@@ -129,6 +133,7 @@ if (shell.Verify.Report is not { AllFilesComplete: false, RepairPossible: true }
 }
 
 Check(shell.Verify.Report is { AllFilesComplete: false, RepairPossible: true }, "damage detected, repair possible");
+Check(shell.Verify.Stages.Select(st => st.Name).SequenceEqual(["Loading", "Verifying", "Scanning"]) && shell.Verify.Stages.All(st => st.IsDone), "verify shows its steps: " + string.Join(", ", shell.Verify.Stages.Select(st => st.Name)));
 shell.Verify.SelectedBlock = 0;
 Settle();
 Check(shell.Verify.SelectedBlockInfo?.StartsWith("Block", StringComparison.Ordinal) == true, "the grid describes the selected block to the view model: " + shell.Verify.SelectedBlockInfo?.Split('\n')[0]);
@@ -142,6 +147,9 @@ Application.Current!.RequestedThemeVariant = ThemeVariant.Light;
 shell.Verify.SelectedFile = null;
 Await(shell.Verify.RepairCommand.ExecuteAsync(null));
 Check(shell.Verify.StatusText?.StartsWith("Repaired") == true, "repair succeeded: " + shell.Verify.StatusText);
+Check(shell.Verify.Stages.Select(st => st.Name).SequenceEqual(["Reconstructing", "Checking rebuilt blocks", "Writing repaired files"]) && shell.Verify.Stages.All(st => st.IsDone),
+    "repair shows its steps: " + string.Join(", ", shell.Verify.Stages.Select(st => $"{st.Name} {st.PercentText}")));
+ExpandProgress(window);
 Save(window, output, "verify-repaired");
 
 // Extend: the set is complete again, so more recovery data can be added.
@@ -203,6 +211,14 @@ Save(window, output, "create-advanced-par3");
 shell.Create.FormatIndex = 1;
 Await(shell.Create.CreateCommand.ExecuteAsync(null));
 var volumes = Directory.GetFiles(work, "advanced.vol*.par2").Select(Path.GetFileName).Order().ToList();
+
+// Creating again over an earlier set: the app asks, then removes the old files first (no left-overs mixed in).
+File.WriteAllBytes(Path.Combine(work, "advanced.vol99+01.par2"), [1, 2, 3]);
+shell.Create.Dialogs = new ConfirmingDialogs();
+Await(shell.Create.CreateCommand.ExecuteAsync(null));
+shell.SetDialogs(window);
+Check(!File.Exists(Path.Combine(work, "advanced.vol99+01.par2")) && Directory.GetFiles(work, "advanced.vol*.par2").Select(Path.GetFileName).Order().SequenceEqual(volumes),
+    "an earlier set with the same name is replaced, not mixed in");
 Check(volumes.Count == 2 && volumes[0]!.StartsWith("advanced.vol10+", StringComparison.Ordinal), "6 recovery blocks from number 10 in 2 files: " + string.Join(", ", volumes));
 
 // Extend with an exact count, a file count and another file name.
@@ -418,6 +434,18 @@ static void Save(Window window, string output, string name)
     using var frame = window.CaptureRenderedFrame() ?? throw new Exception("No rendered frame for " + name);
     frame.Save(Path.Combine(output, name + ".png"), PngBitmapEncoderOptions.Default);
     Console.WriteLine("  " + name + ".png");
+}
+
+static void ExpandProgress(Window window)
+{
+    Settle();
+    foreach (var view in window.GetVisualDescendants().OfType<OperationProgressView>())
+    {
+        foreach (var expander in view.GetVisualDescendants().OfType<Expander>())
+        {
+            expander.IsExpanded = true;
+        }
+    }
 }
 
 /// <summary>Dialogs for the checks: confirms everything, picks nothing.</summary>

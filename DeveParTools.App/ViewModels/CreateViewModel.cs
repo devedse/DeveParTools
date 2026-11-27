@@ -649,6 +649,35 @@ public sealed partial class CreateViewModel : OperationViewModel
 
         await _scanTask;
         var request = BuildRequest(exact: true);
+
+        // An earlier set with the same name: its left-over recovery files would be mixed up with the new set.
+        var earlier = ParClient.ExistingSetFiles(request.OutputPath, Format);
+        if (earlier.Count > 0)
+        {
+            if (Dialogs == null || !await Dialogs.ConfirmAsync(
+                    "Replace the earlier recovery set?",
+                    $"{earlier.Count:N0} PAR file(s) named {Path.GetFileNameWithoutExtension(request.OutputPath)}… are already in this folder, from an earlier recovery set. Recovery files that the new set does not overwrite would be mixed up with it. Delete them and create the new set?",
+                    "Delete and create"))
+            {
+                return;
+            }
+
+            try
+            {
+                foreach (var f in earlier)
+                {
+                    File.Delete(f);
+                }
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                StatusText = "The earlier PAR files could not be deleted: " + e.Message;
+                return;
+            }
+
+            Log.Add(new LogLine(DateTime.Now, ParLogLevel.Info, $"Deleted {earlier.Count:N0} PAR file(s) of the earlier set."));
+        }
+
         var report = await RunAsync("Creating", ctx => ParClient.Create(request, ctx));
         if (report != null)
         {
@@ -664,6 +693,11 @@ public sealed partial class CreateViewModel : OperationViewModel
 
 public static class Formatting
 {
+    /// <summary>"45 s", "3 min 05 s", "1 h 02 min".</summary>
+    public static string Duration(TimeSpan t) => t.TotalSeconds < 60
+        ? $"{Math.Max(0, (int)t.TotalSeconds)} s"
+        : t.TotalMinutes < 60 ? $"{(int)t.TotalMinutes} min {t.Seconds:00} s" : $"{(int)t.TotalHours} h {t.Minutes:00} min";
+
     public static string Bytes(long bytes)
     {
         string[] units = ["B", "KiB", "MiB", "GiB", "TiB"];

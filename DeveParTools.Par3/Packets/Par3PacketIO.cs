@@ -327,16 +327,24 @@ public static class Par3PacketReader
         Damaged,
     }
 
-    public static Par3FileReadResult ReadFile(string path, CancellationToken cancellationToken = default)
+    /// <param name="reached">Called with how far into the file reading has got (about every 4 MiB, and at the end), for progress.</param>
+    public static Par3FileReadResult ReadFile(string path, CancellationToken cancellationToken = default, Action<long>? reached = null)
     {
         var result = new Par3FileReadResult { Path = path };
         using var handle = System.IO.File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.SequentialScan);
         long fileLen = RandomAccess.GetLength(handle);
         long pos = 0;
         Span<byte> header = stackalloc byte[Par3PacketTypes.HeaderSize];
+        long reported = 0;
         while (pos + Par3PacketTypes.HeaderSize <= fileLen)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (pos - reported >= 4 << 20)
+            {
+                reached?.Invoke(pos);
+                reported = pos;
+            }
+
             FileHandleCache.ReadPadded(handle, pos, header);
             if (header[..8].SequenceEqual(Par3PacketTypes.Magic))
             {

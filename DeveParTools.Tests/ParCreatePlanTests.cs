@@ -304,4 +304,24 @@ public sealed class ParCreatePlanTests
         CollectionAssert.AreEqual(new[] { "u.par3", "u.vol00+03.par3", "u.vol03+03.par3", "u.vol06+03.par3" }, report.WrittenFiles.Select(Path.GetFileName).ToArray());
         Assert.AreEqual(RecoveryFileScheme.LimitSize, ParClient.SchemeOf(new ParCreateRequest { Inputs = [], OutputPath = "x", LimitVolumeSize = true }));
     }
+
+    [TestMethod]
+    public void ExistingSetFiles_FindAnEarlierSet_PerFormat()
+    {
+        var a = Write("a.bin", 20_000);
+        foreach (var (output, extra) in new[] { ("old.par3", "old.vol99+01.par3"), ("old.par2", "old.vol99+01.par2"), ("old.par", "old.p07") })
+        {
+            var request = new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, output), RecoveryBlockCount = 2 };
+            Assert.IsEmpty(ParClient.ExistingSetFiles(request.OutputPath), output);
+            Assert.IsFalse(ParClient.Plan(request).Warnings.Any(w => w.StartsWith("There are already", StringComparison.Ordinal)));
+            ParClient.Create(request);
+            File.WriteAllBytes(Path.Combine(_dir, extra), [1]);
+            var existing = ParClient.ExistingSetFiles(request.OutputPath);
+            Assert.Contains(Path.Combine(_dir, extra), existing);
+            Assert.Contains(Path.GetFullPath(request.OutputPath), existing);
+            StringAssert.Contains(string.Join(" ", ParClient.Plan(request).Warnings), $"There are already {existing.Count} PAR file(s) named old… here");
+        }
+
+        Assert.IsEmpty(ParClient.ExistingSetFiles(Path.Combine(_dir, "nowhere", "x.par")));
+    }
 }

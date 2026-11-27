@@ -123,6 +123,12 @@ public static class Par3Inside
             _ => 0,
         };
 
+        context.Observer.Plan(
+        [
+            new("Planning", 4096, "Chooses the block size for the archive: the smallest one for which a larger block would not make the result noticeably smaller (as par3cmdline does)."),
+            new("Hashing", length, "Reads the archive once and computes the checksum of every block."),
+            new("Writing recovery data", length + length / 20.0, "Reads the archive again, computes the recovery blocks and writes them, with the set's description, into the archive (before its end record, so archive tools still open it)."),
+        ]);
         context.Observer.Stage("Planning");
         var name = Path.GetFileName(path);
         Plan plan;
@@ -148,7 +154,7 @@ public static class Par3Inside
         }
 
         context.Observer.Stage("Hashing");
-        var packets = BuildPackets(path, length, footer, plan, options.Creator);
+        var packets = BuildPackets(path, length, footer, plan, options.Creator, context.Observer);
 
         context.Observer.Stage("Writing recovery data");
         Write(path, length, footer, plan, packets, context);
@@ -164,7 +170,10 @@ public static class Par3Inside
     public static long Delete(string archivePath, OperationContext? context = null)
     {
         var path = Path.GetFullPath(archivePath);
-        var verify = Par3Verifier.Verify(new Par3VerifyOptions { Par3Path = path }, context);
+        context ??= OperationContext.Default;
+        long length = new FileInfo(path).Length;
+        context.Observer.Plan([.. VerifyStages.Plan(length, length, 0), new("Removing recovery data", 1, "Cuts the archive back to its original length, which removes the PAR3 data appended to it.")]);
+        var verify = Par3Verifier.Verify(new Par3VerifyOptions { Par3Path = path }, context.Nested());
         var self = verify.Files.FirstOrDefault(f => string.Equals(Path.GetFullPath(f.TargetPath), path, StringComparison.Ordinal))
             ?? throw new InvalidDataException($"'{path}' does not contain PAR3 data that protects the file itself.");
         int unprotected = self.File.Chunks.ToList().FindIndex(c => !c.Protected);
@@ -179,10 +188,13 @@ public static class Par3Inside
         }
 
         long original = (long)self.File.Chunks.Take(unprotected).Sum(c => (decimal)c.Length);
+        context.Observer.Stage("Removing recovery data");
         using (var fs = new FileStream(path, FileMode.Open, FileAccess.Write))
         {
             fs.SetLength(original);
         }
+
+        context.Observer.Progress(1);
 
         return original;
     }
@@ -452,7 +464,7 @@ public static class Par3Inside
         return blocks;
     }
 
-    private static Packets BuildPackets(string path, long length, int footer, Plan plan, string creatorText)
+    private static Packets BuildPackets(string path, long length, int footer, Plan plan, string creatorText, IParOperationObserver observer)
     {
         ulong bs = plan.BlockSize;
         var handles = new FileHandleCache();
@@ -463,6 +475,11 @@ public static class Par3Inside
         var buf = new byte[bs];
         for (int b = 0; b < (int)plan.InputBlocks; b++)
         {
+            if (b % 256 == 255)
+            {
+                observer.Progress((double)b / plan.InputBlocks);
+            }
+
             source.Read(b, 0, buf);
             checks.Add(new BlockChecksum(Crc64Iso.Compute(buf), Fingerprint.Compute(buf)));
         }
@@ -582,7 +599,7 @@ public static class Par3Inside
             var done = new bool[plan.RecoveryBlocks];
             var map = context.CreateBlockMap((int)plan.InputBlocks, plan.RecoveryBlocks);
             var sink = new Par3Creator.RecoverySink(outputs, bs, done, map);
-            var progress = new Progress<double>(p => context.Observer.Progress(p, "Encoding"));
+            var progress = context.Observer.ToProgress();
             Par3Fields.With(Generator(plan), new Par3Creator.CauchyEncode(plan.InputBlocks, recoveryIndices, packets.Blocks, sink, bs, context.Combine.Create(progress), Par3CauchyConvention.Par3cmdline));
             for (int r = 0; r < plan.RecoveryBlocks; r++)
             {

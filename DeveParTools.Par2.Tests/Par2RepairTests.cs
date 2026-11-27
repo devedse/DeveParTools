@@ -31,6 +31,10 @@ public sealed class Par2RepairTests
         var ctx = new OperationContext { Observer = observer };
         var verify = TestData.Verify(dir, context: ctx);
         Assert.AreEqual(1 + 2 + 3, verify.MissingSlices);
+        CollectionAssert.AreEqual(new[] { "Loading", "Verifying", "Scanning" }, observer.Stages, "damaged files are searched for moved slices");
+        observer.AssertStagesFollowThePlan();
+        observer = new RecordingObserver();
+        ctx = new OperationContext { Observer = observer, Blocks = ctx.Blocks };
         var repair = Par2Repairer.Repair(verify, context: ctx);
         Assert.IsTrue(repair.Success, repair.Message);
         Assert.AreEqual("Repaired 3 file(s).", repair.Message);
@@ -40,7 +44,8 @@ public sealed class Par2RepairTests
         TestData.AssertFiles(files);
         Assert.IsTrue(verify.Files.All(f => f.Status == Par2FileStatus.Complete), "statuses are updated");
         Assert.AreEqual(6, ctx.Blocks!.CountStates()[(int)BlockState.Repaired]);
-        CollectionAssert.IsSubsetOf(new[] { "Repairing", "Verifying repaired files" }, observer.Stages);
+        CollectionAssert.AreEqual(new[] { "Choosing recovery blocks", "Copying good blocks", "Reconstructing", "Verifying repaired files" }, observer.Stages);
+        observer.AssertStagesFollowThePlan();
 
         // The damaged originals are kept as "name.1"; a missing file has no backup.
         CollectionAssert.AreEqual(damagedA, dir.Read("a.bin.1"));

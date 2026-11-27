@@ -84,7 +84,22 @@ public static class Par3Repairer
             };
         }
 
-        observer.Stage("Repairing");
+        var toRebuildPlan = verify.Files.Where(f => f.Status != Par3FileStatus.Complete && f.TargetPath.Length > 0).ToList();
+        long rebuildBytes = Math.Max(1, toRebuildPlan.Sum(f => (long)f.File.Length));
+        var stages = new List<OperationStage>();
+        if (missing.Count > 0)
+        {
+            stages.Add(new(RepairStages.Reconstructing, (double)(verify.Blocks.Length + missing.Count) * bs + Math.Pow(missing.Count, 3) / 200, RepairStages.ReconstructingDescription(missing.Count) + " For a Cauchy set the first part is choosing and inverting the matrix of the recovery blocks used."));
+            stages.Add(new(RepairStages.Checking, (double)missing.Count * bs, RepairStages.CheckingDescription));
+        }
+
+        stages.Add(new(RepairStages.Writing, 2.0 * rebuildBytes, RepairStages.WritingDescription));
+        if (options.RestorePermissions || options.RestoreLinks)
+        {
+            stages.Add(new(RepairStages.Metadata, verify.Files.Count * 64.0 + 1, RepairStages.MetadataDescription));
+        }
+
+        observer.Plan(stages);
         using var handles = new FileHandleCache();
         string? blockFile = null;
         var rebuilt = new Dictionary<int, long>(); // block → offset in the temporary block file
@@ -114,9 +129,11 @@ public static class Par3Repairer
                     {
                         foreach (var convention in new[] { Par3CauchyConvention.Par3cmdline, Par3CauchyConvention.Specification })
                         {
+                            observer.Stage(RepairStages.Reconstructing);
                             bool usedMatrix = ReconstructBlocks(verify, missing, sink, handles, context, convention);
                             fs.Flush(true);
-                            ok = RebuiltBlocksValid(verify, missing, fs, rebuilt);
+                            observer.Stage(RepairStages.Checking);
+                            ok = RebuiltBlocksValid(verify, missing, fs, rebuilt, observer);
                             if (ok || !usedMatrix)
                             {
                                 break;
@@ -143,12 +160,16 @@ public static class Par3Repairer
             }
 
             // Rebuild files.
-            var toRebuild = verify.Files.Where(f => f.Status != Par3FileStatus.Complete && f.TargetPath.Length > 0).ToList();
+            var toRebuild = toRebuildPlan;
             var repaired = new List<string>();
             var failed = new List<string>();
+            observer.Stage(RepairStages.Writing);
+            long written = 0;
             foreach (var fv in toRebuild)
             {
                 context.CancellationToken.ThrowIfCancellationRequested();
+                observer.Progress((double)written / rebuildBytes, Path.GetFileName(fv.TargetPath));
+                written += (long)fv.File.Length;
                 var tmp = fv.TargetPath + ".deveparttools.tmp";
                 Directory.CreateDirectory(Path.GetDirectoryName(fv.TargetPath)!);
                 WriteFile(fv, verify, tmp, blockFile, rebuilt, handles);
@@ -180,6 +201,12 @@ public static class Par3Repairer
             foreach (var d in verify.MissingDirectories)
             {
                 Directory.CreateDirectory(d);
+            }
+
+            observer.Progress(1);
+            if (options.RestorePermissions || options.RestoreLinks)
+            {
+                observer.Stage(RepairStages.Metadata);
             }
 
             RestoreMetadata(verify, options, observer);
@@ -233,11 +260,17 @@ public static class Par3Repairer
     }
 
     /// <summary>Checks every rebuilt block against the CRC-64 and BLAKE3 from the External Data packets.</summary>
-    private static bool RebuiltBlocksValid(Par3VerifyResult verify, List<int> missing, FileStream fs, Dictionary<int, long> positions)
+    private static bool RebuiltBlocksValid(Par3VerifyResult verify, List<int> missing, FileStream fs, Dictionary<int, long> positions, IParOperationObserver observer)
     {
         var buf = new byte[verify.Set.BlockSize];
+        int checkedBlocks = 0;
         foreach (int b in missing)
         {
+            if (++checkedBlocks % 256 == 0)
+            {
+                observer.Progress((double)checkedBlocks / missing.Count);
+            }
+
             if (verify.Set.BlockChecksums[b] is not { } expected)
             {
                 continue;
@@ -260,9 +293,8 @@ public static class Par3Repairer
         long bs = (long)set.BlockSize;
         var available = verify.Blocks.Select(b => b != null).ToArray();
         var known = new Par3BlockSource(verify.Blocks.Select(b => b?.Pieces ?? (IReadOnlyList<(ulong, ulong, PieceSource)>)[]).ToArray(), handles);
-        var options = context.Combine.Create(new Progress<double>(p => context.Observer.Progress(p, "Reconstructing")), context.MemoryBudget / 3);
-
         var plan = ChoosePlan(set, missing.Count);
+        var options = context.Combine.Create(plan.Fft != null ? context.Observer.ToProgress() : context.Observer.ToProgress(0.1, 1), context.MemoryBudget / 3);
         if (plan.Fft != null)
         {
             var recoveryMap = new Dictionary<ulong, int>();
@@ -276,7 +308,7 @@ public static class Par3Repairer
             return false;
         }
 
-        Par3Fields.With(set.Start.GeneratorBytes, new MatrixRepair(verify, missing, plan.Recovery, known, sink, handles, options, convention));
+        Par3Fields.With(set.Start.GeneratorBytes, new MatrixRepair(verify, missing, plan.Recovery, known, sink, handles, options, convention, p => context.Observer.Progress(0.1 * p)));
         return true;
     }
 
@@ -311,7 +343,7 @@ public static class Par3Repairer
     }
 
     /// <summary>Generic linear-algebra repair for Cauchy / Sparse / Explicit matrices.</summary>
-    private sealed class MatrixRepair(Par3VerifyResult verify, List<int> missing, List<Par3RecoveryBlock> recovery, Par3BlockSource known, IRegionSink sink, FileHandleCache handles, LinearCombineOptions options, Par3CauchyConvention convention) : IFieldAction<bool>
+    private sealed class MatrixRepair(Par3VerifyResult verify, List<int> missing, List<Par3RecoveryBlock> recovery, Par3BlockSource known, IRegionSink sink, FileHandleCache handles, LinearCombineOptions options, Par3CauchyConvention convention, Action<double> matrixProgress) : IFieldAction<bool>
     {
         public bool Run<T>(IGaloisField<T> field) where T : IEquatable<T>
         {
@@ -371,7 +403,7 @@ public static class Par3Repairer
             }
 
             // The rows were chosen to be independent on the missing columns, so this square matrix is invertible.
-            bool inverted = a.TryInvert(options.CancellationToken);
+            bool inverted = a.TryInvert(options.CancellationToken, matrixProgress);
             Debug.Assert(inverted, "Independent rows give an invertible matrix.");
 
             var missingSet = new HashSet<int>(missing);

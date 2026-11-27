@@ -75,11 +75,24 @@ public static class Par3Verifier
         var observer = context.Observer;
         var token = context.CancellationToken;
 
-        observer.Stage("Loading");
         var par3Files = Par3InputSet.DiscoverFiles(options.Par3Path).Concat(options.ExtraPar3Files.Select(Path.GetFullPath)).Distinct(StringComparer.Ordinal).ToList();
+        long parBytes = par3Files.Where(File.Exists).Sum(f => new FileInfo(f).Length);
+        observer.Plan(VerifyStages.Plan(parBytes, parBytes, 0));
+        observer.Stage(VerifyStages.Loading);
         var reads = new Par3FileReadResult[par3Files.Count];
-        Parallel.For(0, par3Files.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, context.Threads), CancellationToken = token },
-            i => reads[i] = Par3PacketReader.ReadFile(par3Files[i], token));
+        // Progress: how far into each file reading has got (the files are read in parallel; big ones report as they go).
+        var positions = new long[par3Files.Count];
+        void Reached(int i, long position)
+        {
+            Volatile.Write(ref positions[i], position);
+            observer.Progress(Math.Min(1, (double)positions.Sum() / Math.Max(1, parBytes)));
+        }
+
+        Parallel.For(0, par3Files.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, context.Threads), CancellationToken = token }, i =>
+        {
+            reads[i] = Par3PacketReader.ReadFile(par3Files[i], token, position => Reached(i, position));
+            Reached(i, File.Exists(par3Files[i]) ? new FileInfo(par3Files[i]).Length : 0);
+        });
         var set = Par3InputSet.Assemble(reads) ?? throw new InvalidDataException("No PAR3 Start and Root packets found; the input set cannot be used.");
         foreach (var w in set.Warnings)
         {
@@ -132,19 +145,21 @@ public static class Par3Verifier
         var matcher = new Par3BlockMatcher(set);
         using var handles = new FileHandleCache();
 
-        // Data packets inside the .par3 files.
+        // Data packets inside the .par3 files (stored data): a source for every block they hold. The grid shows them
+        // only for blocks that are not found in the files themselves, once those have been checked (below).
+        var stored = new List<(int Index, Par3DataPacket Packet)>();
         foreach (var (index, packet) in set.DataPackets)
         {
             if (index < (ulong)blockCount)
             {
                 blocks[index] = new BlockAvailability([(0, (ulong)packet.DataLength, new PieceSource(packet.SourceFile!, packet.DataOffset))]);
-                map.Set((int)index, BlockState.FoundElsewhere);
-                map.FoundAt[(int)index] = new BlockLocation(packet.SourceFile!, packet.DataOffset, (int)packet.DataLength);
+                stored.Add(((int)index, packet));
             }
         }
 
-        observer.Stage("Verifying");
         long totalBytes = Math.Max(1, files.Where(f => File.Exists(f.TargetPath)).Sum(f => new FileInfo(f.TargetPath).Length));
+        observer.Plan(VerifyStages.Plan(parBytes, totalBytes, 0));
+        observer.Stage(VerifyStages.Verifying);
         long doneBytes = 0;
         var damaged = new List<string>();
         foreach (var fv in files)
@@ -155,7 +170,9 @@ public static class Par3Verifier
                 continue;
             }
 
-            bool complete = CheckInPlace(fv, set, blocks, tails, handles, map);
+            long before = Interlocked.Read(ref doneBytes);
+            string name = Path.GetFileName(fv.TargetPath);
+            bool complete = CheckInPlace(fv, set, blocks, tails, handles, map, reached => observer.Progress((double)(before + reached) / totalBytes, name));
             fv.Status = complete ? Par3FileStatus.Complete : Par3FileStatus.Damaged;
             if (!complete)
             {
@@ -169,13 +186,17 @@ public static class Par3Verifier
         var toScan = damaged.Concat(options.ExtraDataFiles.Select(Path.GetFullPath).Where(File.Exists)).Distinct(StringComparer.Ordinal).ToList();
         if (toScan.Count > 0 && (blocks.Any(b => b == null) || tails.Count < CountTails(set)))
         {
-            observer.Stage("Scanning");
+            long scanBytes = Math.Max(1, toScan.Sum(f => new FileInfo(f).Length));
+            long scannedBytes = 0;
+            observer.Plan(VerifyStages.Plan(parBytes, totalBytes, scanBytes));
+            observer.Stage(VerifyStages.Scanning);
             foreach (var path in toScan)
             {
                 token.ThrowIfCancellationRequested();
                 if (set.BlockSize <= int.MaxValue && blocks.Any(b => b == null))
                 {
-                    foreach (var hit in BlockScanner.Scan(path, matcher, handles, context.Threads, token))
+                    string name = Path.GetFileName(path);
+                    foreach (var hit in BlockScanner.Scan(path, matcher, handles, context.Threads, token, n => observer.Progress((double)Interlocked.Add(ref scannedBytes, n) / scanBytes, name)))
                     {
                         foreach (int idx in matcher.SameContent(hit.BlockIndex))
                         {
@@ -192,6 +213,12 @@ public static class Par3Verifier
 
                 ScanTails(path, set, tails, handles, token);
             }
+        }
+
+        foreach (var (index, packet) in stored.Where(d => map.Get(d.Index) == BlockState.Unknown))
+        {
+            map.Set(index, BlockState.FoundElsewhere);
+            map.FoundAt[index] = new BlockLocation(packet.SourceFile!, packet.DataOffset, (int)packet.DataLength);
         }
 
         // Blocks made of tails become available when all their tails are known: "found" when every tail is where its
@@ -234,7 +261,8 @@ public static class Par3Verifier
     private static int CountTails(Par3InputSet set) => set.Files.Sum(f => f.Chunks.Count(c => c.TailLength(set.BlockSize) >= Par3Chunk.InlineLimit));
 
     /// <summary>Reads a file in chunk order, checking every block and tail at its expected position.</summary>
-    private static bool CheckInPlace(Par3FileVerification fv, Par3InputSet set, BlockAvailability?[] blocks, Dictionary<(Par3FileEntry, Par3Chunk), PieceSource> tails, FileHandleCache handles, BlockStateMap map)
+    /// <param name="reached">Called now and then with how far into the file the check has got (bytes), for progress.</param>
+    private static bool CheckInPlace(Par3FileVerification fv, Par3InputSet set, BlockAvailability?[] blocks, Dictionary<(Par3FileEntry, Par3Chunk), PieceSource> tails, FileHandleCache handles, BlockStateMap map, Action<long> reached)
     {
         var f = fv.File;
         long actualLen = new FileInfo(fv.TargetPath).Length;
@@ -258,6 +286,11 @@ public static class Par3Verifier
             for (ulong b = 0; b < full; b++)
             {
                 long pos = (long)(offset + b * bs);
+                if (b % 64 == 63)
+                {
+                    reached(pos);
+                }
+
                 bool ok = HashRange(fv.TargetPath, pos, (long)bs, handles, hasher, buf, out var crc, out var fp) && actualLen >= pos + (long)bs;
                 ulong idx = c.FirstBlock + b;
                 if (ok && set.BlockChecksums[idx] == null)

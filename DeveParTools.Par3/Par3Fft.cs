@@ -196,6 +196,13 @@ public static unsafe class Par3Fft
                         {
                             blocks.Read((int)block, offset, span[..(int)len]);
                         }
+
+                        // Reading is most of the time (the blocks of a cohort are spread over all files), so report it
+                        // as it goes: 90% of this slice's share for reading, the rest when the slice is encoded.
+                        if (j % 512 == 511)
+                        {
+                            options.Progress?.Report((cohort + (offset + 0.9 * len * (j + 1.0) / k2) / blockSize) / c);
+                        }
                     }
 
                     var work = buffers.AsSpan(k2, workCount).ToArray();
@@ -276,6 +283,12 @@ public static unsafe class Par3Fft
                         {
                             blocks.Read((int)block, offset, span[..(int)len]);
                             originals[j] = buffers[j];
+                        }
+
+                        // As in Encode: report the reading, which is most of the time.
+                        if (j % 512 == 511)
+                        {
+                            options.Progress?.Report((cohort + (offset + 0.9 * len * (j + 1.0) / k2) / blockSize) / c);
                         }
                     }
 

@@ -59,7 +59,17 @@ public static class Par3Extender
     public static Par3CreateResult Extend(Par3ExtendOptions options, OperationContext? context = null)
     {
         context ??= OperationContext.Default;
-        var verify = Par3Verifier.Verify(new Par3VerifyOptions { Par3Path = options.Par3Path, BaseDirectory = options.BaseDirectory, ExtraDataFiles = options.ExtraDataFiles }, context);
+
+        // Verify first (all input blocks must be there), then encode the new blocks. The plan is refined once the set is known.
+        long parBytes = Par3InputSet.DiscoverFiles(options.Par3Path).Where(File.Exists).Sum(f => new FileInfo(f).Length);
+        IReadOnlyList<OperationStage> Steps(long dataBytes, double encodeBytes, string encodeDescription, double writeBytes) =>
+        [
+            .. VerifyStages.Plan(parBytes, dataBytes, 0),
+            new(Par3Stages.Encoding, encodeBytes, encodeDescription),
+            new(Par3Stages.WritingRecovery, writeBytes, Par3Stages.WritingRecoveryDescription),
+        ];
+        context.Observer.Plan(Steps(parBytes * 10, parBytes * 10, "Reads all input blocks and computes the new recovery blocks.", parBytes));
+        var verify = Par3Verifier.Verify(new Par3VerifyOptions { Par3Path = options.Par3Path, BaseDirectory = options.BaseDirectory, ExtraDataFiles = options.ExtraDataFiles }, context.Nested());
         if (verify.MissingBlocks > 0)
         {
             throw new InvalidOperationException($"{verify.MissingBlocks} input block(s) are missing or damaged. Repair the files before extending the set.");
@@ -135,6 +145,8 @@ public static class Par3Extender
         var allVolumes = probeVolume == null ? volumes : [.. volumes, probeVolume];
         try
         {
+            long dataBytes = set.Files.Sum(f => (long)f.Length);
+            context.Observer.Plan(Steps(dataBytes, dataBytes + (double)count * blockSize, Par3Stages.EncodingDescription(fft != null, count), (blockCount * 24.0 + set.Files.Count * 300.0) * volumes.Count * 2));
             foreach (var convention in new[] { Par3CauchyConvention.Par3cmdline, Par3CauchyConvention.Specification })
             {
                 var map = context.CreateBlockMap((int)blockCount, allIndices.Count);

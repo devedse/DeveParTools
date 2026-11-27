@@ -10,6 +10,46 @@ using DeveParTools.Par2.Packets;
 
 namespace DeveParTools.Par2;
 
+/// <summary>The steps of creating (and extending) a PAR2 set, with their names and what they do.</summary>
+public static class Par2Stages
+{
+    public const string Preparing = "Preparing";
+    public const string Hashing = "Hashing";
+    public const string Encoding = "Encoding";
+    public const string WritingRecovery = "Writing recovery files";
+    public const string WritingIndex = "Writing the index file";
+
+    /// <summary>
+    /// The steps of <see cref="Par2Creator.Create"/>, weighted by the bytes each reads or writes. With enough memory
+    /// for whole slices the input is read once while encoding (the checksums are computed on the way); otherwise it is
+    /// hashed first and then encoded in <paramref name="passes"/> passes, each reading the whole input.
+    /// </summary>
+    internal static IReadOnlyList<OperationStage> ForCreate(int files, long inputBytes, int slices, int recovery, long sliceSize, int passes, int recoveryFiles)
+    {
+        double critical = files * 200.0 + slices * 20.0;
+        var stages = new List<OperationStage>
+        {
+            new(Preparing, files * 16384.0 + 4096, "Lists the files and reads the first 16 KiB of each one, which (with its name and size) identifies the file in the set."),
+        };
+        if (passes > 1 || recovery == 0)
+        {
+            stages.Add(new(Hashing, inputBytes, "Reads every file once and computes the checksums of every block (MD5 and CRC-32) and of every whole file."));
+        }
+
+        if (recovery > 0)
+        {
+            stages.Add(new(Encoding, inputBytes * passes + (double)recovery * sliceSize, passes == 1
+                ? $"Reads every file once and computes the {recovery:N0} recovery blocks (PAR2 Reed-Solomon over GF(2^16)), and the checksums on the way. The recovery files were created at their final size when this step started; they are filled in now."
+                : $"Computes the {recovery:N0} recovery blocks (PAR2 Reed-Solomon over GF(2^16)). The memory budget holds part of every block, so the files are read {passes} times, one part each time. The recovery files were created at their final size when this step started; they are filled in now."));
+            stages.Add(new(WritingRecovery, (passes > 1 ? (double)recovery * sliceSize : 0) + critical * (recoveryFiles + Math.Log2(Math.Max(2, recovery))) + recovery * 68.0,
+                "Completes the checksum of every recovery block and writes copies of the set's description (file list and block checksums) into every recovery file, so each one can also be used on its own."));
+        }
+
+        stages.Add(new(WritingIndex, critical, "Writes the index file: the description of the set, once."));
+        return stages;
+    }
+}
+
 public sealed class Par2CreateOptions
 {
     public required IReadOnlyList<string> InputFiles { get; init; }
@@ -106,7 +146,7 @@ public static class Par2Creator
         //    differently, e.g. "x/../a" for "a", or on Windows with the base directory part in other letter case)
         //    gets the same stored name and is used once; different files always get different names (relative
         //    paths below one base directory).
-        observer.Stage("Preparing");
+        observer.Stage(Par2Stages.Preparing);
         var inputs = LoadInputs(options, baseDir);
         if (inputs.Count == 0)
         {
@@ -120,8 +160,14 @@ public static class Par2Creator
         }
 
         var buf16 = new byte[16384];
+        int prepared = 0;
         foreach (var f in inputs)
         {
+            if (++prepared % 64 == 0)
+            {
+                observer.Progress(0.99 * prepared / inputs.Count);
+            }
+
             using var fs = File.OpenRead(f.Path);
             int n = fs.ReadAtLeast(buf16, buf16.Length, throwOnEndOfStream: false);
             f.Hash16k = Md5Hash.Compute(buf16.AsSpan(0, n));
@@ -190,21 +236,28 @@ public static class Par2Creator
         var sliceMd5 = new IncrementalHash?[totalSlices];
         var sliceCrc = new uint[totalSlices];
         var sliceHashes = new Md5Hash[totalSlices];
-        var combineOptions = context.Combine.Create(new Progress<double>(p => observer.Progress(p, "Encoding")));
+        var combineOptions = context.Combine.Create(observer.ToProgress());
         int sliceLen = LinearCombiner.PlanSliceLength(2, totalSlices, recoveryCount, sliceSize, combineOptions);
         bool singlePass = sliceLen >= sliceSize;
+        int passes = (int)((sliceSize + sliceLen - 1) / sliceLen);
+        if (options.WriteIndexFile)
+        {
+            observer.Plan(Par2Stages.ForCreate(inputs.Count + empty.Count, inputs.Sum(i => i.Length), totalSlices, recoveryCount, sliceSize, passes, volumes.Count));
+        }
+
+        observer.Progress(1);
 
         using var handles = new FileHandleCache();
         if (!singlePass || recoveryCount == 0)
         {
-            observer.Stage("Hashing");
+            observer.Stage(Par2Stages.Hashing);
             HashInputs(inputs, sliceSize, sliceHashes, sliceCrc, handles, context, map);
         }
 
         var recoveryDone = new bool[recoveryCount];
         if (recoveryCount > 0)
         {
-            observer.Stage("Encoding");
+            observer.Stage(Par2Stages.Encoding);
             var volumeStreams = volumes.ToDictionary(v => v, v =>
                 new FileStream(v.Path, FileMode.Create, FileAccess.ReadWrite, FileShare.Read, 1, FileOptions.RandomAccess));
             try
@@ -253,9 +306,12 @@ public static class Par2Creator
                     }
                 }
 
-                // Recovery packets whose MD5 could not be computed on the fly (multi-pass): read back.
+                // Recovery packets whose MD5 could not be computed on the fly (multi-pass): read back. Progress of
+                // this step: the packet headers are the first half, the copies of the critical packets the second.
+                observer.Stage(Par2Stages.WritingRecovery);
                 for (int j = 0; j < recoveryCount; j++)
                 {
+                    context.CancellationToken.ThrowIfCancellationRequested();
                     if (!recoveryDone[j])
                     {
                         FinishRecoveryPacketFromDisk(outputs[j].Stream, outputs[j].DataOffset, outputs[j].Header, sliceSize);
@@ -263,6 +319,10 @@ public static class Par2Creator
 
                     RandomAccess.Write(outputs[j].Stream.SafeFileHandle, outputs[j].Header, outputs[j].DataOffset - outputs[j].Header.Length);
                     map.SetRecovery(j, RecoveryBlockState.Created);
+                    if (j % 64 == 63)
+                    {
+                        observer.Progress(0.5 * (j + 1) / recoveryCount);
+                    }
                 }
             }
             finally
@@ -275,7 +335,6 @@ public static class Par2Creator
         }
 
         // 5. Critical packets: main, file descriptions, slice checksums, creator (and comment).
-        observer.Stage("Writing");
         var critical = new List<byte[]> { Par2PacketWriter.Build(setId, Par2PacketTypes.Main, mainBody) };
         foreach (var f in inputs)
         {
@@ -300,17 +359,8 @@ public static class Par2Creator
         }
 
         var creator = Par2PacketWriter.Creator(setId, options.Creator);
-        if (options.WriteIndexFile)
-        {
-            using var index = new FileStream(outputPath, FileMode.Create, FileAccess.Write);
-            foreach (var p in critical)
-            {
-                index.Write(p);
-            }
 
-            index.Write(creator);
-        }
-
+        int copied = 0;
         foreach (var v in volumes)
         {
             using var fs = new FileStream(v.Path, FileMode.Open, FileAccess.Write);
@@ -325,6 +375,19 @@ public static class Par2Creator
             }
 
             fs.Write(creator);
+            observer.Progress(0.5 + 0.5 * ++copied / volumes.Count);
+        }
+
+        if (options.WriteIndexFile)
+        {
+            observer.Stage(Par2Stages.WritingIndex);
+            using var index = new FileStream(outputPath, FileMode.Create, FileAccess.Write);
+            foreach (var p in critical)
+            {
+                index.Write(p);
+            }
+
+            index.Write(creator);
         }
 
         observer.Progress(1);

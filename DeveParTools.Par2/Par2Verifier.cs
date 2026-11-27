@@ -103,11 +103,24 @@ public static class Par2Verifier
         var observer = context.Observer;
         var token = context.CancellationToken;
 
-        observer.Stage("Loading");
         var par2Files = Par2RecoverySet.DiscoverFiles(options.Par2Path).Concat(options.ExtraPar2Files.Select(Path.GetFullPath)).Distinct(StringComparer.Ordinal).ToList();
+        long parBytes = par2Files.Where(File.Exists).Sum(f => new FileInfo(f).Length);
+        observer.Plan(VerifyStages.Plan(parBytes, parBytes, 0));
+        observer.Stage(VerifyStages.Loading);
         var reads = new Par2FileReadResult[par2Files.Count];
-        Parallel.For(0, par2Files.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, context.Threads), CancellationToken = token },
-            i => reads[i] = Par2PacketReader.ReadFile(par2Files[i], token));
+        // Progress: how far into each file reading has got (the files are read in parallel; big ones report as they go).
+        var positions = new long[par2Files.Count];
+        void Reached(int i, long position)
+        {
+            Volatile.Write(ref positions[i], position);
+            observer.Progress(Math.Min(1, (double)positions.Sum() / Math.Max(1, parBytes)));
+        }
+
+        Parallel.For(0, par2Files.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, context.Threads), CancellationToken = token }, i =>
+        {
+            reads[i] = Par2PacketReader.ReadFile(par2Files[i], token, position => Reached(i, position));
+            Reached(i, File.Exists(par2Files[i]) ? new FileInfo(par2Files[i]).Length : 0);
+        });
         var set = Par2RecoverySet.Assemble(reads)
             ?? throw new InvalidDataException("No PAR2 main packet found; the recovery set cannot be used.");
         foreach (var creator in set.Creators)
@@ -155,11 +168,13 @@ public static class Par2Verifier
         var matcher = new Par2SliceMatcher(set);
         using var handles = new FileHandleCache();
 
-        // Pass 1: every target file, slices at their expected positions; full scan only when damaged.
-        observer.Stage("Verifying");
+        // Pass 1: every target file, slices at their expected positions.
         long totalBytes = Math.Max(1, files.Where(f => File.Exists(f.TargetPath)).Sum(f => new FileInfo(f.TargetPath).Length));
+        observer.Plan(VerifyStages.Plan(parBytes, totalBytes, 0));
+        observer.Stage(VerifyStages.Verifying);
         long doneBytes = 0;
         var scanThreads = Math.Max(1, context.Threads);
+        var damaged = new List<Par2FileVerification>();
         foreach (var fv in files)
         {
             token.ThrowIfCancellationRequested();
@@ -170,34 +185,47 @@ public static class Par2Verifier
 
             long len = new FileInfo(fv.TargetPath).Length;
             map.SetRange(fv.File.FirstSlice, fv.File.SliceCount, BlockState.Scanning);
-            bool complete = CheckInPlace(fv, set, sources, handles, map);
-            if (complete)
+            long before = doneBytes;
+            string name = Path.GetFileName(fv.TargetPath);
+            bool complete = CheckInPlace(fv, set, sources, handles, map, reached => observer.Progress((double)(before + reached) / totalBytes, name));
+            fv.Status = complete ? Par2FileStatus.Complete : Par2FileStatus.Damaged;
+            if (!complete)
             {
-                fv.Status = Par2FileStatus.Complete;
-            }
-            else
-            {
-                fv.Status = Par2FileStatus.Damaged;
-                foreach (var hit in BlockScanner.Scan(fv.TargetPath, matcher, handles, scanThreads, token))
-                {
-                    Record(hit, fv.TargetPath, matcher, sources, map, files);
-                }
+                damaged.Add(fv);
             }
 
-            observer.Progress((double)Interlocked.Add(ref doneBytes, len) / totalBytes, Path.GetFileName(fv.TargetPath));
+            doneBytes += len;
+            observer.Progress((double)doneBytes / totalBytes, name);
         }
 
-        // Pass 2: extra files (other names, partial copies).
-        foreach (var extra in options.ExtraDataFiles.Select(Path.GetFullPath).Distinct(StringComparer.Ordinal))
+        // Pass 2: search damaged files and extra files (other names, partial copies) for slices anywhere.
+        var extras = options.ExtraDataFiles.Select(Path.GetFullPath).Distinct(StringComparer.Ordinal)
+            .Where(extra => File.Exists(extra) && !files.Any(f => string.Equals(f.TargetPath, extra, StringComparison.Ordinal))).ToList();
+        long scanBytes = Math.Max(1, damaged.Sum(f => new FileInfo(f.TargetPath).Length) + extras.Sum(f => new FileInfo(f).Length));
+        long scannedBytes = 0;
+        if (damaged.Count + extras.Count > 0)
+        {
+            observer.Plan(VerifyStages.Plan(parBytes, totalBytes, scanBytes));
+            observer.Stage(VerifyStages.Scanning);
+        }
+
+        void Scanned(long n, string name) => observer.Progress((double)Interlocked.Add(ref scannedBytes, n) / scanBytes, name);
+        foreach (var fv in damaged)
         {
             token.ThrowIfCancellationRequested();
-            if (!File.Exists(extra) || files.Any(f => string.Equals(f.TargetPath, extra, StringComparison.Ordinal)))
+            string name = Path.GetFileName(fv.TargetPath);
+            foreach (var hit in BlockScanner.Scan(fv.TargetPath, matcher, handles, scanThreads, token, n => Scanned(n, name)))
             {
-                continue;
+                Record(hit, fv.TargetPath, matcher, sources, map, files);
             }
+        }
 
+        foreach (var extra in extras)
+        {
+            token.ThrowIfCancellationRequested();
             observer.Log(ParLogLevel.Info, $"Scanning extra file {extra}");
-            foreach (var hit in BlockScanner.Scan(extra, matcher, handles, scanThreads, token))
+            string name = Path.GetFileName(extra);
+            foreach (var hit in BlockScanner.Scan(extra, matcher, handles, scanThreads, token, n => Scanned(n, name)))
             {
                 Record(hit, extra, matcher, sources, map, files);
             }
@@ -251,7 +279,8 @@ public static class Par2Verifier
     /// complete (right length and whole-file MD5). A complete file vouches for all of its slices, also when its
     /// slice checksum packet is missing.
     /// </summary>
-    private static bool CheckInPlace(Par2FileVerification fv, Par2RecoverySet set, SliceLocation?[] sources, FileHandleCache handles, BlockStateMap map)
+    /// <param name="reached">Called now and then with how far into the file the check has got (bytes), for progress.</param>
+    private static bool CheckInPlace(Par2FileVerification fv, Par2RecoverySet set, SliceLocation?[] sources, FileHandleCache handles, BlockStateMap map, Action<long> reached)
     {
         var f = fv.File;
         long len = new FileInfo(fv.TargetPath).Length;
@@ -260,6 +289,11 @@ public static class Par2Verifier
         long sliceCountInFile = (len + set.SliceSize - 1) / set.SliceSize;
         for (long s = 0; s < sliceCountInFile; s++)
         {
+            if (s % 64 == 63)
+            {
+                reached(s * set.SliceSize);
+            }
+
             int n = handles.ReadPadded(fv.TargetPath, s * set.SliceSize, buf);
             fileMd5.AppendData(buf, 0, n);
             if (s >= f.SliceCount || f.SliceChecksums == null)

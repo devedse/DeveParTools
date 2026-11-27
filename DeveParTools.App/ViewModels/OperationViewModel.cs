@@ -61,6 +61,49 @@ public sealed partial class LegendItem : ObservableObject
     partial void OnIsVisibleChanged(bool value) => _changed();
 }
 
+/// <summary>One step in the progress panel: what it does, how much of the work it is, and how far it is.</summary>
+public sealed partial class StageRowViewModel : ObservableObject
+{
+    public StageRowViewModel(string name)
+    {
+        Name = name;
+    }
+
+    public string Name { get; }
+
+    [ObservableProperty]
+    private string _description = string.Empty;
+
+    /// <summary>"≈ 47% of the work" (the step's estimated share).</summary>
+    [ObservableProperty]
+    private string _shareText = string.Empty;
+
+    /// <summary>0–100.</summary>
+    [ObservableProperty]
+    private double _percent;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsActive), nameof(IsDone), nameof(IsPending), nameof(IsSkipped), nameof(PercentText))]
+    private StageStatus _status;
+
+    public bool IsActive => Status == StageStatus.Active;
+
+    public bool IsDone => Status == StageStatus.Done;
+
+    public bool IsPending => Status == StageStatus.Pending;
+
+    public bool IsSkipped => Status == StageStatus.Skipped;
+
+    public string PercentText => Status switch
+    {
+        StageStatus.Skipped => "not needed",
+        StageStatus.Pending => "waiting",
+        _ => $"{Percent:0.0}%",
+    };
+
+    partial void OnPercentChanged(double value) => OnPropertyChanged(nameof(PercentText));
+}
+
 /// <summary>
 /// Shared plumbing for long operations: runs work on a background thread, receives progress through
 /// <see cref="IParOperationObserver"/> (marshalled to the UI thread), and refreshes the live block grid ~30 times a
@@ -71,8 +114,9 @@ public abstract partial class OperationViewModel : ObservableObject, IParOperati
     private CancellationTokenSource? _cts;
     private readonly DispatcherTimer _timer;
     private long _seenVersion = -1;
-    private double _pendingProgress;
     private string? _pendingDetail;
+    private readonly ProgressTracker _tracker = new();
+    private readonly System.Diagnostics.Stopwatch _elapsed = new();
 
     protected OperationViewModel(SettingsViewModel settings)
     {
@@ -91,6 +135,15 @@ public abstract partial class OperationViewModel : ObservableObject, IParOperati
     public ObservableCollection<LogLine> Log { get; } = new();
 
     public ObservableCollection<LegendItem> Legend { get; } = new();
+
+    /// <summary>Every step of the running (or last) operation, with its progress.</summary>
+    public ObservableCollection<StageRowViewModel> Stages { get; } = new();
+
+    public bool HasStages => Stages.Count > 0;
+
+    /// <summary>"42.3% · about 3 min left · 1:02 elapsed".</summary>
+    [ObservableProperty]
+    private string? _totalText;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(CancelCommand))]
@@ -163,10 +216,17 @@ public abstract partial class OperationViewModel : ObservableObject, IParOperati
         Stage = title;
         Progress = 0;
         StatusText = null;
+        _tracker.Reset();
+        Stages.Clear();
+        OnPropertyChanged(nameof(HasStages));
+        _elapsed.Restart();
         _timer.Start();
+        bool success = false;
         try
         {
-            return await Task.Run(() => work(context), _cts.Token);
+            var result = await Task.Run(() => work(context), _cts.Token);
+            success = true;
+            return result;
         }
         catch (OperationCanceledException)
         {
@@ -183,17 +243,62 @@ public abstract partial class OperationViewModel : ObservableObject, IParOperati
         finally
         {
             _timer.Stop();
+            _elapsed.Stop();
+            _tracker.Finish(success);
             Tick();
             IsBusy = false;
-            Stage = "Done";
+            Stage = success ? "Done" : StatusText == "Cancelled." ? "Cancelled" : "Failed";
+            if (success)
+            {
+                TotalText = $"Done in {Formatting.Duration(_elapsed.Elapsed)}";
+            }
+
             _cts.Dispose();
             _cts = null;
         }
     }
 
+    /// <summary>Copies the tracker's state into the stage rows, the total and the time estimate.</summary>
+    private void UpdateStages()
+    {
+        var (stages, total) = _tracker.Read();
+        double weight = stages.Where(st => st.Status != StageStatus.Skipped).Sum(st => st.Weight);
+        bool rebuilt = Stages.Count != stages.Count || Stages.Zip(stages).Any(p => p.First.Name != p.Second.Name);
+        if (rebuilt)
+        {
+            Stages.Clear();
+            foreach (var st in stages)
+            {
+                Stages.Add(new StageRowViewModel(st.Name));
+            }
+
+            OnPropertyChanged(nameof(HasStages));
+        }
+
+        for (int i = 0; i < stages.Count; i++)
+        {
+            var row = Stages[i];
+            var st = stages[i];
+            row.Description = st.Description;
+            row.ShareText = st.Status == StageStatus.Skipped || weight <= 0 ? string.Empty : $"≈ {Math.Max(0.1, 100 * st.Weight / weight):0.#}% of the work";
+            row.Percent = 100 * (st.Status == StageStatus.Done ? 1 : st.Fraction);
+            row.Status = st.Status;
+        }
+
+        Progress = 100 * total;
+        if (IsBusy && stages.Count > 0)
+        {
+            var elapsed = _elapsed.Elapsed;
+            string left = total >= 0.01 && elapsed.TotalSeconds >= 2
+                ? $" · about {Formatting.Duration(TimeSpan.FromSeconds(elapsed.TotalSeconds * (1 - total) / total))} left"
+                : string.Empty;
+            TotalText = $"{100 * total:0.0}%{left} · {Formatting.Duration(elapsed)} elapsed";
+        }
+    }
+
     private void Tick()
     {
-        Progress = _pendingProgress * 100;
+        UpdateStages();
         ProgressDetail = _pendingDetail;
         if (Map is { } map && map.Version != _seenVersion)
         {
@@ -211,15 +316,22 @@ public abstract partial class OperationViewModel : ObservableObject, IParOperati
         }
     }
 
-    void IParOperationObserver.Stage(string name) => Dispatcher.UIThread.Post(() =>
+    void IParOperationObserver.Plan(IReadOnlyList<OperationStage> stages) => _tracker.Plan(stages);
+
+    void IParOperationObserver.Stage(string name)
     {
-        Stage = name;
-        Log.Add(new LogLine(DateTime.Now, ParLogLevel.Info, name + "..."));
-    });
+        _tracker.Stage(name);
+        _pendingDetail = null;
+        Dispatcher.UIThread.Post(() =>
+        {
+            Stage = name;
+            Log.Add(new LogLine(DateTime.Now, ParLogLevel.Info, name + "..."));
+        });
+    }
 
     void IParOperationObserver.Progress(double fraction, string? detail)
     {
-        _pendingProgress = Math.Clamp(fraction, 0, 1);
+        _tracker.Progress(fraction);
         _pendingDetail = detail;
     }
 

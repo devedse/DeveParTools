@@ -315,9 +315,28 @@ public static class Par1Set
             }
         }
 
-        context.Observer.Stage("Hashing");
+        var observer = context.Observer;
+        long totalBytes = files.Sum(f => new FileInfo(f).Length);
+        long largest = files.Max(f => new FileInfo(f).Length);
+        int volumeCount = options.RecoveryVolumes;
+        var stages = new List<OperationStage>
+        {
+            new("Hashing", totalBytes, "Reads every file once and computes its MD5 checksum (and that of its first 16 KiB), which identify the file and show whether it is intact."),
+            new("Writing the index file", files.Count * 600.0, "Writes the .par file: the list of files with their sizes and checksums."),
+        };
+        if (volumeCount > 0)
+        {
+            stages.Add(new("Encoding", totalBytes + (double)volumeCount * largest, $"Reads every file again and computes the {volumeCount:N0} recovery volume(s) (Reed-Solomon over GF(2^8)); each is as large as the largest file."));
+            stages.Add(new("Writing recovery files", 2.0 * volumeCount * largest, "Copies each computed volume into its .pXX file after the file list, and computes the file's checksum."));
+        }
+
+        observer.Plan(stages);
+        observer.Stage("Hashing");
+        long hashed = 0;
         var entries = files.Select(f =>
         {
+            observer.Progress(totalBytes == 0 ? 1 : (double)hashed / totalBytes, Path.GetFileName(f));
+            hashed += new FileInfo(f).Length;
             using var fs = File.OpenRead(f);
             var full = MD5.HashData(fs);
             fs.Position = 0;
@@ -329,6 +348,7 @@ public static class Par1Set
         var written = new List<string>();
         var baseName = options.OutputPath.EndsWith(".par", StringComparison.OrdinalIgnoreCase) ? options.OutputPath[..^4] : options.OutputPath;
         var comment = Encoding.Unicode.GetBytes(options.Comment ?? string.Empty);
+        observer.Stage("Writing the index file");
         Par1File.Write(baseName + ".par", 0, entries, s => s.Write(comment), comment.Length);
         written.Add(baseName + ".par");
 
@@ -349,7 +369,7 @@ public static class Par1Set
                 using var handles = new FileHandleCache();
                 var source = new FileRegions(files, handles);
                 LinearCombiner.Combine(new Gf8Field(Par1Math.Field), new Coefficients(Enumerable.Range(1, volumes).ToArray()), files.Count, volumes, source,
-                    new StreamSink(streams), size, context.Combine.Create(new Progress<double>(p => context.Observer.Progress(p, "Encoding"))));
+                    new StreamSink(streams), size, context.Combine.Create(observer.ToProgress()));
             }
             finally
             {
@@ -359,8 +379,10 @@ public static class Par1Set
                 }
             }
 
+            observer.Stage("Writing recovery files");
             for (int v = 0; v < volumes; v++)
             {
+                observer.Progress((double)v / volumes);
                 var tmp = outputs[v] + ".tmp";
                 Par1File.Write(outputs[v], (ulong)(v + 1), entries, s =>
                 {
@@ -379,21 +401,29 @@ public static class Par1Set
     public static Par1VerifyResult Verify(string parPath, IReadOnlyList<string>? extraFiles = null, OperationContext? context = null)
     {
         context ??= OperationContext.Default;
+        var observer = context.Observer;
         var full = Path.GetFullPath(parPath);
         var dir = Path.GetDirectoryName(full)!;
-        var index = Par1File.Read(full) ?? throw new InvalidDataException($"'{parPath}' is not a PAR1 file.");
         var baseName = Path.GetFileNameWithoutExtension(full);
-        var volumes = new List<Par1File>();
-        foreach (var f in Directory.EnumerateFiles(dir, baseName + ".*"))
+        var volumeFiles = Directory.EnumerateFiles(dir, baseName + ".*").Where(f =>
         {
             var ext = Path.GetExtension(f).ToLowerInvariant();
-            if (ext.Length == 4 && ext[1] >= 'p' && ext[1] <= 'z' && char.IsDigit(ext[2]) && char.IsDigit(ext[3]))
+            return ext.Length == 4 && ext[1] >= 'p' && ext[1] <= 'z' && char.IsDigit(ext[2]) && char.IsDigit(ext[3]);
+        }).ToList();
+        long parBytes = new FileInfo(full).Length + volumeFiles.Sum(f => new FileInfo(f).Length);
+        observer.Plan(VerifyStages.Plan(parBytes, parBytes, 0));
+        observer.Stage(VerifyStages.Loading);
+        var index = Par1File.Read(full) ?? throw new InvalidDataException($"'{parPath}' is not a PAR1 file.");
+        var volumes = new List<Par1File>();
+        long loaded = new FileInfo(full).Length;
+        foreach (var f in volumeFiles)
+        {
+            observer.Progress((double)loaded / parBytes, Path.GetFileName(f));
+            loaded += new FileInfo(f).Length;
+            var v = Par1File.Read(f);
+            if (v != null && v.VolumeNumber > 0 && v.ControlHashValid && v.SetHash.AsSpan().SequenceEqual(index.SetHash) && volumes.All(o => o.VolumeNumber != v.VolumeNumber))
             {
-                var v = Par1File.Read(f);
-                if (v != null && v.VolumeNumber > 0 && v.ControlHashValid && v.SetHash.AsSpan().SequenceEqual(index.SetHash) && volumes.All(o => o.VolumeNumber != v.VolumeNumber))
-                {
-                    volumes.Add(v);
-                }
+                volumes.Add(v);
             }
         }
 
@@ -408,9 +438,15 @@ public static class Par1Set
 
         var candidates = Directory.EnumerateFiles(dir).Concat((extraFiles ?? []).Select(Path.GetFullPath)).Distinct(StringComparer.Ordinal).ToList();
         var results = new List<Par1FileVerification>();
+        long dataBytes = Math.Max(1, index.Files.Sum(e => e.Size));
+        long verified = 0;
+        observer.Plan(VerifyStages.Plan(parBytes, dataBytes, 0));
+        observer.Stage(VerifyStages.Verifying);
         for (int i = 0; i < index.Files.Count; i++)
         {
             var e = index.Files[i];
+            observer.Progress((double)verified / dataBytes, e.Name);
+            verified += e.Size;
             var target = TargetPathOf(dir, e.Name);
             var fv = new Par1FileVerification { Entry = e, TargetPath = target };
             map.Ownership[i] = [new BlockLocation(target, 0, (int)Math.Min(int.MaxValue, e.Size))];
@@ -483,6 +519,19 @@ public static class Par1Set
         }
 
         // Renamed copies first.
+        var observer = context.Observer;
+        var savedPlan = verify.Files.Where(f => f.Entry.IsSaved).ToList();
+        int missingPlan = savedPlan.Count(f => f.Status != Par1FileStatus.Complete && f.FoundAs == null);
+        long largestPlan = savedPlan.Select(f => f.Entry.Size).DefaultIfEmpty(0).Max();
+        var stages = new List<OperationStage> { new(RepairStages.Copying, verify.Files.Where(f => f.FoundAs != null).Sum(f => f.Entry.Size) + 1.0, "Copies complete files that were found under another name into place.") };
+        if (missingPlan > 0)
+        {
+            stages.Add(new(RepairStages.Reconstructing, (double)(savedPlan.Count + missingPlan) * largestPlan, RepairStages.ReconstructingDescription(missingPlan) + " (PAR1: every file is one block.)"));
+            stages.Add(new(RepairStages.Writing, (double)missingPlan * largestPlan, "Checks the MD5 of every rebuilt file and writes it in place."));
+        }
+
+        observer.Plan(stages);
+        observer.Stage(RepairStages.Copying);
         foreach (var f in verify.Files.Where(f => f.Status != Par1FileStatus.Complete && f.FoundAs != null))
         {
             File.Copy(f.FoundAs!, f.TargetPath + ".tmp", true);
@@ -525,14 +574,18 @@ public static class Par1Set
             coeffs[r, known.Count + r] = 1;
         }
 
-        var options = context.Combine.Create();
-        LinearCombiner.Combine(field, new MatrixCoefficients<byte>(coeffs), inputs.Count, l, source, new MemoryRegions(s), size, options);
+        // Most of the work is reading every input (first part); the second combination is small and in memory.
+        observer.Stage(RepairStages.Reconstructing);
+        LinearCombiner.Combine(field, new MatrixCoefficients<byte>(coeffs), inputs.Count, l, source, new MemoryRegions(s), size, context.Combine.Create(observer.ToProgress(0, 0.9)));
         var d = Enumerable.Range(0, l).Select(_ => new byte[size]).ToArray();
-        LinearCombiner.Combine(field, new MatrixCoefficients<byte>(a), l, l, new MemoryRegions(s), new MemoryRegions(d), size, options);
+        LinearCombiner.Combine(field, new MatrixCoefficients<byte>(a), l, l, new MemoryRegions(s), new MemoryRegions(d), size, context.Combine.Create(observer.ToProgress(0.9, 1)));
+
+        observer.Stage(RepairStages.Writing);
 
         bool ok = true;
         for (int j = 0; j < l; j++)
         {
+            observer.Progress((double)j / l);
             var f = saved[missing[j]];
             var data = d[j].AsSpan(0, (int)f.Entry.Size);
             if (f.TargetPath.Length == 0 || !MD5.HashData(data).AsSpan().SequenceEqual(f.Entry.Md5))

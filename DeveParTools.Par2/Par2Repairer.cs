@@ -74,10 +74,31 @@ public static class Par2Repairer
         var unsafeNames = broken.Where(f => f.TargetPath.Length == 0).Select(f => f.File.Name).ToList();
         var unprotected = broken.Where(f => f.TargetPath.Length > 0 && !Restorable(f)).Select(f => f.TargetPath).ToList();
         var missing = Enumerable.Range(0, set.TotalSlices).Where(i => verify.SliceSources[i] == null).ToList();
-        observer.Stage("Repairing");
+        long rebuildBytes = Math.Max(1, toRebuild.Sum(f => f.File.Length));
+        double sliceBytes = set.SliceSize;
+        var stages = new List<OperationStage>();
+        if (missing.Count > 0)
+        {
+            // Inverting an L × L matrix takes about L³ multiplications; a few hundred per byte read is a fair guess.
+            stages.Add(new(RepairStages.Choosing, Math.Pow(missing.Count, 3) / 200 + 1, RepairStages.ChoosingDescription));
+        }
+
+        stages.Add(new(RepairStages.Copying, rebuildBytes, RepairStages.CopyingDescription));
+        if (missing.Count > 0)
+        {
+            stages.Add(new(RepairStages.Reconstructing, (set.TotalSlices + missing.Count) * sliceBytes, RepairStages.ReconstructingDescription(missing.Count)));
+        }
+
+        stages.Add(new(RepairStages.VerifyingRepaired, rebuildBytes, RepairStages.VerifyingRepairedDescription));
+        observer.Plan(stages);
 
         // Choose the recovery slices first, so nothing is written when the matrix cannot be inverted.
-        var selection = missing.Count > 0 ? ChooseRecoverySlices(set, missing, context.CancellationToken) : null;
+        if (missing.Count > 0)
+        {
+            observer.Stage(RepairStages.Choosing);
+        }
+
+        var selection = missing.Count > 0 ? ChooseRecoverySlices(set, missing, context.CancellationToken, p => observer.Progress(p)) : null;
         if (missing.Count > 0 && selection == null)
         {
             return new Par2RepairResult
@@ -94,6 +115,8 @@ public static class Par2Repairer
         bool rebuilt = false;
         try
         {
+            observer.Stage(RepairStages.Copying);
+            long copied = 0;
             foreach (var fv in toRebuild)
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(fv.TargetPath)!);
@@ -112,6 +135,7 @@ public static class Par2Repairer
                         copy.CopyTo(temp[fv]);
                     }
 
+                    observer.Progress((double)Interlocked.Add(ref copied, fv.File.Length) / rebuildBytes);
                     return;
                 }
 
@@ -131,11 +155,14 @@ public static class Par2Repairer
                         buf.AsSpan(have, len - have).Clear();
                         RandomAccess.Write(temp[fv].SafeFileHandle, buf.AsSpan(0, len), offset);
                     }
+
+                    observer.Progress((double)Interlocked.Add(ref copied, Math.Min(set.SliceSize, fv.File.Length - s * set.SliceSize)) / rebuildBytes);
                 }
             });
 
             if (selection is { } sel)
             {
+                observer.Stage(RepairStages.Reconstructing);
                 foreach (var m in missing)
                 {
                     map?.Set(m, BlockState.Repairing);
@@ -164,9 +191,10 @@ public static class Par2Repairer
         }
 
         // Verify the rebuilt files and put them in place.
-        observer.Stage("Verifying repaired files");
+        observer.Stage(RepairStages.VerifyingRepaired);
         var repaired = new List<string>();
         var failed = new List<string>();
+        long checkedBytes = 0;
         foreach (var fv in toRebuild)
         {
             var tmpPath = TempPathOf(fv);
@@ -175,6 +203,9 @@ public static class Par2Repairer
             {
                 hash = Md5Hash.FromBytes(MD5.HashData(fs));
             }
+
+            checkedBytes += fv.File.Length;
+            observer.Progress((double)checkedBytes / rebuildBytes, Path.GetFileName(fv.TargetPath));
 
             if (hash != fv.File.FileHash)
             {
@@ -260,7 +291,7 @@ public static class Par2Repairer
     /// singular, because <c>det = 2^21845·(16^21845 − 2^21845)·…</c> vanishes when (16/2)^21845 = 8^21845 = 1, and
     /// 8 = 2^3 has order 65535/3 = 21845. The next window {21845, 30000} is invertible and is used.
     /// </example>
-    internal static (List<uint> Exponents, GfMatrix<ushort> Inverse)? ChooseRecoverySlices(Par2RecoverySet set, List<int> missing, CancellationToken cancellationToken)
+    internal static (List<uint> Exponents, GfMatrix<ushort> Inverse)? ChooseRecoverySlices(Par2RecoverySet set, List<int> missing, CancellationToken cancellationToken, Action<double>? progress = null)
     {
         var field = new Gf16Field(Par2Math.Field);
         int l = missing.Count;
@@ -277,7 +308,7 @@ public static class Par2Repairer
                 }
             }
 
-            if (a.TryInvert(cancellationToken))
+            if (a.TryInvert(cancellationToken, progress))
             {
                 return (candidate, a);
             }
@@ -309,7 +340,7 @@ public static class Par2Repairer
             targets[j] = temp.TryGetValue(fv, out var stream) ? (stream, off, Math.Min(set.SliceSize, fv.File.Length - off)) : (null!, 0, 0);
         }
 
-        var options = context.Combine.Create(new Progress<double>(p => context.Observer.Progress(p, "Reconstructing")), context.MemoryBudget / 3);
+        var options = context.Combine.Create(context.Observer.ToProgress(), context.MemoryBudget / 3);
         var sink = new Pass2Sink(field, inverse, targets, l, options);
         LinearCombiner.Combine(field, coefficients, n, l, source, sink, set.SliceSize, options);
     }

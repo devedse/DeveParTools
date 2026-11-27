@@ -60,7 +60,31 @@ internal sealed class RecordingObserver : IParOperationObserver
 
     public List<string> Stages { get; } = new();
 
+    /// <summary>Every plan announced, in order (operations refine their plan as they learn more).</summary>
+    public List<IReadOnlyList<OperationStage>> Plans { get; } = new();
+
     public List<(ParLogLevel Level, string Message)> Logs { get; } = new();
+
+    public void Plan(IReadOnlyList<OperationStage> stages)
+    {
+        lock (_lock)
+        {
+            Plans.Add(stages);
+        }
+    }
+
+    /// <summary>Every stage that ran was in the last plan, in the plan's order.</summary>
+    public void AssertStagesFollowThePlan()
+    {
+        var plan = Plans[^1].Select(p => p.Name).ToList();
+        int at = 0;
+        foreach (var stage in Stages)
+        {
+            int found = plan.IndexOf(stage, at);
+            Assert.IsTrue(found >= 0, $"stage {stage} is not in the plan ({string.Join(", ", plan)}) after position {at}");
+            at = found;
+        }
+    }
 
     public List<double> Fractions { get; } = new();
 

@@ -1,0 +1,73 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:DeveParTools.App.ViewModels"
+             x:Class="DeveParTools.App.Views.OperationProgressView"
+             x:DataType="vm:OperationViewModel">
+  <UserControl.Styles>
+    <!-- The working indicator of the active step: a three-quarter ring that keeps turning. -->
+    <Style Selector="Path.Spinner">
+      <Style.Animations>
+        <Animation Duration="0:0:0.9" IterationCount="Infinite">
+          <KeyFrame Cue="0%">
+            <Setter Property="RotateTransform.Angle" Value="0" />
+          </KeyFrame>
+          <KeyFrame Cue="100%">
+            <Setter Property="RotateTransform.Angle" Value="360" />
+          </KeyFrame>
+        </Animation>
+      </Style.Animations>
+    </Style>
+    <!-- The number on top of a bar: readable on both the filled and the empty part. -->
+    <Style Selector="TextBlock.BarText">
+      <Setter Property="HorizontalAlignment" Value="Center" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
+      <Setter Property="Effect">
+        <DropShadowEffect BlurRadius="3" OffsetX="0" OffsetY="0" Color="{DynamicResource SolidBackgroundFillColorBase}" Opacity="1" />
+      </Setter>
+    </Style>
+    <Style Selector="TextBlock.Glyph">
+      <Setter Property="HorizontalAlignment" Value="Center" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+  </UserControl.Styles>
+
+  <!-- Open while working; afterwards only the header (total and time) shows, click it to see the steps again. -->
+  <Expander IsVisible="{Binding HasStages}" IsExpanded="{Binding IsBusy, Mode=OneWay}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="12,6">
+    <Expander.Header>
+      <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12" Margin="0,0,8,0">
+        <TextBlock Text="{Binding Stage}" FontWeight="SemiBold" VerticalAlignment="Center" MinWidth="120" />
+        <Panel Grid.Column="1" VerticalAlignment="Center" ToolTip.Tip="All steps together, each weighted by its estimated share of the work.">
+          <ProgressBar Minimum="0" Maximum="100" Value="{Binding Progress}" Height="20" MinWidth="0" />
+          <TextBlock Classes="BarText" Text="{Binding Progress, StringFormat='{}{0:0.0}%'}" FontWeight="SemiBold" />
+        </Panel>
+        <TextBlock Grid.Column="2" Text="{Binding TotalText}" VerticalAlignment="Center" Opacity="0.8" />
+      </Grid>
+    </Expander.Header>
+    <ItemsControl ItemsSource="{Binding Stages}">
+      <ItemsControl.ItemTemplate>
+        <DataTemplate x:DataType="vm:StageRowViewModel">
+          <Grid ColumnDefinitions="22,Auto,*,40,100" ColumnSpacing="10" Margin="0,3" Background="Transparent" ToolTip.Tip="{Binding Description}">
+            <Panel Width="16" Height="16" VerticalAlignment="Center">
+              <Path Classes="Spinner" IsVisible="{Binding IsActive}" Stroke="{DynamicResource AccentStripBrush}" StrokeThickness="2"
+                    Data="M 8,1 A 7,7 0 1 1 1,8" Width="16" Height="16" Stretch="None">
+                <Path.RenderTransform>
+                  <RotateTransform />
+                </Path.RenderTransform>
+              </Path>
+              <TextBlock Classes="Glyph" Text="✓" IsVisible="{Binding IsDone}" Foreground="{DynamicResource BlockFoundBrush}" FontWeight="Bold" />
+              <TextBlock Classes="Glyph" Text="○" IsVisible="{Binding IsPending}" Opacity="0.5" />
+              <TextBlock Classes="Glyph" Text="–" IsVisible="{Binding IsSkipped}" Opacity="0.5" />
+            </Panel>
+            <TextBlock Grid.Column="1" Text="{Binding Name}" VerticalAlignment="Center" MinWidth="170" />
+            <Panel Grid.Column="2" VerticalAlignment="Center">
+              <ProgressBar Minimum="0" Maximum="100" Value="{Binding Percent}" Height="16" MinWidth="0" />
+              <TextBlock Classes="BarText" Text="{Binding PercentText}" FontSize="11" />
+            </Panel>
+            <TextBlock Grid.Column="3" Grid.ColumnSpan="2" Text="{Binding ShareText}" VerticalAlignment="Center" Classes="Caption" />
+          </Grid>
+        </DataTemplate>
+      </ItemsControl.ItemTemplate>
+    </ItemsControl>
+  </Expander>
+</UserControl>

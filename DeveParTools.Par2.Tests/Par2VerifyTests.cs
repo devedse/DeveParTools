@@ -40,6 +40,7 @@ public sealed class Par2VerifyTests
         Assert.IsTrue(r.Files.All(f => f.Status == Par2FileStatus.Complete && f.SlicesFound == f.File.SliceCount && f.FoundAs == null));
         Assert.AreEqual(dir["sub/c.bin"], FileOf(r, "sub/c.bin").TargetPath);
         CollectionAssert.AreEqual(new[] { "Loading", "Verifying" }, observer.Stages);
+        observer.AssertStagesFollowThePlan();
         Assert.IsTrue(observer.Logs.Contains((ParLogLevel.Info, $"Creator: {Par2Creator.DefaultCreator}")));
         Assert.AreEqual((ParLogLevel.Info, "All files are correct."), observer.Logs[^1]);
         Assert.AreEqual(1.0, observer.Fractions[^1], 1e-9);
@@ -311,5 +312,19 @@ public sealed class Par2VerifyTests
         using var dir = new TempDir();
         MakeSet(dir);
         Assert.ThrowsExactly<OperationCanceledException>(() => TestData.Verify(dir, context: new OperationContext { CancellationToken = new CancellationToken(true) }));
+    }
+
+    [TestMethod]
+    public void ReadFile_ReportsHowFarItGot_InLargeFiles()
+    {
+        using var dir = new TempDir();
+        var data = new byte[6 << 20];
+        new Random(5).NextBytes(data);
+        File.WriteAllBytes(dir["big.bin"], data);
+        var created = Par2Creator.Create(new Par2CreateOptions { InputFiles = [dir["big.bin"]], OutputPath = dir["set.par2"], SliceSize = 65536, RecoverySliceCount = 80, VolumeCount = 1, Scheme = RecoveryFileScheme.Uniform });
+        var volume = created.WrittenFiles[1];
+        var positions = new List<long>();
+        DeveParTools.Par2.Packets.Par2PacketReader.ReadFile(volume, default, positions.Add);
+        Assert.IsTrue(positions.Count >= 1 && positions.SequenceEqual(positions.Order()) && positions[^1] < new FileInfo(volume).Length, string.Join(", ", positions));
     }
 }

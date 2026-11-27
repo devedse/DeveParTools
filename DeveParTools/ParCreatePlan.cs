@@ -186,6 +186,13 @@ public static partial class ParClient
     public static ParCreatePlan Plan(ParCreateRequest request, IReadOnlyList<ParPlanFile>? files = null, bool withFileSizes = true)
     {
         var plan = PlanBlocks(request, files ?? ScanInputs(request));
+        var earlier = ExistingSetFiles(request.OutputPath, plan.Format);
+        if (earlier.Count > 0)
+        {
+            plan = Copy(plan, plan.OutputFiles, [.. plan.Warnings, $"There are already {earlier.Count:N0} PAR file(s) named {Path.GetFileNameWithoutExtension(request.OutputPath)}… here, from an earlier set. "
+                + "Remove them first: left-over recovery files of the old set would be mixed up with the new one."]);
+        }
+
         // No sizes when Create would refuse, or when a scanned file has gone (they would be for other files).
         if (!withFileSizes || plan.Files.Count == 0 || plan.Errors.Count > 0 || !plan.Files.All(f => File.Exists(f.Path)))
         {
@@ -201,24 +208,9 @@ public static partial class ParClient
         };
         try
         {
-            ParCreatePlan Sized(IReadOnlyList<OutputFileSize> sizes, IReadOnlyList<string> warnings) => new()
-            {
-                Format = plan.Format,
-                Files = plan.Files,
-                BlockSize = plan.BlockSize,
-                InputBlocks = plan.InputBlocks,
-                RecoveryBlocks = plan.RecoveryBlocks,
-                RecoveryFiles = plan.RecoveryFiles,
-                Code = plan.Code,
-                MaxInputBlocks = plan.MaxInputBlocks,
-                Warnings = warnings,
-                Errors = plan.Errors,
-                OutputFiles = sizes,
-            };
-
-            var sized = Sized(PlanFileSizes(exact, plan.Format), plan.Warnings);
+            var sized = Copy(plan, PlanFileSizes(exact, plan.Format), plan.Warnings);
             return sized.Efficiency < 0.5 && sized.RecoveryBlocks > 0
-                ? Sized(sized.OutputFiles!, [.. plan.Warnings, $"Only {sized.Efficiency:P0} of what is written is recovery data for your files. The rest is overhead: "
+                ? Copy(sized, sized.OutputFiles, [.. plan.Warnings, $"Only {sized.Efficiency:P0} of what is written is recovery data for your files. The rest is overhead: "
                     + "partly empty blocks, a checksum per block, and copies of the file list and checksums in every recovery file. Fewer, larger blocks lower it."])
                 : sized;
         }
@@ -228,6 +220,21 @@ public static partial class ParClient
             return plan;
         }
     }
+
+    private static ParCreatePlan Copy(ParCreatePlan plan, IReadOnlyList<OutputFileSize>? sizes, IReadOnlyList<string> warnings) => new()
+    {
+        Format = plan.Format,
+        Files = plan.Files,
+        BlockSize = plan.BlockSize,
+        InputBlocks = plan.InputBlocks,
+        RecoveryBlocks = plan.RecoveryBlocks,
+        RecoveryFiles = plan.RecoveryFiles,
+        Code = plan.Code,
+        MaxInputBlocks = plan.MaxInputBlocks,
+        Warnings = warnings,
+        Errors = plan.Errors,
+        OutputFiles = sizes,
+    };
 
     private static ParCreatePlan PlanBlocks(ParCreateRequest request, IReadOnlyList<ParPlanFile> files)
     {
@@ -357,6 +364,25 @@ public static partial class ParClient
                 };
             }
         }
+    }
+
+    /// <summary>
+    /// PAR files that already exist with the output's name: an earlier set. Creating over them only replaces the files
+    /// with the same names, so left-over recovery files of the old set would be mixed up with the new one (e.g.
+    /// "set.vol262143+097308.par3" from an earlier run next to a new "set.vol00000+00001.par3").
+    /// </summary>
+    public static IReadOnlyList<string> ExistingSetFiles(string outputPath, ParFormat? format = null)
+    {
+        var full = Path.GetFullPath(outputPath);
+        IEnumerable<string> files = (format ?? FromExtension(outputPath) ?? ParFormat.Par2) switch
+        {
+            ParFormat.Par3 => Par3InputSet.DiscoverFiles(full),
+            ParFormat.Par2 => Par2RecoverySet.DiscoverFiles(full),
+            _ => Directory.Exists(Path.GetDirectoryName(full))
+                ? Directory.EnumerateFiles(Path.GetDirectoryName(full)!, Path.GetFileNameWithoutExtension(full) + ".*").Where(f => FromExtension(f) == ParFormat.Par1)
+                : [],
+        };
+        return files.Where(File.Exists).Order(StringComparer.Ordinal).ToList();
     }
 
     /// <summary>Bytes in KiB/MiB/GiB for messages: 1536 → "1.5 KiB".</summary>

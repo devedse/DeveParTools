@@ -147,6 +147,8 @@ public sealed class Par2CreateTests
         var observer = new RecordingObserver();
         var multi = TestData.Create(dir, files.Keys, sliceSize, 3, "multi.par2", new OperationContext { MemoryBudget = memoryBudget, Observer = observer });
         Assert.IsTrue(observer.Stages.Contains("Hashing"), "multi-pass encoding hashes in a separate pass");
+        observer.AssertStagesFollowThePlan();
+        StringAssert.Contains(observer.Plans[^1].Single(p => p.Name == Par2Stages.Encoding).Description, "times, one part each time");
 
         foreach (var (a, b) in onePass.WrittenFiles.Zip(multi.WrittenFiles))
         {
@@ -167,7 +169,8 @@ public sealed class Par2CreateTests
         var observer = new RecordingObserver();
         var result = Par2Creator.Create(new Par2CreateOptions { InputFiles = files.Keys.ToList(), OutputPath = dir["set.par2"], SliceSize = 1000, RecoverySliceCount = 0 }, new OperationContext { Observer = observer });
         CollectionAssert.AreEqual(new[] { dir["set.par2"] }, result.WrittenFiles.ToArray());
-        CollectionAssert.AreEqual(new[] { "Preparing", "Hashing", "Writing" }, observer.Stages);
+        CollectionAssert.AreEqual(new[] { "Preparing", "Hashing", "Writing the index file" }, observer.Stages);
+        observer.AssertStagesFollowThePlan();
         Assert.AreEqual(1.0, observer.Fractions[^1]);
         Assert.IsTrue(TestData.Verify(dir).AllFilesComplete);
 
@@ -341,7 +344,8 @@ public sealed class Par2CreateTests
         var observer = new RecordingObserver();
         var ctx = new OperationContext { Observer = observer };
         var result = Par2Creator.Create(new Par2CreateOptions { InputFiles = files.Keys.ToList(), OutputPath = dir["set.par2"], SliceSize = 5000, RecoverySliceCount = 3 }, ctx);
-        CollectionAssert.AreEqual(new[] { "Preparing", "Encoding", "Writing" }, observer.Stages, "one pass: hashed while encoding");
+        CollectionAssert.AreEqual(new[] { "Preparing", "Encoding", "Writing recovery files", "Writing the index file" }, observer.Stages, "one pass: hashed while encoding");
+        observer.AssertStagesFollowThePlan();
         Assert.AreEqual(10, ctx.Blocks!.CountStates()[(int)BlockState.Processed]);
         Assert.AreEqual(3, ctx.Blocks.CountRecoveryStates()[(int)RecoveryBlockState.Created]);
         Assert.AreEqual(Path.GetFileName(result.WrittenFiles[1]), ctx.Blocks.RecoveryContainer[0]);

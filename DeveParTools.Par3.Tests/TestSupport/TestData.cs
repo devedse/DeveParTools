@@ -56,9 +56,39 @@ internal sealed class RecordingObserver : IParOperationObserver
 
     public List<string> Stages { get; } = new();
 
+    /// <summary>Every plan announced, in order.</summary>
+    public List<IReadOnlyList<OperationStage>> Plans { get; } = new();
+
+    /// <summary>Every progress fraction, per stage.</summary>
+    public Dictionary<string, List<double>> Fractions { get; } = new();
+
     public List<(ParLogLevel Level, string Message)> Logs { get; } = new();
 
     public double LastProgress { get; private set; }
+
+    public void Plan(IReadOnlyList<OperationStage> stages)
+    {
+        lock (_lock)
+        {
+            Plans.Add(stages);
+        }
+    }
+
+    /// <summary>Every stage that ran was announced in the last plan, in its order, and progress stayed in [0, 1].</summary>
+    public void AssertStagesFollowThePlan(params string[] unplanned)
+    {
+        var plan = Plans[^1].Select(p => p.Name).ToList();
+        int at = 0;
+        foreach (var stage in Stages.Where(s => !unplanned.Contains(s)))
+        {
+            int found = plan.IndexOf(stage, at);
+            Assert.IsTrue(found >= 0, $"stage {stage} is not in the plan ({string.Join(", ", plan)}) after position {at}; ran: {string.Join(", ", Stages)}");
+            at = found;
+        }
+
+        Assert.IsTrue(Fractions.Values.SelectMany(f => f).All(f => f is >= 0 and <= 1), "progress within [0, 1]");
+        Assert.IsTrue(Plans[^1].All(p => p.Weight >= 0 && p.Description.Length > 20), "every step has a weight and a description");
+    }
 
     public IEnumerable<string> Warnings => Logs.Where(l => l.Level >= ParLogLevel.Warning).Select(l => l.Message);
 
@@ -75,6 +105,13 @@ internal sealed class RecordingObserver : IParOperationObserver
         lock (_lock)
         {
             LastProgress = fraction;
+            var stage = Stages.Count == 0 ? string.Empty : Stages[^1];
+            if (!Fractions.TryGetValue(stage, out var list))
+            {
+                Fractions[stage] = list = new List<double>();
+            }
+
+            list.Add(fraction);
         }
     }
 

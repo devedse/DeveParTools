@@ -91,6 +91,55 @@ public sealed class Par3CreateOptions
     public Par3CauchyConvention CauchyConvention { get; init; } = Par3CauchyConvention.Par3cmdline;
 }
 
+/// <summary>The steps of creating (and extending) a PAR3 set, with their names and what they do.</summary>
+public static class Par3Stages
+{
+    public const string Preparing = "Preparing";
+    public const string Hashing = "Hashing";
+    public const string Metadata = "Writing metadata";
+    public const string Encoding = "Encoding";
+    public const string WritingRecovery = "Writing recovery files";
+    public const string StoringData = "Storing data";
+    public const string WritingIndex = "Writing the index file";
+
+    /// <summary>What <see cref="Encoding"/> does, for the code that is used.</summary>
+    public static string EncodingDescription(bool fft, int recoveryBlocks) => fft
+        ? $"Reads all input blocks again and computes the {recoveryBlocks:N0} recovery blocks with the FFT Reed-Solomon code, one group of blocks (cohort) at a time. The recovery files were created at their final size when this step started; they are filled in now."
+        : $"Reads all input blocks again and computes the {recoveryBlocks:N0} recovery blocks with the Cauchy Reed-Solomon code: every recovery block is a different weighted sum of all input blocks, calculated in a Galois field. The recovery files were created at their final size when this step started; they are filled in now.";
+
+    public const string WritingRecoveryDescription = "Completes the checksum of every recovery block and writes copies of the set's description (file list and block checksums) into every recovery file, so each recovery file can also be used on its own.";
+
+    /// <summary>
+    /// The steps of <see cref="Par3Creator.Create"/>, weighted by the bytes each one reads or writes: hashing reads the
+    /// input once, encoding reads it again and writes the recovery blocks, the recovery files get copies of the set's
+    /// description (about 24 bytes per input block each), storing data reads and writes the input.
+    /// </summary>
+    internal static IReadOnlyList<OperationStage> ForCreate(long inputBytes, int files, ulong blocks, int recovery, long blockSize, bool fft, int recoveryFiles, bool storeData)
+    {
+        double description = blocks * 24.0 + files * 300.0;
+        int copies = recovery == 0 ? 0 : Par3Creator.VitalCopiesPerFile((int)(blocks / 1024) + files + 4, recovery, blocks, Math.Max(1, recoveryFiles));
+        var stages = new List<OperationStage>
+        {
+            new(Preparing, files * 512.0 + 4096, "Lists the files and folders to protect and chooses the block size."),
+            new(Hashing, inputBytes, "Reads every file once and computes its checksums: one for every block (CRC-64 and BLAKE3), one for the last piece of each file and one for the whole file. Verify and repair use them to find good, moved and damaged blocks."),
+            new(Metadata, description, "Builds the description of the set (the vital packets): the list of files and folders, the checksum of every block and the parameters of the code."),
+        };
+        if (recovery > 0)
+        {
+            stages.Add(new(Encoding, inputBytes + (double)recovery * blockSize, EncodingDescription(fft, recovery)));
+            stages.Add(new(WritingRecovery, description * copies * recoveryFiles + recovery * 128.0, WritingRecoveryDescription));
+        }
+
+        if (storeData)
+        {
+            stages.Add(new(StoringData, inputBytes * 2.0, "Copies the contents of your files into the .part files (archive mode), so the set alone can recreate them."));
+        }
+
+        stages.Add(new(WritingIndex, description, "Writes the index file: the description of the set, once."));
+        return stages;
+    }
+}
+
 public sealed class Par3CreateResult
 {
     public required InputSetId SetId { get; init; }
@@ -174,7 +223,7 @@ public static class Par3Creator
         var baseDir = Path.GetFullPath(options.BaseDirectory ?? Path.GetDirectoryName(outputPath)!);
 
         // 1. Input tree.
-        observer.Stage("Preparing");
+        observer.Stage(Par3Stages.Preparing);
         var (files, directories) = Enumerate(options, baseDir);
         if (files.Count == 0 && directories.Count == 0)
         {
@@ -186,6 +235,16 @@ public static class Par3Creator
         if (blockSize == 0 || blockSize % 8 != 0)
         {
             throw new ArgumentException("Block size must be a positive multiple of 8.");
+        }
+
+        if (!sizesOnly)
+        {
+            // Every step, weighted by its work (block and recovery counts as planned; deduplication can lower them).
+            ulong plannedBlocks = CountBlocks(files.Select(f => f.Length), blockSize, options.PackTails);
+            int plannedRecovery = plannedBlocks == 0 ? 0 : options.RecoveryBlockCount ?? (int)Math.Ceiling(plannedBlocks * options.RedundancyPercent / 100.0);
+            int plannedFiles = PlanVolumes(outputPath, options.Scheme, options.VolumeCount, options.FirstRecoveryBlock, plannedRecovery, ".vol", LimitBlocks(files.Select(f => f.Length).DefaultIfEmpty(0).Max(), blockSize)).Count;
+            observer.Plan(Par3Stages.ForCreate(total, files.Count, plannedBlocks, plannedRecovery, (long)blockSize, ResolveCode(options.Code, plannedBlocks, plannedRecovery) == Par3Code.Fft, plannedFiles, options.StoreData));
+            observer.Progress(1);
         }
 
         // 2. Hash every file once: block checksums, tails, file hash, 16 KiB rolling hash. (Sizes only: just the shapes.)
@@ -200,7 +259,7 @@ public static class Par3Creator
         }
         else
         {
-            observer.Stage("Hashing");
+            observer.Stage(Par3Stages.Hashing);
             HashFiles(files, blockSize, context);
         }
 
@@ -300,7 +359,7 @@ public static class Par3Creator
         var (fftLayout, generator) = ChooseField(code, blockCount, recoveryCount, options.FirstRecoveryBlock, maxRecovery, options.Interleave);
 
         // 5. Packets.
-        observer.Stage("Writing metadata");
+        observer.Stage(Par3Stages.Metadata);
         ulong unique = sizesOnly ? 0 : options.Reproducible ? ReproducibleUnique(files, blockSize, generator) : BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
         var startBody = Par3PacketWriter.StartBody(default, default, blockSize, generator);
         var setId = Par3PacketWriter.ComputeSetId(unique, startBody);
@@ -377,12 +436,13 @@ public static class Par3Creator
             return new Par3CreateResult { SetId = setId, BlockSize = blockSize, InputBlocks = blockCount, RecoveryBlocks = recoveryCount, CodeDescription = Describe(fftLayout, generator), WrittenFiles = [], PlannedSizes = sizes };
         }
 
+        observer.Progress(1);
         var map = context.CreateBlockMap((int)blockCount, recoveryCount);
         var written = new List<string> { outputPath };
         var recoveryIndices = Enumerable.Range(0, recoveryCount).Select(i => options.FirstRecoveryBlock + (ulong)i).ToList();
         if (recoveryCount > 0)
         {
-            observer.Stage("Encoding");
+            observer.Stage(Par3Stages.Encoding);
             WriteRecovery(setId, rootChecksum, matrixChecksum, generator, fftLayout, blockCount, recoveryIndices, volumes, blockSource, (long)blockSize, vital, creatorPacket, options, context, map);
             written.AddRange(volumes.Select(v => v.Path));
         }
@@ -390,10 +450,11 @@ public static class Par3Creator
         // 7. Data packets (archive mode).
         if (options.StoreData && blockCount > 0)
         {
-            written.AddRange(WriteDataPackets(setId, outputPath, blockCount, blockSource, blockSize, vital, creatorPacket, options));
+            written.AddRange(WriteDataPackets(setId, outputPath, blockCount, blockSource, blockSize, vital, creatorPacket, options, observer));
         }
 
         // 8. Index file: every vital packet once, plus the creator.
+        observer.Stage(Par3Stages.WritingIndex);
         using (var index = new FileStream(outputPath, FileMode.Create, FileAccess.Write))
         {
             foreach (var p in vital)
@@ -831,7 +892,7 @@ public static class Par3Creator
 
             var done = new bool[recoveryCount];
             var sink = new RecoverySink(outputs, blockSize, done, map);
-            var progress = new Progress<double>(p => context.Observer.Progress(p, "Encoding"));
+            var progress = context.Observer.ToProgress();
             var combine = context.Combine.Create(progress);
             var source = new Par3BlockSource(blocks.Blocks, blocks.Handles) { OnRead = b => map.Set(b, BlockState.Processed) };
             if (fft != null)
@@ -843,8 +904,14 @@ public static class Par3Creator
                 Par3Fields.With(generator, new CauchyEncode(blockCount, recoveryIndices, source, sink, blockSize, combine, options.CauchyConvention));
             }
 
+            // Then the packet headers (with the checksums), and the vital packets after the recovery data, repeated
+            // per spec Appendix D. Progress: the headers count as one copy of the vital packets.
+            context.Observer.Stage(Par3Stages.WritingRecovery);
+            int perFile = VitalCopiesPerFile(vital.Count, recoveryCount, blockCount, volumes.Count);
+            double steps = 1 + (double)perFile * streams.Count;
             for (int j = 0; j < recoveryCount; j++)
             {
+                context.CancellationToken.ThrowIfCancellationRequested();
                 if (!done[j])
                 {
                     FinishChecksumFromDisk(outputs[j].Stream, outputs[j].DataOffset, outputs[j].Header, blockSize);
@@ -852,19 +919,25 @@ public static class Par3Creator
 
                 RandomAccess.Write(outputs[j].Stream.SafeFileHandle, outputs[j].Header, outputs[j].DataOffset - outputs[j].Header.Length);
                 map.SetRecovery(j, RecoveryBlockState.Created);
+                if (j % 256 == 255)
+                {
+                    context.Observer.Progress((j + 1.0) / recoveryCount / steps);
+                }
             }
 
-            // Vital packets after the recovery data, repeated per spec Appendix D.
-            int perFile = VitalCopiesPerFile(vital.Count, recoveryCount, blockCount, volumes.Count);
+            int copiesWritten = 0;
             foreach (var s in streams)
             {
                 s.Seek(0, SeekOrigin.End);
                 for (int c = 0; c < perFile; c++)
                 {
+                    context.CancellationToken.ThrowIfCancellationRequested();
                     foreach (var p in vital)
                     {
                         s.Write(p);
                     }
+
+                    context.Observer.Progress((1 + ++copiesWritten) / steps);
                 }
 
                 s.Write(creator);
@@ -879,15 +952,22 @@ public static class Par3Creator
         }
     }
 
-    private static List<string> WriteDataPackets(InputSetId setId, string outputPath, ulong blockCount, Par3BlockSource blocks, ulong blockSize, List<byte[]> vital, byte[] creator, Par3CreateOptions options)
+    private static List<string> WriteDataPackets(InputSetId setId, string outputPath, ulong blockCount, Par3BlockSource blocks, ulong blockSize, List<byte[]> vital, byte[] creator, Par3CreateOptions options, IParOperationObserver observer)
     {
+        observer.Stage(Par3Stages.StoringData);
         var parts = PlanDataParts(outputPath, options, blockCount);
         var buf = new byte[blockSize];
+        ulong stored = 0;
         foreach (var part in parts)
         {
             using var fs = new FileStream(part.Path, FileMode.Create, FileAccess.Write);
             for (int i = 0; i < part.Count; i++)
             {
+                if (++stored % 256 == 0)
+                {
+                    observer.Progress((double)stored / blockCount);
+                }
+
                 ulong idx = (ulong)(part.First + i);
                 blocks.Read((int)idx, 0, buf);
                 int len = buf.Length;

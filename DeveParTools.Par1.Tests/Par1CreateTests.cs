@@ -126,12 +126,27 @@ public sealed class Par1CreateTests
         var b = dir.WriteRandom("b.bin", 7000, 2);
         var observer = new RecordingObserver();
         Par1Set.Create(new Par1CreateOptions { InputFiles = [a, b], OutputPath = dir["set.par"], RecoveryVolumes = 1 }, new OperationContext { Observer = observer });
-        CollectionAssert.AreEqual(new[] { "Hashing", "Encoding" }, observer.Stages.ToArray());
+        CollectionAssert.AreEqual(new[] { "Hashing", "Writing the index file", "Encoding", "Writing recovery files" }, observer.Stages.ToArray());
+        CollectionAssert.AreEqual(observer.Stages.ToArray(), observer.Plan.Select(p => p.Name).ToArray(), "every step was announced, in order");
+        Assert.IsTrue(observer.Plan.All(p => p.Weight > 0 && p.Description.Length > 20));
+
+        var verifying = new RecordingObserver();
+        var verify = Par1Set.Verify(dir["set.par"], context: new OperationContext { Observer = verifying });
+        CollectionAssert.AreEqual(new[] { "Loading", "Verifying" }, verifying.Stages.ToArray());
+        File.Delete(a);
+        var repairing = new RecordingObserver();
+        Assert.IsTrue(Par1Set.Repair(Par1Set.Verify(dir["set.par"]), new OperationContext { Observer = repairing }));
+        CollectionAssert.AreEqual(new[] { "Copying good blocks", "Reconstructing", "Writing repaired files" }, repairing.Stages.ToArray());
+        Assert.IsTrue(verify.AllFilesComplete);
     }
 
     private sealed class RecordingObserver : IParOperationObserver
     {
         public List<string> Stages { get; } = new();
+
+        public IReadOnlyList<OperationStage> Plan { get; private set; } = [];
+
+        void IParOperationObserver.Plan(IReadOnlyList<OperationStage> stages) => Plan = stages;
 
         public void Stage(string name)
         {

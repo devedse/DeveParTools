@@ -48,7 +48,13 @@ public static class Par2Extender
     public static Par2CreateResult Extend(Par2ExtendOptions options, OperationContext? context = null)
     {
         context ??= OperationContext.Default;
-        var verify = Par2Verifier.Verify(new Par2VerifyOptions { Par2Path = options.Par2Path, BaseDirectory = options.BaseDirectory }, context);
+
+        // Verify first (every file must be complete), then create the new volumes; the plan is refined once the set is known.
+        long parBytes = Par2RecoverySet.DiscoverFiles(options.Par2Path).Where(File.Exists).Sum(f => new FileInfo(f).Length);
+        IReadOnlyList<OperationStage> Steps(long dataBytes, IReadOnlyList<OperationStage> create) =>
+            [.. VerifyStages.Plan(parBytes, dataBytes, 0), .. create.Where(c => c.Name != Par2Stages.WritingIndex)];
+        context.Observer.Plan(Steps(parBytes * 10, Par2Stages.ForCreate(1, parBytes * 10, 1, 1, 1, 1, 1)));
+        var verify = Par2Verifier.Verify(new Par2VerifyOptions { Par2Path = options.Par2Path, BaseDirectory = options.BaseDirectory }, context.Nested());
         if (!verify.AllFilesComplete)
         {
             throw new InvalidOperationException("Every file of the set must be complete and at its stored name. Repair the files before extending the set.");
@@ -68,6 +74,8 @@ public static class Par2Extender
             throw new ArgumentException($"Recovery slice {clash} already exists; choose another first exponent.");
         }
 
+        long dataBytes = verify.Files.Sum(f => f.File.Length);
+        context.Observer.Plan(Steps(dataBytes, Par2Stages.ForCreate(verify.Files.Count, dataBytes, set.TotalSlices, count, set.SliceSize, 1, RecoveryFileSizing.Counts(count, options.Scheme, options.VolumeCount, int.MaxValue).Count)));
         var indexPath = options.OutputPath ?? IndexPathOf(options.Par2Path);
         var result = Par2Creator.Create(new Par2CreateOptions
         {

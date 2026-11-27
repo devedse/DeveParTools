@@ -174,7 +174,8 @@ public sealed class GfMatrix<T> where T : IEquatable<T>
     /// into row 0 first. In the in-place scheme that row swap turns into a column swap of the result at the end.
     /// Unlike floating point, any non-zero pivot is exact, so we simply take the first one.</para>
     /// </remarks>
-    public bool TryInvert(CancellationToken cancellationToken = default)
+    /// <param name="progress">Called with the fraction of columns done (every 1%), for progress of large inversions.</param>
+    public bool TryInvert(CancellationToken cancellationToken = default, Action<double>? progress = null)
     {
         if (Rows != Cols)
         {
@@ -184,9 +185,15 @@ public sealed class GfMatrix<T> where T : IEquatable<T>
         int n = Rows;
         var pivotRow = new int[n];
         var swapBuffer = new T[n];
+        int step = Math.Max(1, n / 100);
         for (int col = 0; col < n; col++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (col % step == 0)
+            {
+                progress?.Invoke((double)col / n);
+            }
+
 
             // Step 1: find a usable (non-zero) pivot at or below the diagonal.
             int p = col;
