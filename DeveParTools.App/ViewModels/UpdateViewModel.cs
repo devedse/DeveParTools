@@ -40,7 +40,8 @@ public sealed partial class UpdateViewModel : ObservableObject
 {
     private readonly Func<Updater> _newUpdater;
     private readonly UpdateCheckCache _cache;
-    private readonly Action<string, string> _restart;
+    private readonly Action<string, string> _startNewVersion;
+    private readonly Action _close;
     private readonly UpdateTarget _target;
     private UpdateCheck? _check;
     private CancellationTokenSource? _cancel;
@@ -49,15 +50,18 @@ public sealed partial class UpdateViewModel : ObservableObject
     /// <param name="newUpdater">Makes the updater (tests pass one with a fake GitHub).</param>
     /// <param name="cache">Where the last automatic check is remembered (default: shared with devepar).</param>
     /// <param name="processPath">The program to replace (default: this one).</param>
-    /// <param name="restart">
-    /// Hands over to the new program (its extracted copy, then this program's path) and closes this one; tests record it
-    /// instead. See <see cref="Updater"/> for why the new copy puts itself in place.
+    /// <param name="startNewVersion">
+    /// Starts the new program (its extracted copy, then this program's path); runs on a background thread, because
+    /// Windows checks a new program before it lets it start, which can take seconds. Tests record it instead. See
+    /// <see cref="Updater"/> for why the new copy puts itself in place.
     /// </param>
-    public UpdateViewModel(Func<Updater>? newUpdater = null, UpdateCheckCache? cache = null, string? processPath = null, Action<string, string>? restart = null)
+    /// <param name="close">Closes this app once the new version has started (on the UI thread).</param>
+    public UpdateViewModel(Func<Updater>? newUpdater = null, UpdateCheckCache? cache = null, string? processPath = null, Action<string, string>? startNewVersion = null, Action? close = null)
     {
         _newUpdater = newUpdater ?? (() => new Updater("deveparui", Version.Parse(AppInfo.Version)));
         _cache = cache ?? new UpdateCheckCache(UpdateCheckCache.DefaultPath);
-        _restart = restart ?? Restart;
+        _startNewVersion = startNewVersion ?? StartNewVersion;
+        _close = close ?? (() => (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.Shutdown());
         using (var updater = _newUpdater())
         {
             CurrentVersion = updater.Current.ToString();
@@ -238,11 +242,15 @@ public sealed partial class UpdateViewModel : ObservableObject
             var asset = check.Asset ?? throw new UpdateException(DescribeInstall(check));
             WindowText = DescribeInstall(check);
             string staged = await updater.PrepareAsync(asset, _target.Executable!, new Progress<UpdateProgress>(p => OnProgress(asset, p)), cancel.Token);
+            // Starting the new program can take seconds (Windows scans a new program before it runs it the first time),
+            // so it happens off the UI thread while the window says what is going on.
             State = UpdateState.Restarting;
-            StageText = $"Step 3 of 3: Installing DeveParTools {LatestVersion} and restarting…";
-            ProgressText = null;
-            Progress = 100;
-            _restart(staged, _target.Executable!);
+            StageText = $"Step 3 of 3: Starting DeveParTools {LatestVersion}";
+            ProgressText = "Windows checks a new program before it runs it the first time, which can take a few seconds. This window then closes and the new version opens.";
+            IsIndeterminate = true;
+            string executable = _target.Executable!;
+            await Task.Run(() => _startNewVersion(staged, executable));
+            _close();
         }
         catch (OperationCanceledException)
         {
@@ -325,9 +333,9 @@ public sealed partial class UpdateViewModel : ObservableObject
 
     /// <summary>
     /// Starts the new program from where it was extracted, which waits for this process to exit, puts itself at
-    /// <paramref name="executable"/> and starts it (see Program.FinishUpdate); then closes this one.
+    /// <paramref name="executable"/> and starts it (see Program.FinishUpdate).
     /// </summary>
-    private static void Restart(string staged, string executable)
+    private static void StartNewVersion(string staged, string executable)
     {
         var start = new ProcessStartInfo(staged) { UseShellExecute = false };
         foreach (var argument in new[] { AppArguments.FinishUpdateSwitch, executable, Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture) })
@@ -336,7 +344,6 @@ public sealed partial class UpdateViewModel : ObservableObject
         }
 
         Process.Start(start);
-        (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.Shutdown();
     }
 }
 

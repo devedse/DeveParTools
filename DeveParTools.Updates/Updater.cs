@@ -40,6 +40,9 @@ namespace DeveParTools.Updates;
 /// </code>
 /// <para>Renaming is allowed while a program runs (Windows does not allow overwriting or deleting it), and if putting the
 /// new file in place fails, the rename is undone, so there is always a working program at the original path.</para>
+/// <para>Nothing here runs on the caller's thread after the first await (ConfigureAwait(false) throughout): a window that
+/// starts an update keeps responding while the download is hashed and written; progress reaches it through its own
+/// IProgress (Progress&lt;T&gt; reports on the thread that created it).</para>
 /// <para>A folder the user cannot write to (Program Files, /usr/local/bin) fails at step 1, before anything changes,
 /// with a message that says to run the update with administrator rights.</para>
 /// </remarks>
@@ -147,7 +150,7 @@ public sealed class Updater : IDisposable
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(_api, $"repos/{Repository}/releases/latest"));
         request.Headers.Accept.ParseAdd("application/vnd.github+json");
-        using var response = await Send(() => _http.SendAsync(request, token), "check for updates", token);
+        using var response = await Send(() => _http.SendAsync(request, token), "check for updates", token).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             throw new UpdateException(response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests
@@ -155,7 +158,7 @@ public sealed class Updater : IDisposable
                 : $"GitHub answered {(int)response.StatusCode} ({response.ReasonPhrase}) when asked for the latest release.");
         }
 
-        return ParseRelease(await response.Content.ReadAsStringAsync(token));
+        return ParseRelease(await response.Content.ReadAsStringAsync(token).ConfigureAwait(false));
     }
 
     /// <summary>GitHub's answer (JSON) as a release.</summary>
@@ -210,7 +213,7 @@ public sealed class Updater : IDisposable
     /// <exception cref="UpdateException">GitHub could not be asked.</exception>
     public async Task<UpdateCheck> CheckAsync(UpdateCheckCache? cache = null, CancellationToken token = default)
     {
-        var latest = await GetLatestAsync(token);
+        var latest = await GetLatestAsync(token).ConfigureAwait(false);
         cache?.Write(DateTimeOffset.UtcNow, latest.Version);
         var asset = RuntimeId == null ? null : latest.Assets.FirstOrDefault(a => a.Name == AssetName(RuntimeId));
         return new UpdateCheck(Current, latest, asset);
@@ -231,7 +234,7 @@ public sealed class Updater : IDisposable
 
         try
         {
-            var latest = await GetLatestAsync(token);
+            var latest = await GetLatestAsync(token).ConfigureAwait(false);
             cache.Write(now, latest.Version);
             return latest.Version;
         }
@@ -251,7 +254,7 @@ public sealed class Updater : IDisposable
     /// <exception cref="UpdateException">The download failed, was damaged, did not contain the program, or the folder is not writable.</exception>
     public async Task InstallAsync(UpdateAsset asset, string executable, IProgress<UpdateProgress>? progress = null, CancellationToken token = default)
     {
-        string program = await PrepareAsync(asset, executable, progress, token);
+        string program = await PrepareAsync(asset, executable, progress, token).ConfigureAwait(false);
         try
         {
             progress?.Report(new UpdateProgress(UpdateStage.Installing, 0, 1));
@@ -289,12 +292,12 @@ public sealed class Updater : IDisposable
                 throw new UpdateException($"No permission to change files in {folder}. Run the update with administrator rights (sudo on Linux and macOS), or download the new version from {ReleasesPage}.", e);
             }
 
-            await using (file)
+            await using (file.ConfigureAwait(false))
             {
-                await DownloadAsync(asset, file, progress, token);
+                await DownloadAsync(asset, file, progress, token).ConfigureAwait(false);
             }
 
-            string program = await Task.Run(() => Extract(download, asset.Name, staging, progress, token), token);
+            string program = await Task.Run(() => Extract(download, asset.Name, staging, progress, token), token).ConfigureAwait(false);
             if (!OperatingSystem.IsWindows())
             {
                 File.SetUnixFileMode(program, File.GetUnixFileMode(executable) | UnixFileMode.UserExecute);
@@ -370,7 +373,7 @@ public sealed class Updater : IDisposable
 
     private async Task DownloadAsync(UpdateAsset asset, Stream target, IProgress<UpdateProgress>? progress, CancellationToken token)
     {
-        using var response = await Send(() => _http.GetAsync(asset.Url, HttpCompletionOption.ResponseHeadersRead, token), $"download {asset.Name}", token);
+        using var response = await Send(() => _http.GetAsync(asset.Url, HttpCompletionOption.ResponseHeadersRead, token), $"download {asset.Name}", token).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             throw new UpdateException($"Downloading {asset.Name} failed: GitHub answered {(int)response.StatusCode} ({response.ReasonPhrase}).");
@@ -378,14 +381,15 @@ public sealed class Updater : IDisposable
 
         long total = response.Content.Headers.ContentLength ?? asset.Size;
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        await using var source = await response.Content.ReadAsStreamAsync(token);
+        var source = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
+        await using var sourceScope = source.ConfigureAwait(false);
         var buffer = new byte[1 << 16];
         long done = 0;
         progress?.Report(new UpdateProgress(UpdateStage.Downloading, 0, total));
-        for (int n; (n = await source.ReadAsync(buffer, token)) > 0;)
+        for (int n; (n = await source.ReadAsync(buffer, token).ConfigureAwait(false)) > 0;)
         {
             hash.AppendData(buffer, 0, n);
-            await target.WriteAsync(buffer.AsMemory(0, n), token);
+            await target.WriteAsync(buffer.AsMemory(0, n), token).ConfigureAwait(false);
             done += n;
             progress?.Report(new UpdateProgress(UpdateStage.Downloading, done, total));
         }
@@ -406,7 +410,7 @@ public sealed class Updater : IDisposable
     {
         try
         {
-            return await send();
+            return await send().ConfigureAwait(false);
         }
         catch (HttpRequestException e)
         {

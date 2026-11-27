@@ -23,11 +23,11 @@
     <StackPanel Spacing="6" IsVisible="{Binding IsBusy}" AutomationProperties.Name="Update progress">
       <Grid ColumnDefinitions="*,Auto">
         <TextBlock Text="{Binding StageText}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
-        <TextBlock Grid.Column="1" Text="{Binding PercentText}" Margin="12,0,0,0" />
+        <TextBlock Grid.Column="1" Text="{Binding PercentText}" Margin="12,0,0,0" IsVisible="{Binding !IsIndeterminate}" />
       </Grid>
       <ProgressBar Value="{Binding Progress}" Maximum="100" MinHeight="6"
                    IsIndeterminate="{Binding IsIndeterminate}" />
-      <TextBlock Text="{Binding ProgressText}" Opacity="0.75" IsVisible="{Binding ProgressText, Converter={x:Static ObjectConverters.IsNotNull}}" />
+      <TextBlock Text="{Binding ProgressText}" Opacity="0.75" TextWrapping="Wrap" IsVisible="{Binding ProgressText, Converter={x:Static ObjectConverters.IsNotNull}}" />
     </StackPanel>
 
     <TextBlock Text="{Binding Error}" TextWrapping="Wrap" Foreground="{DynamicResource BlockMissingBrush}"

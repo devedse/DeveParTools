@@ -492,9 +492,15 @@ if (OperatingSystem.IsWindows())
     var newProgram = new byte[3_000_000];
     new Random(3).NextBytes(newProgram);
     (string Staged, string Program)? restarted = null;
+    bool closed = false;
+    using var windowsCheck = new ManualResetEventSlim(); // starting the new version waits for this, like Windows' scan of a new program
     var cachePath = Path.Combine(updateDir, "update-check.txt");
     Updater NewUpdater() => new("deveparui", new Version(1, 0, 40), github);
-    var updates = new UpdateViewModel(NewUpdater, new UpdateCheckCache(cachePath), program, (staged, path) => restarted = (staged, path));
+    var updates = new UpdateViewModel(NewUpdater, new UpdateCheckCache(cachePath), program, (staged, path) =>
+    {
+        restarted = (staged, path);
+        windowsCheck.Wait(TimeSpan.FromSeconds(30));
+    }, () => closed = true);
     var dialogs = new ConfirmingDialogs();
     var updateSettings = new SettingsViewModel(Path.Combine(updateDir, "settings.txt"), new ExplorerContextMenu(), program, updates: updates);
     var updateShell = new ShellViewModel(updateSettings);
@@ -536,11 +542,23 @@ if (OperatingSystem.IsWindows())
         $"the window shows the download: {updates.StageText}, {updates.PercentText}, {updates.ProgressText}");
     Save(updateWindow, output, "update-downloading");
     github.Resume();
+    until = DateTime.UtcNow.AddSeconds(30);
+    while (restarted == null && DateTime.UtcNow < until)
+    {
+        Dispatcher.UIThread.RunJobs();
+        Thread.Sleep(5);
+    }
+
+    // Starting the new version takes as long as Windows needs; meanwhile the window keeps responding and says why.
+    Save(updateWindow, output, "update-starting");
+    Check(updates is { State: UpdateState.Restarting, IsIndeterminate: true, IsInstalling: false } && !install.IsCompleted && !closed
+        && updates.StageText?.StartsWith("Step 3 of 3: Starting DeveParTools 1.0.41", StringComparison.Ordinal) == true && updates.ProgressText?.Contains("Windows checks", StringComparison.Ordinal) == true,
+        "while the new version starts, the window keeps responding (it was just drawn) and says why it takes a moment: " + updates.StageText);
+    windowsCheck.Set();
     Await(install);
-    Check(updates is { State: UpdateState.Restarting, ProgressText: null, IsInstalling: false } && restarted is { } handover && handover.Program == program
+    Check(closed && restarted is { } handover && handover.Program == program
         && File.ReadAllBytes(handover.Staged).SequenceEqual(newProgram) && File.ReadAllText(program) == "deveparui 1.0.40",
-        "the new version is extracted next to the program and started from there, without touching the running program: " + updates.StageText);
-    Save(updateWindow, output, "update-installed");
+        "then the app closes; the new version was extracted next to the program and started from there, without touching the running program");
 
     // What the new copy does when it is started with --finish-update.
     Updater.CompleteStaged(restarted!.Value.Staged, program, Environment.ProcessId, TimeSpan.FromMilliseconds(10));
@@ -551,7 +569,7 @@ if (OperatingSystem.IsWindows())
 
     // A damaged download: nothing changes, and the window says so.
     File.WriteAllText(program, "deveparui 1.0.40");
-    var failing = new UpdateViewModel(NewUpdater, new UpdateCheckCache(cachePath), program, (staged, path) => restarted = (staged, path));
+    var failing = new UpdateViewModel(NewUpdater, new UpdateCheckCache(cachePath), program, (staged, path) => restarted = (staged, path), () => closed = true);
     github.Damage();
     Await(failing.CheckNowCommand.ExecuteAsync(null));
     Await(failing.InstallCommand.ExecuteAsync(null));
@@ -581,7 +599,7 @@ if (OperatingSystem.IsWindows())
     github.Release("1.0.40", "none", "deveparui", newProgram);
     Await(failing.CheckNowCommand.ExecuteAsync(null));
     Check(failing is { State: UpdateState.UpToDate, BannerVisible: false } && failing.StatusText == "DeveParTools 1.0.40 is the latest version.", "up to date: " + failing.StatusText);
-    var devBuild = new UpdateViewModel(NewUpdater, new UpdateCheckCache(Path.Combine(updateDir, "dev-cache.txt")), processPath: null, restart: (staged, path) => restarted = (staged, path));
+    var devBuild = new UpdateViewModel(NewUpdater, new UpdateCheckCache(Path.Combine(updateDir, "dev-cache.txt")), processPath: null, startNewVersion: (staged, path) => restarted = (staged, path), close: () => closed = true);
     int before = github.Requests;
     Await(devBuild.CheckAutomaticallyAsync());
     github.Release("1.0.41", "none", "deveparui", newProgram);
