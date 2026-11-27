@@ -87,6 +87,16 @@ can store permissions.
 **Benchmark** shows the speed of every kernel on your machine. **Settings** sets threads, memory, the SIMD kernel
 (to compare kernels) and the theme.
 
+**Explorer context menu (Windows).** A switch in Settings adds two entries to the Explorer context menu:
+- "Create recovery set with DeveParTools" on files and folders. A multi-selection opens one Create window with all
+  the selected items.
+- "Verify with DeveParTools" on `.par`, `.par2` and `.par3` files. It doesn't change which program opens them by
+  default.
+
+The entries are registered for your Windows account only, so no administrator rights are needed. Windows 11 shows
+them under "Show more options". If you move the app, the entries follow it the next time it starts. Turn the switch
+off before you delete the app.
+
 The screenshots come from the headless UI test in `DeveParTools.App.Tests`, which drives the real app through create,
 damage, verify and repair.
 

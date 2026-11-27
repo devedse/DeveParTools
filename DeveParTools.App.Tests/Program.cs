@@ -5,6 +5,7 @@ using Avalonia.Media.Imaging;
 using Avalonia.Styling;
 using Avalonia.Threading;
 using DeveParTools.App;
+using DeveParTools.App.Services;
 using DeveParTools.App.ViewModels;
 using DeveParTools.App.Views;
 
@@ -24,6 +25,61 @@ foreach (var (name, size) in new[] { ("photos/holiday-001.jpg", 2_400_000), ("ph
     var data = new byte[size];
     rnd.NextBytes(data);
     File.WriteAllBytes(Path.Combine(work, name), data);
+}
+
+// Command line: "--create" collects existing files and folders; otherwise the first existing file is verified.
+var parsed = AppArguments.Parse(["--create", Path.Combine(work, "notes.txt"), Path.Combine(work, "missing.bin"), Path.Combine(work, "photos"), Path.Combine(work, "notes.txt")]);
+Check(parsed.OpenFile == null && parsed.CreatePaths.SequenceEqual([Path.Combine(work, "notes.txt"), Path.Combine(work, "photos")]), "--create keeps existing files and folders once each");
+Check(AppArguments.Parse(["-x", Path.Combine(work, "notes.txt")]) is { CreatePaths.Count: 0, OpenFile: not null }, "a plain file argument is opened for verification");
+
+// Explorer entries: the quoting of the command lines, and reading the program back from one.
+const string ProgramFilesExe = @"C:\Program Files\DeveParTools\DeveParTools.App.exe";
+var entries = ExplorerContextMenu.Entries(ProgramFilesExe);
+Check(entries.Count(e => e.Text == ExplorerContextMenu.CreateText && e.MultiSelect) == 2 && entries.Count(e => e.KeyPath.EndsWith(@"\shell\" + ExplorerContextMenu.VerifyVerb, StringComparison.Ordinal)) == 3, "create entries for files and folders, verify entries for .par/.par2/.par3");
+Check(entries[0].Command == $"\"{ProgramFilesExe}\" --create \"%1\"" && entries[2].Command == $"\"{ProgramFilesExe}\" \"%1\"", "menu command lines quote the program and the item: " + entries[0].Command);
+Check(ExplorerContextMenu.ExecutableOf(entries[0].Command) == ProgramFilesExe && ExplorerContextMenu.ExecutableOf(@"C:\x.exe ""%1""") == @"C:\x.exe" && ExplorerContextMenu.ExecutableOf("  ") == null, "the program is read back from a command line");
+
+// A multi-selection in Explorer starts one process per item; the first collects the others' paths.
+{
+    var name = "DeveParTools.App.Tests." + Guid.NewGuid().ToString("N")[..12];
+    using var first = CreateRequestCollector.StartOrForward(name, ["item0"], TimeSpan.FromSeconds(2));
+    Check(first is { IsCollecting: true }, "the first process of a multi-selection collects");
+    var arrived = new List<string>();
+    var senders = Enumerable.Range(1, 6).Select(i => Task.Run(() => CreateRequestCollector.StartOrForward(name, [$"item{i}", $"extra{i}"], TimeSpan.FromSeconds(2)))).ToArray();
+    Task.WaitAll(senders);
+    first!.Attach(paths =>
+    {
+        lock (arrived)
+        {
+            arrived.AddRange(paths);
+        }
+    });
+    Check(senders.All(t => t.Result == null), "the other processes hand their paths over and exit");
+    lock (arrived)
+    {
+        Check(arrived.Count == 12 && Enumerable.Range(1, 6).All(i => arrived.Contains($"item{i}") && arrived.Contains($"extra{i}")), $"all paths arrive in the first window ({arrived.Count})");
+    }
+
+    var until = DateTime.UtcNow.AddSeconds(10);
+    while (first.IsCollecting && DateTime.UtcNow < until)
+    {
+        Thread.Sleep(50);
+    }
+
+    Check(!first.IsCollecting, "the first window stops collecting once the selection stops arriving");
+    using var later = CreateRequestCollector.StartOrForward(name, ["later"], TimeSpan.FromSeconds(1));
+    Check(later is { IsCollecting: true }, "a later, separate right-click opens its own window");
+}
+
+// Started with --create, the window opens on the Create page (the navigation must not jump back to Verify).
+{
+    var createShell = new ShellViewModel();
+    createShell.Page = AppPage.Create;
+    var createWindow = new MainWindow { DataContext = createShell, Width = 1000, Height = 700 };
+    createWindow.Show();
+    Dispatcher.UIThread.RunJobs();
+    Check(createShell.Page == AppPage.Create && createShell.CurrentPage == createShell.Create, "a window started on the Create page stays there");
+    createWindow.Close();
 }
 
 var shell = new ShellViewModel();
@@ -108,6 +164,36 @@ Save(window, output, "benchmark");
 
 shell.Page = AppPage.Settings;
 Save(window, output, "settings");
+if (OperatingSystem.IsWindows())
+{
+    // The Settings switch writes the entries into a scratch key that stands in for HKCU\Software\Classes.
+    var root = $@"Software\DeveParTools.Tests\{Guid.NewGuid():N}";
+    const string Exe = @"C:\Tools\DeveParTools.App.exe";
+    var menu = new ExplorerContextMenu(root);
+    var settings = new SettingsViewModel(Path.Combine(work, "settings.txt"), menu, Exe);
+    Check(settings is { ExplorerMenuSupported: true, ExplorerMenu: false, ExplorerMenuEditable: true }, "the Explorer option is offered and off");
+    settings.ExplorerMenu = true;
+    using (var command = Microsoft.Win32.Registry.CurrentUser.OpenSubKey($@"{root}\SystemFileAssociations\.par2\shell\{ExplorerContextMenu.VerifyVerb}\command"))
+    using (var create = Microsoft.Win32.Registry.CurrentUser.OpenSubKey($@"{root}\Directory\shell\{ExplorerContextMenu.CreateVerb}"))
+    {
+        Check((string?)command?.GetValue(null) == $"\"{Exe}\" \"%1\"" && (string?)create?.GetValue("MUIVerb") == ExplorerContextMenu.CreateText && (string?)create?.GetValue("MultiSelectModel") == "Player", "turning it on writes the entries");
+    }
+
+    Check(menu.RegisteredExecutable() == Exe && settings.ExplorerMenuStatus?.Contains(Exe, StringComparison.Ordinal) == true, "the switch shows which program the entries start");
+    Check(new SettingsViewModel(Path.Combine(work, "settings.txt"), menu, @"D:\Other\DeveParTools.App.exe").ExplorerMenuStatus?.Contains("another copy", StringComparison.Ordinal) == true, "another copy of the app sees that the entries are not its own");
+    Microsoft.Win32.Registry.CurrentUser.CreateSubKey($@"{root}\SystemFileAssociations\.par3\shell\SomeoneElse").Dispose();
+
+    settings.ExplorerMenu = false;
+    using (var classes = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(root))
+    {
+        Check(menu.RegisteredExecutable() == null && classes?.OpenSubKey(@"SystemFileAssociations\.par2") == null && classes?.OpenSubKey(@"*\shell") == null, "turning it off removes the entries and the keys they left empty");
+        Check(classes?.OpenSubKey(@"SystemFileAssociations\.par3\shell\SomeoneElse") != null, "another program's entry next to ours is kept");
+    }
+
+    Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(root);
+    Save(window, output, "settings-windows");
+}
+
 Application.Current!.RequestedThemeVariant = ThemeVariant.Dark;
 Save(window, output, "settings-dark");
 

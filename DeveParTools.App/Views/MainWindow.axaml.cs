@@ -20,7 +20,13 @@ public sealed partial class MainWindow : Window, IFileDialogs
                 shell.Page = page;
             }
         };
-        Opened += (_, _) => Navigation.SelectedItem = Navigation.MenuItems.OfType<FANavigationViewItem>().FirstOrDefault();
+        // Select the page the view model starts on (Verify, or Create when started with --create).
+        Opened += (_, _) =>
+        {
+            var items = Navigation.MenuItems.Concat(Navigation.FooterMenuItems).OfType<FANavigationViewItem>().ToList();
+            var tag = (DataContext as ShellViewModel)?.Page.ToString();
+            Navigation.SelectedItem = items.FirstOrDefault(i => (string?)i.Tag == tag) ?? items.FirstOrDefault();
+        };
     }
 
     protected override void OnDataContextChanged(EventArgs e)

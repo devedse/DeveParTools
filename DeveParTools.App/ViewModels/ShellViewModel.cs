@@ -5,6 +5,7 @@ using Avalonia.Styling;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using DeveParTools.App.Services;
 using DeveParTools.Core.Galois;
 
 namespace DeveParTools.App.ViewModels;
@@ -58,17 +59,101 @@ public sealed partial class ShellViewModel : ObservableObject
     }
 }
 
-/// <summary>Settings: threads, memory budget, SIMD kernel override and theme. Stored in the user's app-data folder.</summary>
+/// <summary>
+/// Settings: threads, memory budget, SIMD kernel override and theme, stored in the user's app-data folder; and on
+/// Windows the Explorer context menu entries, whose state is the registry itself (see <see cref="ExplorerContextMenu"/>).
+/// </summary>
 public sealed partial class SettingsViewModel : ObservableObject
 {
     private readonly string _path;
+    private readonly ExplorerContextMenu _contextMenu;
+    private readonly string? _executable;
+    private bool _readingExplorerMenu;
 
-    public SettingsViewModel(string? path = null)
+    /// <param name="path">The settings file (default: %AppData%\DeveParTools\settings.txt).</param>
+    /// <param name="explorerMenu">Where the context menu entries go (default: the user's real classes key).</param>
+    /// <param name="executable">The program the entries start (default: this one).</param>
+    public SettingsViewModel(string? path = null, ExplorerContextMenu? explorerMenu = null, string? executable = null)
     {
         _path = path ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DeveParTools", "settings.txt");
+        _contextMenu = explorerMenu ?? new ExplorerContextMenu();
+        _executable = executable ?? ExplorerContextMenu.CurrentExecutable;
         Kernels = SimdSupport.SupportedLevels.Select(l => l.ToString()).ToArray();
         _kernel = SimdSupport.Best.ToString();
         Load();
+        ReadExplorerMenu();
+    }
+
+    /// <summary>True on Windows, where the Explorer context menu option is shown.</summary>
+    public bool ExplorerMenuSupported => ExplorerContextMenu.IsSupported;
+
+    /// <summary>Whether the Explorer entries are installed. Changing it installs or removes them.</summary>
+    [ObservableProperty]
+    private bool _explorerMenu;
+
+    /// <summary>False when the entries cannot be added because this app runs through "dotnet" instead of its .exe.</summary>
+    [ObservableProperty]
+    private bool _explorerMenuEditable;
+
+    /// <summary>Which program the entries start, or why they could not be changed.</summary>
+    [ObservableProperty]
+    private string? _explorerMenuStatus;
+
+    partial void OnExplorerMenuChanged(bool value)
+    {
+        if (_readingExplorerMenu || !OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        string? error = null;
+        try
+        {
+            if (!value)
+            {
+                _contextMenu.Uninstall();
+            }
+            else if (_executable != null)
+            {
+                _contextMenu.Install(_executable);
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            error = "The menu entries could not be changed: " + e.Message;
+        }
+
+        ReadExplorerMenu();
+        ExplorerMenuStatus = error ?? ExplorerMenuStatus;
+    }
+
+    /// <summary>Reads the installed state back from the registry.</summary>
+    public void ReadExplorerMenu()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        string? registered;
+        try
+        {
+            registered = _contextMenu.RegisteredExecutable();
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            registered = null;
+        }
+
+        _readingExplorerMenu = true;
+        ExplorerMenu = registered != null;
+        _readingExplorerMenu = false;
+        ExplorerMenuEditable = registered != null || _executable != null;
+        ExplorerMenuStatus = registered == null
+            ? _executable == null ? "Start DeveParTools.App.exe itself (not through dotnet) to add the entries." : null
+            : string.Equals(registered, _executable, StringComparison.OrdinalIgnoreCase)
+                ? $"The entries start {registered}."
+                : $"The entries start another copy of the app: {registered}. Turn this off and on again to use this copy.";
     }
 
     public string[] Kernels { get; }

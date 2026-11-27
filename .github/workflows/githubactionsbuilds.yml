@@ -68,14 +68,15 @@ jobs:
         done
         # Interop tests are inconclusive (skipped) where the reference tools are not available.
         dotnet test --project DeveParTools.InteropTests/DeveParTools.InteropTests.csproj -c Release --no-build --verbosity normal --ignore-exit-code 8
+    # On Windows this also checks the Explorer context menu entries against the real registry (in a scratch key).
     - name: Desktop app UI checks (headless, with screenshots)
-      if: runner.os == 'Linux' && runner.arch == 'X64'
+      if: (runner.os == 'Linux' && runner.arch == 'X64') || runner.os == 'Windows'
       run: dotnet run -c Release --no-build --project DeveParTools.App.Tests -- artifacts/ui-tests
     - name: Upload UI screenshots
-      if: runner.os == 'Linux' && runner.arch == 'X64'
+      if: (runner.os == 'Linux' && runner.arch == 'X64') || runner.os == 'Windows'
       uses: actions/upload-artifact@v7
       with:
-        name: ui-screenshots
+        name: ui-screenshots-${{ runner.os }}
         path: artifacts/ui-tests
 
   # Coverage of the libraries. Every upload goes to Codecov, which merges them: a line counts as covered when any

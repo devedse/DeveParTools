@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
+using Avalonia.Threading;
 using DeveParTools.App.ViewModels;
 using DeveParTools.App.Views;
 
@@ -25,10 +26,27 @@ public sealed class App : Application
             shell.Settings.ApplyTheme();
             var window = new MainWindow { DataContext = shell };
             desktop.MainWindow = window;
-            if (Program.OpenFile is { } file)
+            if (Program.Arguments.CreatePaths.Count > 0)
+            {
+                shell.Page = AppPage.Create;
+                foreach (var path in Program.Arguments.CreatePaths)
+                {
+                    shell.Create.Add(path);
+                }
+            }
+            else if (Program.Arguments.OpenFile is { } file)
             {
                 window.Opened += async (_, _) => await shell.Verify.OpenAsync(file);
             }
+
+            // The rest of an Explorer multi-selection arrives from the other processes it started.
+            Program.Collector?.Attach(paths => Dispatcher.UIThread.Post(() =>
+            {
+                foreach (var path in paths)
+                {
+                    shell.Create.Add(path);
+                }
+            }));
         }
 
         base.OnFrameworkInitializationCompleted();

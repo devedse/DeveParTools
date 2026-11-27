@@ -18,6 +18,17 @@
           <ComboBox Grid.Row="3" Grid.Column="1" ItemsSource="{Binding Themes}" SelectedItem="{Binding Theme}" Width="160" />
         </Grid>
       </Border>
+      <Border Classes="Card" IsVisible="{Binding ExplorerMenuSupported}">
+        <StackPanel Spacing="8">
+          <TextBlock Classes="Section" Text="Windows Explorer" />
+          <ToggleSwitch IsChecked="{Binding ExplorerMenu}" IsEnabled="{Binding ExplorerMenuEditable}"
+                        OnContent="Context menu entries on" OffContent="Context menu entries off"
+                        AutomationProperties.Name="Explorer context menu entries" />
+          <TextBlock TextWrapping="Wrap" Opacity="0.8"
+                     Text="Right-click files or folders for &quot;Create recovery set with DeveParTools&quot; (a multi-selection opens one window), and .par, .par2 or .par3 files for &quot;Verify with DeveParTools&quot;. Only for your Windows account; no administrator rights needed. Windows 11 shows them under &quot;Show more options&quot;. Turn this off before you delete the app." />
+          <TextBlock Text="{Binding ExplorerMenuStatus}" TextWrapping="Wrap" IsVisible="{Binding ExplorerMenuStatus, Converter={x:Static ObjectConverters.IsNotNull}}" />
+        </StackPanel>
+      </Border>
       <Border Classes="Card">
         <StackPanel Spacing="6">
           <TextBlock Classes="Section" Text="About" />
