@@ -13,7 +13,7 @@
 
     <!-- Input -->
     <Border Grid.Row="1" Classes="Card">
-      <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" RowSpacing="10" ColumnSpacing="10">
+      <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto" RowSpacing="10" ColumnSpacing="10">
         <TextBox Grid.Column="0" Text="{Binding ParFile}" PlaceholderText="Path to a .par2 / .par3 / .par file (or drop one here)" />
         <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
           <Button Content="Browse…" Command="{Binding BrowseCommand}" />
@@ -27,10 +27,12 @@
           <CheckBox Content="Restore links (PAR3)" IsChecked="{Binding RestoreLinks}" Margin="0,0,20,0" />
           <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,0,20,0" IsVisible="{Binding CanOfferExtend}">
             <TextBlock VerticalAlignment="Center" Text="Add" />
-            <NumericUpDown Value="{Binding ExtendPercent}" Minimum="1" Maximum="200" Increment="1" FormatString="0" Width="120" />
+            <NumericUpDown Value="{Binding ExtendPercent}" Minimum="1" Maximum="200" Increment="1" FormatString="0" Width="120" IsEnabled="{Binding ExtendUsesPercent}" />
             <TextBlock VerticalAlignment="Center" Text="% recovery data" />
             <Button Content="Add" Command="{Binding ExtendCommand}" ToolTip.Tip="Writes new recovery files next to the set; the existing ones stay as they are." />
           </StackPanel>
+          <Button Content="Remove recovery data from the archive" Command="{Binding RemoveInsideCommand}" IsVisible="{Binding CanOfferRemoveInside}" Margin="0,0,20,0"
+                  ToolTip.Tip="Takes the PAR3 data out of the archive again, so it has its original bytes." />
           <Button Content="Add extra files to search…" Command="{Binding AddExtraFilesCommand}" Margin="0,0,10,0" />
           <ItemsControl ItemsSource="{Binding ExtraFiles}">
             <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
@@ -44,6 +46,26 @@
             </ItemsControl.ItemTemplate>
           </ItemsControl>
         </WrapPanel>
+        <Expander Grid.Row="2" Grid.ColumnSpan="2" Header="More options" HorizontalAlignment="Stretch" Padding="12,8">
+          <Grid ColumnDefinitions="Auto,*,Auto,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10">
+            <TextBlock Text="Folder with the protected files" VerticalAlignment="Center" />
+            <Grid Grid.Column="1" Grid.ColumnSpan="3" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+              <TextBox Text="{Binding BaseDirectory}" PlaceholderText="the PAR file's folder"
+                       ToolTip.Tip="Where the protected files are, when they are not next to the PAR file. Used by verify, repair and adding recovery data." />
+              <Button Grid.Column="1" Content="Browse…" Command="{Binding BrowseBaseCommand}" />
+            </Grid>
+            <TextBlock Grid.Row="1" Grid.ColumnSpan="4" Classes="Section" Margin="0,6,0,0" Text="Adding recovery data" />
+            <TextBlock Grid.Row="2" Text="Recovery blocks (exact)" VerticalAlignment="Center" />
+            <NumericUpDown Grid.Row="2" Grid.Column="1" Value="{Binding ExtendCount}" Minimum="1" Maximum="1000000" PlaceholderText="from the percentage" FormatString="N0" />
+            <TextBlock Grid.Row="2" Grid.Column="2" Text="First block number" VerticalAlignment="Center" />
+            <NumericUpDown Grid.Row="2" Grid.Column="3" Value="{Binding ExtendFirst}" Minimum="0" PlaceholderText="after the existing ones" FormatString="N0" />
+            <TextBlock Grid.Row="3" Text="New recovery files" VerticalAlignment="Center" />
+            <NumericUpDown Grid.Row="3" Grid.Column="1" Value="{Binding ExtendVolumes}" Minimum="0" Maximum="100000" PlaceholderText="automatic" FormatString="N0" />
+            <TextBlock Grid.Row="3" Grid.Column="2" Text="File name" VerticalAlignment="Center" />
+            <TextBox Grid.Row="3" Grid.Column="3" Text="{Binding ExtendOutput}" PlaceholderText="the set's own name"
+                     ToolTip.Tip="Base name of the new recovery files, for example D:\backup\photos.par2 gives photos.vol40+20.par2." />
+          </Grid>
+        </Expander>
       </Grid>
     </Border>
 

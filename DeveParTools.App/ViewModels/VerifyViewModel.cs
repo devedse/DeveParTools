@@ -36,6 +36,7 @@ public sealed partial class VerifyViewModel : OperationViewModel
             if (e.PropertyName == nameof(IsBusy))
             {
                 ExtendCommand.NotifyCanExecuteChanged();
+                RemoveInsideCommand.NotifyCanExecuteChanged();
             }
         };
     }
@@ -43,6 +44,74 @@ public sealed partial class VerifyViewModel : OperationViewModel
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ExtendCommand))]
     private decimal? _extendPercent = 10;
+
+    /// <summary>Extend: exact number of new recovery blocks (<c>-c</c>); when set, it replaces <see cref="ExtendPercent"/>.</summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(ExtendCommand))]
+    [NotifyPropertyChangedFor(nameof(ExtendUsesPercent))]
+    private decimal? _extendCount;
+
+    /// <summary>The percentage applies unless an exact number of new recovery blocks is given.</summary>
+    public bool ExtendUsesPercent => ExtendCount == null;
+
+    /// <summary>Extend: number of the first new recovery block (<c>--first</c>; default: after the existing ones).</summary>
+    [ObservableProperty]
+    private decimal? _extendFirst;
+
+    /// <summary>Extend: number of new recovery files (<c>-n</c>).</summary>
+    [ObservableProperty]
+    private decimal? _extendVolumes;
+
+    /// <summary>Extend: base name of the new recovery files (<c>-o</c>; default: the set's own name).</summary>
+    [ObservableProperty]
+    private string? _extendOutput;
+
+    /// <summary>Folder the protected files are in (<c>-B</c>; default: next to the PAR file, or as stored).</summary>
+    [ObservableProperty]
+    private string? _baseDirectory;
+
+    /// <summary>
+    /// "Remove recovery data" is offered for a .zip/.7z/.rar that carries PAR3 data for itself (PAR inside) and is
+    /// intact, which <see cref="ParClient.RemoveInside"/> requires.
+    /// </summary>
+    public bool CanOfferRemoveInside => Report is { Format: ParFormat.Par3, AllFilesComplete: true }
+        && Path.GetExtension(ParFile ?? string.Empty).ToLowerInvariant() is ".zip" or ".7z" or ".rar";
+
+    private string? Base => string.IsNullOrWhiteSpace(BaseDirectory) ? null : BaseDirectory;
+
+    [RelayCommand]
+    private async Task BrowseBaseAsync()
+    {
+        if (Dialogs != null && await Dialogs.OpenFolderAsync("Folder with the protected files") is { } dir)
+        {
+            BaseDirectory = dir;
+        }
+    }
+
+    private bool CanRemoveInside() => CanOfferRemoveInside && !IsBusy;
+
+    /// <summary>Takes the recovery data out of a protected archive again, leaving its original bytes.</summary>
+    [RelayCommand(CanExecute = nameof(CanRemoveInside))]
+    private async Task RemoveInsideAsync()
+    {
+        var archive = ParFile!;
+        if (Dialogs == null || !await Dialogs.ConfirmAsync(
+                "Remove the recovery data?",
+                $"{Path.GetFileName(archive)} goes back to its original bytes and can no longer repair itself. You can add recovery data again on the Create page.",
+                "Remove"))
+        {
+            return;
+        }
+
+        var length = await RunAsync("Removing recovery data", ctx => (long?)ParClient.RemoveInside(archive, ctx));
+        if (length is long original)
+        {
+            Report = null;
+            var message = $"Removed the recovery data: {Path.GetFileName(archive)} is back to its original {Formatting.Bytes(original)}.";
+            Log.Add(new LogLine(DateTime.Now, ParLogLevel.Info, message));
+            StatusText = message;
+        }
+    }
 
     /// <summary>Extending is offered for complete PAR2 sets and for PAR3 sets whose input data is all there.</summary>
     public bool CanOfferExtend => Report is { Format: ParFormat.Par3, MissingBlocks: 0 } or { Format: ParFormat.Par2, AllFilesComplete: true };
@@ -117,7 +186,8 @@ public sealed partial class VerifyViewModel : OperationViewModel
         }
 
         ExtendCommand.NotifyCanExecuteChanged();
-        foreach (var name in new[] { nameof(CanOfferExtend), nameof(Headline), nameof(HealthIconKey), nameof(Details), nameof(FilesOk), nameof(FilesBad), nameof(MissingBlocks), nameof(RecoveryAvailable), nameof(NeedRatio), nameof(NeedText) })
+        RemoveInsideCommand.NotifyCanExecuteChanged();
+        foreach (var name in new[] { nameof(CanOfferExtend), nameof(CanOfferRemoveInside), nameof(Headline), nameof(HealthIconKey), nameof(Details), nameof(FilesOk), nameof(FilesBad), nameof(MissingBlocks), nameof(RecoveryAvailable), nameof(NeedRatio), nameof(NeedText) })
         {
             OnPropertyChanged(name);
         }
@@ -178,8 +248,9 @@ public sealed partial class VerifyViewModel : OperationViewModel
     {
         var file = ParFile!;
         var extra = ExtraFiles.ToList();
+        var baseDirectory = Base;
         Report = null;
-        var report = await RunAsync("Verifying", ctx => ParClient.Verify(file, new ParVerifyRequest { ExtraFiles = extra }, ctx));
+        var report = await RunAsync("Verifying", ctx => ParClient.Verify(file, new ParVerifyRequest { ExtraFiles = extra, BaseDirectory = baseDirectory }, ctx));
         if (report != null)
         {
             Report = report;
@@ -229,13 +300,23 @@ public sealed partial class VerifyViewModel : OperationViewModel
         }
     }
 
-    private bool CanExtend() => CanOfferExtend && !IsBusy && ExtendPercent > 0;
+    private bool CanExtend() => CanOfferExtend && !IsBusy && (ExtendCount > 0 || (ExtendCount == null && ExtendPercent > 0));
 
     /// <summary>Adds recovery blocks to the open PAR3 set, then verifies again so the counts update.</summary>
     [RelayCommand(CanExecute = nameof(CanExtend))]
     private async Task ExtendAsync()
     {
-        var request = new ParExtendRequest { ParFile = ParFile!, RedundancyPercent = (double)ExtendPercent!.Value, ExtraFiles = ExtraFiles.ToList() };
+        var request = new ParExtendRequest
+        {
+            ParFile = ParFile!,
+            ExtraFiles = ExtraFiles.ToList(),
+            BaseDirectory = Base,
+            RedundancyPercent = (double)(ExtendPercent ?? 10),
+            RecoveryBlockCount = ExtendCount is decimal count ? (int)count : null,
+            FirstRecoveryBlock = ExtendFirst is decimal first ? (long)first : null,
+            VolumeCount = ExtendVolumes is decimal volumes and > 0 ? (int)volumes : null,
+            OutputPath = string.IsNullOrWhiteSpace(ExtendOutput) ? null : ExtendOutput,
+        };
         var report = await RunAsync("Adding recovery data", ctx => ParClient.Extend(request, ctx));
         if (report == null)
         {

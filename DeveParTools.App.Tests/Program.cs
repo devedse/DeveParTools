@@ -4,6 +4,7 @@ using Avalonia.Headless;
 using Avalonia.Media.Imaging;
 using Avalonia.Styling;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using DeveParTools.App;
 using DeveParTools.App.Services;
 using DeveParTools.App.ViewModels;
@@ -142,6 +143,7 @@ Check(shell.Verify.RecoveryAvailable > recoveryBefore && shell.Verify.StatusText
 // PAR inside: protect a ZIP through the Create page, then verify the ZIP itself.
 var zipPath = Path.Combine(work, "photos.zip");
 System.IO.Compression.ZipFile.CreateFromDirectory(Path.Combine(work, "photos"), zipPath);
+var zipOriginal = File.ReadAllBytes(zipPath);
 shell.Page = AppPage.Create;
 shell.Create.ClearInputsCommand.Execute(null);
 shell.Create.Add(zipPath);
@@ -156,8 +158,61 @@ Await(shell.Verify.OpenAsync(zipPath));
 Check(shell.Verify.Report is { AllFilesComplete: true, Format: DeveParTools.ParFormat.Par3 }, "the archive verifies itself");
 Save(window, output, "verify-inside-zip");
 
+// Remove the recovery data from the archive again: it gets its original bytes back (after a confirmation).
+Check(shell.Verify.CanOfferRemoveInside, "removing the recovery data is offered for a protected archive");
+shell.Verify.Dialogs = new ConfirmingDialogs();
+Await(shell.Verify.RemoveInsideCommand.ExecuteAsync(null));
+shell.SetDialogs(window);
+Check(File.ReadAllBytes(zipPath).AsSpan().SequenceEqual(zipOriginal) && shell.Verify.Report == null, "the archive is back to its original bytes: " + shell.Verify.StatusText);
+
+// Advanced create options: exact recovery count, first block number, equal-size files.
+shell.Page = AppPage.Create;
+shell.Create.ClearInputsCommand.Execute(null);
+shell.Create.Add(Path.Combine(work, "video.mp4"));
+shell.Create.Add(Path.Combine(work, "notes.txt"));
+shell.Create.FormatIndex = 0;
+shell.Create.BlockCount = 200;
+shell.Create.RecoveryCount = 6;
+shell.Create.FirstRecoveryBlock = 10;
+shell.Create.VolumeSizingIndex = 1;
+shell.Create.VolumeCount = 2;
+shell.Create.OutputPath = Path.Combine(work, "advanced.par2");
+Check(!shell.Create.UsesRedundancy && shell.Create.Estimate.Contains("6 block(s)", StringComparison.Ordinal), "an exact recovery count replaces the redundancy: " + shell.Create.Estimate);
+Settle();
+foreach (var expander in window.GetVisualDescendants().OfType<Expander>().Where(e => e.Header as string == "Advanced options"))
+{
+    expander.IsExpanded = true;
+}
+
+Save(window, output, "create-advanced");
+shell.Create.FormatIndex = 1;
+Save(window, output, "create-advanced-par3");
+shell.Create.FormatIndex = 0;
+Await(shell.Create.CreateCommand.ExecuteAsync(null));
+var volumes = Directory.GetFiles(work, "advanced.vol*.par2").Select(Path.GetFileName).Order().ToList();
+Check(volumes.Count == 2 && volumes[0]!.StartsWith("advanced.vol10+", StringComparison.Ordinal), "6 recovery blocks from number 10 in 2 files: " + string.Join(", ", volumes));
+
+// Extend with an exact count, a file count and another file name.
+shell.Page = AppPage.Verify;
+Await(shell.Verify.OpenAsync(Path.Combine(work, "advanced.par2")));
+Check(shell.Verify.RecoveryAvailable == 6, "the advanced set has 6 recovery blocks: " + shell.Verify.RecoveryAvailable);
+shell.Verify.ExtendCount = 4;
+shell.Verify.ExtendVolumes = 1;
+shell.Verify.ExtendOutput = Path.Combine(work, "more.par2");
+Settle();
+foreach (var expander in window.GetVisualDescendants().OfType<Expander>().Where(e => e.Header as string == "More options"))
+{
+    expander.IsExpanded = true;
+}
+
+Save(window, output, "verify-options");
+Await(shell.Verify.ExtendCommand.ExecuteAsync(null));
+var more = Directory.GetFiles(work, "more.vol*.par2").Select(Path.GetFileName).ToList();
+Check(more.Count == 1 && more[0]!.StartsWith("more.vol16+", StringComparison.Ordinal), "4 more blocks from number 16 in 1 file: " + string.Join(", ", more));
+
 shell.Page = AppPage.Benchmark;
 shell.Benchmark.TimePerItem = TimeSpan.FromMilliseconds(120);
+shell.Benchmark.BufferKiB = 64;
 Await(shell.Benchmark.RunCommand.ExecuteAsync(null));
 Check(shell.Benchmark.Results.Count > 0, "benchmark produced results");
 Save(window, output, "benchmark");
@@ -230,7 +285,8 @@ static void Check(bool condition, string what)
     Console.WriteLine("  ok: " + what);
 }
 
-static void Save(Window window, string output, string name)
+// Lets layout and rendering catch up (e.g. after switching pages, before looking for a page's controls).
+static void Settle()
 {
     for (var i = 0; i < 40; i++)
     {
@@ -238,8 +294,25 @@ static void Save(Window window, string output, string name)
         Dispatcher.UIThread.RunJobs();
         Thread.Sleep(5);
     }
+}
+
+static void Save(Window window, string output, string name)
+{
+    Settle();
 
     using var frame = window.CaptureRenderedFrame() ?? throw new Exception("No rendered frame for " + name);
     frame.Save(Path.Combine(output, name + ".png"), PngBitmapEncoderOptions.Default);
     Console.WriteLine("  " + name + ".png");
+}
+
+/// <summary>Dialogs for the checks: confirms everything, picks nothing.</summary>
+internal sealed class ConfirmingDialogs : IFileDialogs
+{
+    public Task<IReadOnlyList<string>> OpenFilesAsync(string title, bool multiple, IReadOnlyList<string>? patterns = null) => Task.FromResult<IReadOnlyList<string>>([]);
+
+    public Task<string?> OpenFolderAsync(string title) => Task.FromResult<string?>(null);
+
+    public Task<string?> SaveFileAsync(string title, string suggestedName, string extension) => Task.FromResult<string?>(null);
+
+    public Task<bool> ConfirmAsync(string title, string message, string confirm) => Task.FromResult(true);
 }

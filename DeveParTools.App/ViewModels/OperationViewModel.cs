@@ -7,7 +7,7 @@ using DeveParTools.Core.Operations;
 
 namespace DeveParTools.App.ViewModels;
 
-/// <summary>File and folder pickers, provided by the window.</summary>
+/// <summary>File and folder pickers and confirmations, provided by the window.</summary>
 public interface IFileDialogs
 {
     Task<IReadOnlyList<string>> OpenFilesAsync(string title, bool multiple, IReadOnlyList<string>? patterns = null);
@@ -15,6 +15,9 @@ public interface IFileDialogs
     Task<string?> OpenFolderAsync(string title);
 
     Task<string?> SaveFileAsync(string title, string suggestedName, string extension);
+
+    /// <summary>Asks before something that cannot be undone; true when the user chose <paramref name="confirm"/>.</summary>
+    Task<bool> ConfirmAsync(string title, string message, string confirm);
 }
 
 public sealed record LogLine(DateTime Time, ParLogLevel Level, string Message)

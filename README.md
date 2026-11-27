@@ -82,9 +82,18 @@ state. Colour is never the only cue: states with similar colours also get a glyp
 
 **Create.** Drop files or folders, pick the format and the redundancy, and see an estimate of the recovery data size.
 PAR2 is the most compatible. PAR3 protects folder trees, is much faster for large sets thanks to the FFT code, and
-can store permissions.
+can store permissions. **Advanced options** has the rest of the command line's create options:
+- an exact number of recovery blocks;
+- the first block number;
+- equal-size or size-limited recovery files;
+- a base folder, and whether to include subfolders;
+- for PAR3: the maximum number of recovery blocks of an FFT set, the interleave, and the Cauchy coefficients.
 
-**Benchmark** shows the speed of every kernel on your machine. **Settings** sets threads, memory, the SIMD kernel
+**More options** on the Verify page sets the folder that holds the protected files, and the details of adding
+recovery data: an exact count, the first block number, the number of files and their name. An archive with recovery
+data inside gets a **Remove recovery data** button, which restores its original bytes.
+
+**Benchmark** shows the speed of every kernel on your machine (buffer size and time per test are adjustable). **Settings** sets threads, memory, the SIMD kernel
 (to compare kernels) and the theme.
 
 **Explorer context menu (Windows).** A switch in Settings adds two entries to the Explorer context menu:

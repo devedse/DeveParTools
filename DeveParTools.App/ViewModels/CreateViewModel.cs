@@ -65,6 +65,67 @@ public sealed partial class CreateViewModel : OperationViewModel
     [ObservableProperty]
     private string? _comment;
 
+    // ---- Advanced options (the rest of "devepar create"'s options) ----
+
+    /// <summary>Exact number of recovery blocks (<c>-c</c>); when set, it replaces <see cref="Redundancy"/>.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(UsesRedundancy))]
+    private decimal? _recoveryCount;
+
+    /// <summary>Number of the first recovery block (<c>--first</c>; the PAR2 exponent).</summary>
+    [ObservableProperty]
+    private decimal? _firstRecoveryBlock;
+
+    public string[] VolumeSizings { get; } = ["Growing (1, 2, 4, 8… blocks per file)", "Equal (same number of blocks per file)", "No file larger than the largest input file (PAR2)"];
+
+    /// <summary>0 = growing (default), 1 = equal (<c>-u</c>), 2 = limited to the largest input (<c>-l</c>).</summary>
+    [ObservableProperty]
+    private int _volumeSizingIndex;
+
+    /// <summary>Folder that stored names are relative to (<c>-B</c>); default: the folder of the inputs.</summary>
+    [ObservableProperty]
+    private string? _baseDirectory;
+
+    /// <summary>Include the contents of subfolders (off = <c>--no-recurse</c>).</summary>
+    [ObservableProperty]
+    private bool _recursive = true;
+
+    /// <summary>PAR3: store FAT/Windows times and attributes (<c>--fat-permissions</c>).</summary>
+    [ObservableProperty]
+    private bool _fatPermissions;
+
+    /// <summary>PAR3 FFT: the most recovery blocks the set may ever have, which limits later extending (<c>--max-recovery</c>).</summary>
+    [ObservableProperty]
+    private decimal? _maxRecoveryBlocks;
+
+    /// <summary>PAR3 FFT: number of extra cohorts (<c>-i</c>; empty or 0 = automatic).</summary>
+    [ObservableProperty]
+    private decimal? _interleave;
+
+    public string[] CauchyConventions { get; } = ["par3cmdline (x = I, compatible)", "PAR3 specification draft (x = I + 1)"];
+
+    /// <summary>PAR3 Cauchy: 0 = par3cmdline's coefficients (default), 1 = the specification's (<c>--spec-cauchy</c>).</summary>
+    [ObservableProperty]
+    private int _cauchyConventionIndex;
+
+    /// <summary>The redundancy slider applies unless an exact recovery block count is given.</summary>
+    public bool UsesRedundancy => RecoveryCount == null;
+
+    partial void OnRecoveryCountChanged(decimal? value) => Recalculate();
+
+    partial void OnBlockSizeChanged(decimal? value) => Recalculate();
+
+    partial void OnRecursiveChanged(bool value) => Recalculate();
+
+    [RelayCommand]
+    private async Task BrowseBaseAsync()
+    {
+        if (Dialogs != null && await Dialogs.OpenFolderAsync("Base folder (stored names are relative to it)") is { } dir)
+        {
+            BaseDirectory = dir;
+        }
+    }
+
     [ObservableProperty]
     private string? _selectedInput;
 
@@ -106,7 +167,7 @@ public sealed partial class CreateViewModel : OperationViewModel
         {
             if (Directory.Exists(i))
             {
-                foreach (var f in Directory.EnumerateFiles(i, "*", SearchOption.AllDirectories))
+                foreach (var f in Directory.EnumerateFiles(i, "*", Recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly))
                 {
                     total += new FileInfo(f).Length;
                     files++;
@@ -119,9 +180,20 @@ public sealed partial class CreateViewModel : OperationViewModel
             }
         }
 
-        Estimate = files == 0
-            ? "Add files or folders to protect."
-            : $"{files:N0} file(s), {Formatting.Bytes(total)} → about {Formatting.Bytes((long)(total * Redundancy / 100))} of recovery data ({Redundancy:0.#}%).";
+        if (files == 0)
+        {
+            Estimate = "Add files or folders to protect.";
+        }
+        else if (RecoveryCount is decimal count)
+        {
+            // An exact count: recovery data = count × block size (given, or about total / target block count).
+            long block = BlockSize is decimal bs and > 0 ? (long)bs : (long)Math.Ceiling(total / (double)Math.Max(1m, BlockCount ?? 2000));
+            Estimate = $"{files:N0} file(s), {Formatting.Bytes(total)} → about {Formatting.Bytes((long)count * block)} of recovery data ({count:N0} block(s)).";
+        }
+        else
+        {
+            Estimate = $"{files:N0} file(s), {Formatting.Bytes(total)} → about {Formatting.Bytes((long)(total * Redundancy / 100))} of recovery data ({Redundancy:0.#}%).";
+        }
     }
 
     [RelayCommand]
@@ -187,8 +259,14 @@ public sealed partial class CreateViewModel : OperationViewModel
         if (InsideArchive && CanInsertIntoArchive)
         {
             var archive = Inputs[0];
-            var percent = Redundancy;
-            var inserted = await RunAsync("Adding recovery data to the archive", ctx => ParClient.Insert(new ParInsertRequest { ArchivePath = archive, RedundancyPercent = percent }, ctx));
+            var insert = new ParInsertRequest
+            {
+                ArchivePath = archive,
+                RedundancyPercent = Redundancy,
+                RecoveryBlockCount = RecoveryCount is decimal rc ? (int)rc : null,
+                BlockSize = BlockSize is decimal ibs and > 0 ? (long)ibs : null,
+            };
+            var inserted = await RunAsync("Adding recovery data to the archive", ctx => ParClient.Insert(insert, ctx));
             if (inserted != null)
             {
                 StatusText = $"{Path.GetFileName(archive)} now carries {inserted.RecoveryBlocks:N0} recovery block(s) of {Formatting.Bytes(inserted.BlockSize)} ({Formatting.Bytes(inserted.OriginalLength)} → {Formatting.Bytes(inserted.NewLength)}). Open it on the Verify page to check or repair it.";
@@ -214,6 +292,16 @@ public sealed partial class CreateViewModel : OperationViewModel
             Par3StoreData = StoreData,
             Par3UnixPermissions = UnixPermissions,
             Par3Reproducible = Reproducible,
+            RecoveryBlockCount = RecoveryCount is decimal rc2 ? (int)rc2 : null,
+            FirstRecoveryBlock = FirstRecoveryBlock is decimal first ? (int)first : 0,
+            UniformVolumes = VolumeSizingIndex == 1,
+            LimitVolumeSize = VolumeSizingIndex == 2,
+            BaseDirectory = string.IsNullOrWhiteSpace(BaseDirectory) ? null : BaseDirectory,
+            Recursive = Recursive,
+            Par3FatPermissions = FatPermissions,
+            Par3MaxRecoveryBlocks = MaxRecoveryBlocks is decimal max and > 0 ? (int)max : null,
+            Par3Interleave = Interleave is decimal il ? (int)il : 0,
+            Par3CauchyConvention = CauchyConventionIndex == 1 ? Par3CauchyConvention.Specification : Par3CauchyConvention.Par3cmdline,
         };
         var report = await RunAsync("Creating", ctx => ParClient.Create(request, ctx));
         if (report != null)

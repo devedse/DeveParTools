@@ -8,7 +8,13 @@
       <TextBlock Classes="Title" Text="Benchmark" />
       <TextBlock Classes="Subtitle" Text="{Binding Summary}" />
     </StackPanel>
-    <Button Grid.Row="1" Classes="accent" Content="Run benchmark" Command="{Binding RunCommand}" HorizontalAlignment="Left" Padding="20,8" />
+    <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="10">
+      <Button Classes="accent" Content="Run benchmark" Command="{Binding RunCommand}" Padding="20,8" />
+      <TextBlock Text="Buffer (KiB)" VerticalAlignment="Center" Margin="14,0,0,0" />
+      <NumericUpDown Value="{Binding BufferKiB}" Minimum="4" Maximum="1048576" Increment="64" FormatString="N0" Width="140" />
+      <TextBlock Text="Time per test (ms)" VerticalAlignment="Center" Margin="14,0,0,0" />
+      <NumericUpDown Value="{Binding TimeMs}" Minimum="3" Maximum="60000" Increment="50" FormatString="N0" Width="140" />
+    </StackPanel>
     <Border Grid.Row="2" Classes="Card">
       <ItemsControl ItemsSource="{Binding Results}">
         <ItemsControl.ItemTemplate>

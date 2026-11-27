@@ -303,6 +303,7 @@ public sealed partial class BenchmarkViewModel : ObservableObject
             await Task.Run(() => ParBenchmark.Run(new ParBenchmarkOptions
             {
                 TimePerItem = TimePerItem,
+                BufferSize = (int)Math.Clamp(BufferKiB ?? 256, 4, 1 << 20) * 1024,
                 Progress = r => Dispatcher.UIThread.Post(() => AddResult(r)),
             }));
         }
@@ -312,8 +313,20 @@ public sealed partial class BenchmarkViewModel : ObservableObject
         }
     }
 
+    /// <summary>Buffer size per measurement in KiB (<c>bench --size</c>).</summary>
+    [ObservableProperty]
+    private decimal? _bufferKiB = 256;
+
+    /// <summary>Milliseconds per measurement, the first third of which warms up (<c>bench --time</c>).</summary>
+    [ObservableProperty]
+    private decimal? _timeMs = 450;
+
     /// <summary>Time per measurement; the UI tests shorten it.</summary>
-    public TimeSpan TimePerItem { get; set; } = TimeSpan.FromMilliseconds(450);
+    public TimeSpan TimePerItem
+    {
+        get => TimeSpan.FromMilliseconds((double)Math.Max(3, TimeMs ?? 450));
+        set => TimeMs = (decimal)value.TotalMilliseconds;
+    }
 
     private void AddResult(ParBenchmarkResult r)
     {

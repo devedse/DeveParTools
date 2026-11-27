@@ -85,6 +85,19 @@ public sealed partial class MainWindow : Window, IFileDialogs
         return folders.Count > 0 ? folders[0].TryGetLocalPath() : null;
     }
 
+    public async Task<bool> ConfirmAsync(string title, string message, string confirm)
+    {
+        var dialog = new FAContentDialog
+        {
+            Title = title,
+            Content = new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap, MaxWidth = 460 },
+            PrimaryButtonText = confirm,
+            CloseButtonText = "Cancel",
+            DefaultButton = FAContentDialogButton.Close,
+        };
+        return await dialog.ShowAsync(this) == FAContentDialogResult.Primary;
+    }
+
     public async Task<string?> SaveFileAsync(string title, string suggestedName, string extension)
     {
         var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = title, SuggestedFileName = suggestedName, DefaultExtension = extension });
