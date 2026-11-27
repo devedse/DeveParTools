@@ -4,6 +4,10 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
+    <!-- CI also runs these checks trimmed, like the released app (same suppressions). -->
+    <_ILLinkSuppressions Include="..\DeveParTools.App\ILLink.Suppressions.xml" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\DeveParTools.App\DeveParTools.App.csproj" />
     <PackageReference Include="Avalonia.Headless" Version="12.1.2" />
     <PackageReference Include="Avalonia.Skia" Version="12.1.2" />

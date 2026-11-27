@@ -68,10 +68,17 @@ jobs:
         done
         # Interop tests are inconclusive (skipped) where the reference tools are not available.
         dotnet test --project DeveParTools.InteropTests/DeveParTools.InteropTests.csproj -c Release --no-build --verbosity normal --ignore-exit-code 8
+    # Trimmed like the released app, so trimming that removes something the app needs fails here and not for users.
     # On Windows this also checks the Explorer context menu entries against the real registry (in a scratch key).
-    - name: Desktop app UI checks (headless, with screenshots)
+    - name: Desktop app UI checks (headless, trimmed, with screenshots)
       if: (runner.os == 'Linux' && runner.arch == 'X64') || runner.os == 'Windows'
-      run: dotnet run -c Release --no-build --project DeveParTools.App.Tests -- artifacts/ui-tests
+      shell: bash
+      run: |
+        rid=${{ runner.os == 'Windows' && 'win-x64' || 'linux-x64' }}
+        dotnet publish DeveParTools.App.Tests/DeveParTools.App.Tests.csproj -c Release -r $rid --self-contained -p:PublishTrimmed=true -p:Version=1.0.${{needs.generate_version_number.outputs.build_number}} -o artifacts/app-tests
+        exe=artifacts/app-tests/DeveParTools.App.Tests
+        if [ "${{ runner.os }}" = "Windows" ]; then exe=$exe.exe; fi
+        "$exe" artifacts/ui-tests
     - name: Upload UI screenshots
       if: (runner.os == 'Linux' && runner.arch == 'X64') || runner.os == 'Windows'
       uses: actions/upload-artifact@v7
@@ -236,7 +243,9 @@ jobs:
         name: devepar-${{ matrix.rid }}
         path: dist/*
 
-  # Desktop app: self-contained single file.
+  # Desktop app: one self-contained executable, trimmed and ReadyToRun (measured on linux-x64: window shown after
+  # ~0.33 s instead of ~1.04 s, archive 30 MB instead of 42 MB). Not compressed: decompressing the assemblies at every
+  # start costs ~0.19 s and memory, and the archive is compressed anyway. Trim suppressions: DeveParTools.App/ILLink.Suppressions.xml.
   publish_app:
     needs: [generate_version_number, test]
     strategy:
@@ -257,7 +266,7 @@ jobs:
       with:
         dotnet-version: 10.0.x
     - name: dotnet publish
-      run: dotnet publish DeveParTools.App/DeveParTools.App.csproj -c Release -r ${{ matrix.rid }} --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:Version=1.0.${{needs.generate_version_number.outputs.build_number}} -o publish/app
+      run: dotnet publish DeveParTools.App/DeveParTools.App.csproj -c Release -r ${{ matrix.rid }} --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=true -p:PublishReadyToRun=true -p:Version=1.0.${{needs.generate_version_number.outputs.build_number}} -o publish/app
     - name: Package
       shell: bash
       run: |

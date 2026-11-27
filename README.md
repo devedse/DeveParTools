@@ -52,7 +52,9 @@ Get the latest build from [Releases](https://github.com/devedse/DeveParTools/rel
 | Command line (`devepar`) | `devepar-win-x64.zip` | `devepar-linux-x64.tar.gz`, `devepar-linux-arm64.tar.gz` | `devepar-osx-arm64.tar.gz` |
 
 Each archive holds one self-contained executable, `deveparui` (`deveparui.exe` on Windows) or `devepar`; no .NET
-installation is needed.
+installation is needed. Both are trimmed (code the app never uses is left out) and ReadyToRun (compiled ahead of
+time, so they start quickly; the JIT still optimizes the hot loops for your CPU's AVX2, AVX-512, GFNI or NEON).
+The desktop app shows its window in about a third of a second.
 
 ## The desktop app
 
@@ -251,7 +253,17 @@ The hard parts are documented in the source with worked examples:
 dotnet build DeveParTools.slnx
 dotnet test --project DeveParTools.Core.Tests     # also .Par1.Tests, .Par2.Tests, .Par3.Tests, .Tests
 dotnet run --project DeveParTools.App.Tests -- out # headless UI checks + screenshots
+
+# Release builds, as CI makes them (use win-x64, linux-arm64, osx-arm64, ... for other systems)
+dotnet publish DeveParTools.App -c Release -r linux-x64 --self-contained -p:PublishSingleFile=true \
+  -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=true -p:PublishReadyToRun=true
+dotnet publish DeveParTools.Cli -c Release -r linux-x64 --self-contained -p:PublishSingleFile=true \
+  -p:PublishTrimmed=true -p:PublishReadyToRun=true
 ```
+
+**Trimming.** Trim warnings fail the build. The desktop app's few harmless ones (in packages, for code the app
+never runs) are suppressed one method at a time in `DeveParTools.App/ILLink.Suppressions.xml`, with the reason for
+each. CI runs the UI checks on a trimmed build, so anything trimming removes that the app does need shows up there.
 
 **Interop tests.** `DeveParTools.InteropTests` runs against the reference tools when these environment variables
 point to them: `DEVEPARTOOLS_PAR2CMDLINE`, `DEVEPARTOOLS_PAR2TURBO`, `DEVEPARTOOLS_PAR3CMDLINE`. Without them the

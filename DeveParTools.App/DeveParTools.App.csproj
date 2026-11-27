@@ -8,7 +8,14 @@
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Description>DeveParTools desktop app: create, verify and repair PAR1/PAR2/PAR3 sets with a live block grid.</Description>
+    <!-- The release build is trimmed (see the README): check the app's own code for trimming problems on every build. -->
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- Suppressions for harmless trim warnings in packages, one method each (see the file). -->
+    <_ILLinkSuppressions Include="ILLink.Suppressions.xml" />
+  </ItemGroup>
   <ItemGroup>
     <AvaloniaResource Include="..\Assets\icon.png" Link="Assets\icon.png" />
     <!-- For the Linux file associations (the icon file of the desktop entry). -->
