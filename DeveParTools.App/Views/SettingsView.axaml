@@ -1,0 +1,33 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:DeveParTools.App.ViewModels"
+             x:Class="DeveParTools.App.Views.SettingsView"
+             x:DataType="vm:SettingsViewModel">
+  <ScrollViewer>
+    <StackPanel Margin="24,16,24,16" Spacing="14" MaxWidth="820" HorizontalAlignment="Left">
+      <TextBlock Classes="Title" Text="Settings" />
+      <Border Classes="Card">
+        <Grid ColumnDefinitions="220,*" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="14" ColumnSpacing="14">
+          <TextBlock Text="Threads" VerticalAlignment="Center" />
+          <NumericUpDown Grid.Column="1" Value="{Binding Threads}" Minimum="1" Maximum="{Binding MaxThreads}" Width="160" HorizontalAlignment="Left" />
+          <TextBlock Grid.Row="1" Text="Memory budget (MiB)" VerticalAlignment="Center" />
+          <NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding MemoryMiB}" Minimum="64" Maximum="1048576" Increment="256" Width="160" HorizontalAlignment="Left" />
+          <TextBlock Grid.Row="2" Text="SIMD kernel" VerticalAlignment="Center" />
+          <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding Kernels}" SelectedItem="{Binding Kernel}" Width="160" />
+          <TextBlock Grid.Row="3" Text="Theme" VerticalAlignment="Center" />
+          <ComboBox Grid.Row="3" Grid.Column="1" ItemsSource="{Binding Themes}" SelectedItem="{Binding Theme}" Width="160" />
+        </Grid>
+      </Border>
+      <Border Classes="Card">
+        <StackPanel Spacing="6">
+          <TextBlock Classes="Section" Text="About" />
+          <TextBlock Text="{Binding Version, StringFormat='DeveParTools {0}'}" FontWeight="SemiBold" />
+          <TextBlock Text="{Binding CpuFeatures, StringFormat='CPU features: {0}'}" />
+          <TextBlock Text="{Binding Runtime}" TextWrapping="Wrap" />
+          <TextBlock Text="PAR1, PAR2 and PAR3 (including par3cmdline's FFT Reed-Solomon) in one place. MIT licensed." TextWrapping="Wrap" />
+          <TextBlock Text="https://github.com/devedse/DeveParTools" Foreground="{DynamicResource AccentStripBrush}" />
+        </StackPanel>
+      </Border>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

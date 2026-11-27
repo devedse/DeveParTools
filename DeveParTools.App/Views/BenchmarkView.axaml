@@ -1,0 +1,26 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:DeveParTools.App.ViewModels"
+             x:Class="DeveParTools.App.Views.BenchmarkView"
+             x:DataType="vm:BenchmarkViewModel">
+  <Grid RowDefinitions="Auto,Auto,*" Margin="24,16,24,16" RowSpacing="14">
+    <StackPanel Spacing="2">
+      <TextBlock Classes="Title" Text="Benchmark" />
+      <TextBlock Classes="Subtitle" Text="{Binding Summary}" />
+    </StackPanel>
+    <Button Grid.Row="1" Classes="accent" Content="Run benchmark" Command="{Binding RunCommand}" HorizontalAlignment="Left" Padding="20,8" />
+    <Border Grid.Row="2" Classes="Card">
+      <ItemsControl ItemsSource="{Binding Results}">
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="vm:BenchmarkResult">
+            <Grid ColumnDefinitions="320,*,110" Margin="0,6" ColumnSpacing="12">
+              <TextBlock Text="{Binding Name}" VerticalAlignment="Center" />
+              <ProgressBar Grid.Column="1" Minimum="0" Maximum="1" Value="{Binding Fraction}" Height="14" />
+              <TextBlock Grid.Column="2" Text="{Binding Text}" HorizontalAlignment="Right" FontWeight="SemiBold" />
+            </Grid>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+    </Border>
+  </Grid>
+</UserControl>

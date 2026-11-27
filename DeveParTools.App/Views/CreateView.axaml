@@ -1,0 +1,116 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:DeveParTools.App.ViewModels"
+             xmlns:c="using:DeveParTools.App.Controls"
+             x:Class="DeveParTools.App.Views.CreateView"
+             x:DataType="vm:CreateViewModel">
+  <Grid RowDefinitions="Auto,*,Auto" Margin="24,16,24,16" RowSpacing="14">
+    <StackPanel Grid.Row="0" Spacing="2">
+      <TextBlock Classes="Title" Text="Create a recovery set" />
+      <TextBlock Classes="Subtitle" Text="Choose what to protect and how much recovery data to make. Drop files or folders anywhere on this page." />
+    </StackPanel>
+
+    <Grid Grid.Row="1" ColumnDefinitions="*,*" ColumnSpacing="12">
+      <!-- Inputs and output -->
+      <Grid Grid.Column="0" RowDefinitions="*,Auto,Auto" RowSpacing="12">
+        <Border Classes="Card">
+          <Grid RowDefinitions="Auto,*" RowSpacing="8">
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBlock Classes="Section" Margin="0" Text="Files and folders" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                <Button Content="Add files…" Command="{Binding AddFilesCommand}" />
+                <Button Content="Add folder…" Command="{Binding AddFolderCommand}" />
+                <Button Content="Clear" Command="{Binding ClearInputsCommand}" />
+              </StackPanel>
+            </Grid>
+            <ListBox Grid.Row="1" ItemsSource="{Binding Inputs}" SelectedItem="{Binding SelectedInput}" Background="Transparent">
+              <ListBox.ItemTemplate>
+                <DataTemplate x:DataType="x:String">
+                  <Grid ColumnDefinitions="*,Auto">
+                    <TextBlock Text="{Binding}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                    <Button Grid.Column="1" Content="Remove" Padding="8,2"
+                            Command="{Binding $parent[UserControl].((vm:CreateViewModel)DataContext).RemoveInputCommand}" CommandParameter="{Binding}" />
+                  </Grid>
+                </DataTemplate>
+              </ListBox.ItemTemplate>
+            </ListBox>
+          </Grid>
+        </Border>
+        <Border Grid.Row="1" Classes="Card">
+          <StackPanel Spacing="8">
+            <TextBlock Classes="Section" Margin="0" Text="Output" />
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+              <TextBox Text="{Binding OutputPath}" PlaceholderText="recovery.par2" />
+              <Button Grid.Column="1" Content="Browse…" Command="{Binding BrowseOutputCommand}" />
+            </Grid>
+            <TextBlock Text="{Binding Estimate}" TextWrapping="Wrap" Opacity="0.8" />
+          </StackPanel>
+        </Border>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
+          <Button Classes="accent" Content="Create recovery set" Command="{Binding CreateCommand}" Padding="20,8" />
+          <Button Content="Cancel" Command="{Binding CancelCommand}" />
+          <StackPanel VerticalAlignment="Center" Spacing="4" Margin="12,0,0,0" Width="300">
+            <TextBlock Classes="Caption" Text="{Binding Stage}" />
+            <ProgressBar Minimum="0" Maximum="100" Value="{Binding Progress}" Height="8" />
+          </StackPanel>
+        </StackPanel>
+      </Grid>
+
+      <!-- Options and live grid -->
+      <Grid Grid.Column="1" RowDefinitions="Auto,*" RowSpacing="12">
+        <Border Classes="Card">
+          <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10">
+            <TextBlock Text="Format" VerticalAlignment="Center" />
+            <ComboBox Grid.Column="1" ItemsSource="{Binding Formats}" SelectedIndex="{Binding FormatIndex}" HorizontalAlignment="Stretch" />
+            <TextBlock Grid.Row="1" Text="Redundancy" VerticalAlignment="Center" />
+            <Grid Grid.Row="1" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="10">
+              <Slider Minimum="1" Maximum="100" Value="{Binding Redundancy}" TickFrequency="1" IsSnapToTickEnabled="True" />
+              <TextBlock Grid.Column="1" VerticalAlignment="Center" Text="{Binding Redundancy, StringFormat='{}{0:0}%'}" Width="44" />
+            </Grid>
+            <TextBlock Grid.Row="2" Text="Blocks (target)" VerticalAlignment="Center" />
+            <NumericUpDown Grid.Row="2" Grid.Column="1" Value="{Binding BlockCount}" Minimum="1" Maximum="1000000" FormatString="N0" />
+            <TextBlock Grid.Row="3" Text="Block size (bytes)" VerticalAlignment="Center" />
+            <NumericUpDown Grid.Row="3" Grid.Column="1" Value="{Binding BlockSize}" Minimum="0" PlaceholderText="automatic" FormatString="N0" />
+            <TextBlock Grid.Row="4" Text="Recovery files" VerticalAlignment="Center" />
+            <NumericUpDown Grid.Row="4" Grid.Column="1" Value="{Binding VolumeCount}" Minimum="0" PlaceholderText="automatic (1, 2, 4, 8…)" FormatString="N0" />
+            <TextBlock Grid.Row="5" Text="Comment" VerticalAlignment="Center" />
+            <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding Comment}" />
+            <StackPanel Grid.Row="6" Grid.ColumnSpan="2" Spacing="8" IsVisible="{Binding IsPar3}">
+              <TextBlock Classes="Section" Margin="0,6,0,0" Text="PAR3 options" />
+              <Grid ColumnDefinitions="Auto,*" ColumnSpacing="14">
+                <TextBlock Text="Code" VerticalAlignment="Center" />
+                <ComboBox Grid.Column="1" ItemsSource="{Binding Codes}" SelectedIndex="{Binding CodeIndex}" HorizontalAlignment="Stretch" />
+              </Grid>
+              <WrapPanel>
+                <CheckBox Content="Deduplicate identical blocks" IsChecked="{Binding Dedup}" Margin="0,0,16,0" />
+                <CheckBox Content="Pack file tails" IsChecked="{Binding PackTails}" Margin="0,0,16,0" />
+                <CheckBox Content="Store data (archive)" IsChecked="{Binding StoreData}" Margin="0,0,16,0" />
+                <CheckBox Content="Store permissions" IsChecked="{Binding UnixPermissions}" Margin="0,0,16,0" />
+                <CheckBox Content="Reproducible output" IsChecked="{Binding Reproducible}" />
+              </WrapPanel>
+            </StackPanel>
+          </Grid>
+        </Border>
+        <Border Grid.Row="1" Classes="Card" Padding="12">
+          <Grid RowDefinitions="Auto,*,Auto" RowSpacing="8">
+            <TextBlock Classes="Section" Margin="0" Text="Blocks processed" />
+            <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled">
+              <c:BlockGrid Map="{Binding Map}" Version="{Binding MapVersion}" CellSize="{Binding CellSize}" />
+            </ScrollViewer>
+            <TextBlock Grid.Row="2" Text="{Binding StatusText}" TextWrapping="Wrap" />
+          </Grid>
+        </Border>
+      </Grid>
+    </Grid>
+
+    <Expander Grid.Row="2" Header="Log" HorizontalAlignment="Stretch">
+      <ListBox ItemsSource="{Binding Log}" Height="150">
+        <ListBox.ItemTemplate>
+          <DataTemplate x:DataType="vm:LogLine">
+            <TextBlock Text="{Binding Text}" FontFamily="Cascadia Mono,Consolas,Menlo,monospace" FontSize="12" />
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+      </ListBox>
+    </Expander>
+  </Grid>
+</UserControl>

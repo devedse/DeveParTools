@@ -1,0 +1,147 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:DeveParTools.App.ViewModels"
+             xmlns:c="using:DeveParTools.App.Controls"
+             x:Class="DeveParTools.App.Views.VerifyView"
+             x:DataType="vm:VerifyViewModel">
+  <Grid RowDefinitions="Auto,Auto,Auto,*,Auto" Margin="24,16,24,16" RowSpacing="14">
+    <!-- Header -->
+    <StackPanel Grid.Row="0" Spacing="2">
+      <TextBlock Classes="Title" Text="Verify &amp; repair" />
+      <TextBlock Classes="Subtitle" Text="Open a .par, .par2 or .par3 file: every file and every block is checked, wherever it is." />
+    </StackPanel>
+
+    <!-- Input -->
+    <Border Grid.Row="1" Classes="Card">
+      <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" RowSpacing="10" ColumnSpacing="10">
+        <TextBox Grid.Column="0" Text="{Binding ParFile}" PlaceholderText="Path to a .par2 / .par3 / .par file (or drop one here)" />
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+          <Button Content="Browse…" Command="{Binding BrowseCommand}" />
+          <Button Content="Verify" Command="{Binding VerifyCommand}" />
+          <Button Classes="accent" Content="Repair" Command="{Binding RepairCommand}" />
+          <Button Content="Cancel" Command="{Binding CancelCommand}" />
+        </StackPanel>
+        <WrapPanel Grid.Row="1" Grid.ColumnSpan="2" Orientation="Horizontal">
+          <CheckBox Content="Delete damaged originals (no backups)" IsChecked="{Binding PurgeBackups}" Margin="0,0,20,0" />
+          <CheckBox Content="Restore permissions (PAR3)" IsChecked="{Binding RestorePermissions}" Margin="0,0,20,0" />
+          <CheckBox Content="Restore links (PAR3)" IsChecked="{Binding RestoreLinks}" Margin="0,0,20,0" />
+          <Button Content="Add extra files to search…" Command="{Binding AddExtraFilesCommand}" Margin="0,0,10,0" />
+          <ItemsControl ItemsSource="{Binding ExtraFiles}">
+            <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="x:String">
+                <Button Margin="0,0,6,0" Padding="8,2" Command="{Binding $parent[UserControl].((vm:VerifyViewModel)DataContext).RemoveExtraFileCommand}" CommandParameter="{Binding}"
+                        ToolTip.Tip="Remove">
+                  <TextBlock Text="{Binding}" MaxWidth="260" TextTrimming="CharacterEllipsis" />
+                </Button>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </WrapPanel>
+      </Grid>
+    </Border>
+
+    <!-- Summary cards -->
+    <Grid Grid.Row="2" ColumnDefinitions="2*,*,2*,2*" ColumnSpacing="12">
+      <Border Grid.Column="0" Classes="Card">
+        <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12">
+          <PathIcon Width="32" Height="32" Data="{Binding HealthIconKey, Converter={x:Static c:ResourceGeometryConverter.Instance}}" Foreground="{DynamicResource AccentStripBrush}" />
+          <StackPanel Grid.Column="1" Spacing="2">
+            <TextBlock FontWeight="SemiBold" FontSize="16" Text="{Binding Headline}" TextWrapping="Wrap" />
+            <TextBlock Classes="Caption" Text="{Binding Details}" TextWrapping="Wrap" />
+          </StackPanel>
+        </Grid>
+      </Border>
+      <Border Grid.Column="1" Classes="Card">
+        <StackPanel>
+          <TextBlock Classes="Caption" Text="Files OK / damaged" />
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <TextBlock Classes="Number" Text="{Binding FilesOk}" />
+            <TextBlock Classes="Number" Text="/" Opacity="0.5" />
+            <TextBlock Classes="Number" Text="{Binding FilesBad}" Foreground="{DynamicResource BlockMissingBrush}" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+      <Border Grid.Column="2" Classes="Card">
+        <StackPanel Spacing="6">
+          <TextBlock Classes="Caption" Text="Missing blocks vs recovery blocks" />
+          <ProgressBar Minimum="0" Maximum="100" Height="10" Value="{Binding NeedRatio, Converter={x:Static c:PercentConverter.Instance}}" />
+          <TextBlock Text="{Binding NeedText}" />
+        </StackPanel>
+      </Border>
+      <Border Grid.Column="3" Classes="Card">
+        <StackPanel Spacing="6">
+          <TextBlock Classes="Caption" Text="{Binding Stage}" />
+          <ProgressBar Minimum="0" Maximum="100" Height="10" Value="{Binding Progress}" IsIndeterminate="False" />
+          <TextBlock Text="{Binding StatusText}" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxLines="2" />
+        </StackPanel>
+      </Border>
+    </Grid>
+
+    <!-- Files + block grid -->
+    <Grid Grid.Row="3" ColumnDefinitions="330,*" ColumnSpacing="12">
+      <Border Grid.Column="0" Classes="Card" Padding="8">
+        <Grid RowDefinitions="Auto,*">
+          <TextBlock Classes="Section" Margin="8,4,8,8" Text="Files" />
+          <ListBox Grid.Row="1" ItemsSource="{Binding Files}" SelectedItem="{Binding SelectedFile}" Background="Transparent">
+            <ListBox.ItemTemplate>
+              <DataTemplate x:DataType="vm:FileRowViewModel">
+                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+                  <Ellipse Width="10" Height="10" Fill="{Binding StatusBrushKey, Converter={x:Static c:ResourceBrushConverter.Instance}}" VerticalAlignment="Center" />
+                  <StackPanel Grid.Column="1">
+                    <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Classes="Caption" Text="{Binding Size}" />
+                    <TextBlock Classes="Caption" Text="{Binding StatusText}" />
+                  </StackPanel>
+                </Grid>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+        </Grid>
+      </Border>
+      <Border Grid.Column="1" Classes="Card" Padding="12">
+        <Grid RowDefinitions="Auto,Auto,*,Auto" RowSpacing="8">
+          <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+            <TextBlock Classes="Section" Margin="0" Text="Blocks" VerticalAlignment="Center" />
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+              <TextBlock Classes="Caption" Text="Zoom" VerticalAlignment="Center" />
+              <Slider Width="140" Minimum="3" Maximum="28" Value="{Binding CellSize}" />
+            </StackPanel>
+          </Grid>
+          <!-- Legend: click a state to hide/show it. -->
+          <ItemsControl Grid.Row="1" ItemsSource="{Binding Legend}">
+            <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:LegendItem">
+                <ToggleButton Classes="Legend" IsChecked="{Binding IsVisible}" Margin="0,0,6,6" Padding="10,3" IsVisible="{Binding HasCount}"
+                              ToolTip.Tip="Click to hide or show these blocks">
+                  <StackPanel Orientation="Horizontal" Spacing="6">
+                    <Border Width="12" Height="12" CornerRadius="2" Background="{Binding BrushKey, Converter={x:Static c:ResourceBrushConverter.Instance}}" />
+                    <TextBlock Text="{Binding Name}" />
+                    <TextBlock Text="{Binding Count, StringFormat='{}{0:N0}'}" Opacity="0.7" />
+                  </StackPanel>
+                </ToggleButton>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+          <ScrollViewer Grid.Row="2" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+            <c:BlockGrid x:Name="Grid" Map="{Binding Map}" Version="{Binding MapVersion}" CellSize="{Binding CellSize}"
+                         Highlight="{Binding Highlight}" HiddenStates="{Binding HiddenStates}" SelectedBlock="{Binding SelectedBlock}" />
+          </ScrollViewer>
+          <TextBlock Grid.Row="3" Classes="Caption" Text="{Binding SelectedBlockInfo}" TextWrapping="Wrap" />
+        </Grid>
+      </Border>
+    </Grid>
+
+    <!-- Log -->
+    <Expander Grid.Row="4" Header="Log" HorizontalAlignment="Stretch">
+      <ListBox ItemsSource="{Binding Log}" Height="150">
+        <ListBox.ItemTemplate>
+          <DataTemplate x:DataType="vm:LogLine">
+            <TextBlock Text="{Binding Text}" FontFamily="Cascadia Mono,Consolas,Menlo,monospace" FontSize="12" />
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+      </ListBox>
+    </Expander>
+  </Grid>
+</UserControl>

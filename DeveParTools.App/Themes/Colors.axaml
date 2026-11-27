@@ -1,0 +1,38 @@
+<!-- Block-state colours. One meaning each, everywhere: green = intact, teal/blue = intact but elsewhere, orange/red = bad,
+     amber = recoverable, violet = being rebuilt, bright green = repaired. Paired with glyphs so colour is never the only cue. -->
+<ResourceDictionary xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <ResourceDictionary.ThemeDictionaries>
+    <ResourceDictionary x:Key="Light">
+      <SolidColorBrush x:Key="BlockUnknownBrush" Color="#E3E6EA" />
+      <SolidColorBrush x:Key="BlockScanningBrush" Color="#C9D3DE" />
+      <SolidColorBrush x:Key="BlockFoundBrush" Color="#2E9E6B" />
+      <SolidColorBrush x:Key="BlockMovedBrush" Color="#1D9AAA" />
+      <SolidColorBrush x:Key="BlockElsewhereBrush" Color="#3A7BD5" />
+      <SolidColorBrush x:Key="BlockDamagedBrush" Color="#E8743B" />
+      <SolidColorBrush x:Key="BlockMissingBrush" Color="#D64545" />
+      <SolidColorBrush x:Key="BlockRecoverableBrush" Color="#E6A817" />
+      <SolidColorBrush x:Key="BlockRepairingBrush" Color="#8A63D2" />
+      <SolidColorBrush x:Key="BlockRepairedBrush" Color="#45C97A" />
+      <SolidColorBrush x:Key="BlockUnrecoverableBrush" Color="#7A1F1F" />
+      <SolidColorBrush x:Key="BlockGlyphBrush" Color="#CCFFFFFF" />
+      <SolidColorBrush x:Key="BlockSelectionBrush" Color="#101C30" />
+      <SolidColorBrush x:Key="AccentStripBrush" Color="#087F8C" />
+    </ResourceDictionary>
+    <ResourceDictionary x:Key="Dark">
+      <SolidColorBrush x:Key="BlockUnknownBrush" Color="#2E3440" />
+      <SolidColorBrush x:Key="BlockScanningBrush" Color="#4C566A" />
+      <SolidColorBrush x:Key="BlockFoundBrush" Color="#2BA36F" />
+      <SolidColorBrush x:Key="BlockMovedBrush" Color="#25B3C4" />
+      <SolidColorBrush x:Key="BlockElsewhereBrush" Color="#5B95E8" />
+      <SolidColorBrush x:Key="BlockDamagedBrush" Color="#F08A4B" />
+      <SolidColorBrush x:Key="BlockMissingBrush" Color="#E5534B" />
+      <SolidColorBrush x:Key="BlockRecoverableBrush" Color="#F2B63D" />
+      <SolidColorBrush x:Key="BlockRepairingBrush" Color="#A584E8" />
+      <SolidColorBrush x:Key="BlockRepairedBrush" Color="#57D98B" />
+      <SolidColorBrush x:Key="BlockUnrecoverableBrush" Color="#A33A3A" />
+      <SolidColorBrush x:Key="BlockGlyphBrush" Color="#D9101C30" />
+      <SolidColorBrush x:Key="BlockSelectionBrush" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="AccentStripBrush" Color="#4FC3CF" />
+    </ResourceDictionary>
+  </ResourceDictionary.ThemeDictionaries>
+</ResourceDictionary>

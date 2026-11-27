@@ -7,6 +7,7 @@
     <Project Path="DeveParTools/DeveParTools.csproj" />
   </Folder>
   <Folder Name="/Apps/">
+    <Project Path="DeveParTools.App/DeveParTools.App.csproj" />
     <Project Path="DeveParTools.Cli/DeveParTools.Cli.csproj" />
   </Folder>
   <Folder Name="/Tests/">
@@ -16,5 +17,6 @@
     <Project Path="DeveParTools.Par3.Tests/DeveParTools.Par3.Tests.csproj" />
     <Project Path="DeveParTools.Tests/DeveParTools.Tests.csproj" />
     <Project Path="DeveParTools.InteropTests/DeveParTools.InteropTests.csproj" />
+    <Project Path="DeveParTools.App.Tests/DeveParTools.App.Tests.csproj" />
   </Folder>
 </Solution>
