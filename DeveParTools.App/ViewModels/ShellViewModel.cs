@@ -150,7 +150,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         _readingExplorerMenu = false;
         ExplorerMenuEditable = registered != null || _executable != null;
         ExplorerMenuStatus = registered == null
-            ? _executable == null ? "Start DeveParTools.App.exe itself (not through dotnet) to add the entries." : null
+            ? _executable == null ? "Start deveparui.exe itself (not through dotnet) to add the entries." : null
             : string.Equals(registered, _executable, StringComparison.OrdinalIgnoreCase)
                 ? $"The entries start {registered}."
                 : $"The entries start another copy of the app: {registered}. Turn this off and on again to use this copy.";

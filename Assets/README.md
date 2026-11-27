@@ -8,7 +8,7 @@ silver on a dark navy background.
 |---|---|
 | `logo.png` | Full-size artwork (1254 × 1254), used in the README. |
 | `icon.png` | 256 × 256, the desktop app's window icon. |
-| `icon.ico` | 16, 24, 32, 48, 64, 128 and 256 px frames, the Windows icon of `DeveParTools.App.exe` and `devepar.exe`. |
+| `icon.ico` | 16, 24, 32, 48, 64, 128 and 256 px frames, the Windows icon of `deveparui.exe` and `devepar.exe`. |
 
 The artwork is original. It was made with OpenAI Codex's built-in image generation, with the QueueCache icon
 given as the style reference, then made into the final files like this:

@@ -11,9 +11,9 @@ namespace DeveParTools.App.Services;
 /// <para>Explorer runs the context menu command once per selected item, so selecting a.jpg, b.jpg and c.jpg starts
 /// three processes at almost the same time:</para>
 /// <code>
-/// DeveParTools.App --create a.jpg   → gets the mutex: shows the window and collects    (collector)
-/// DeveParTools.App --create b.jpg   → mutex taken: sends "b.jpg" over the pipe, exits
-/// DeveParTools.App --create c.jpg   → mutex taken: sends "c.jpg" over the pipe, exits
+/// deveparui --create a.jpg          → gets the mutex: shows the window and collects    (collector)
+/// deveparui --create b.jpg          → mutex taken: sends "b.jpg" over the pipe, exits
+/// deveparui --create c.jpg          → mutex taken: sends "c.jpg" over the pipe, exits
 ///                                      … no new path for IdleTimeout: the collector stops listening
 /// </code>
 /// <para>The collector is whichever process first owns a named mutex. It listens on a named pipe until no request

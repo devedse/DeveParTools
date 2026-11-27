@@ -3,9 +3,9 @@ namespace DeveParTools.App.Services;
 /// <summary>
 /// The desktop app's command line:
 /// <list type="bullet">
-/// <item><c>DeveParTools.App "set.par2"</c>: open the Verify page with that set (also used by "Verify with
+/// <item><c>deveparui "set.par2"</c>: open the Verify page with that set (also used by "Verify with
 /// DeveParTools" in the Explorer context menu and by file associations);</item>
-/// <item><c>DeveParTools.App --create "file" "folder" ...</c>: open the Create page with these inputs (used by
+/// <item><c>deveparui --create "file" "folder" ...</c>: open the Create page with these inputs (used by
 /// "Create recovery set with DeveParTools").</item>
 /// </list>
 /// </summary>

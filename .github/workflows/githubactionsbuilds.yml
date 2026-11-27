@@ -265,9 +265,9 @@ jobs:
         cp LICENSE THIRD_PARTY_NOTICES.md publish/app/
         rm -f publish/app/*.pdb
         if [ "${{ runner.os }}" = "Windows" ]; then
-          (cd publish/app && 7z a -tzip "../../dist/DeveParTools-${{ matrix.rid }}.zip" .)
+          (cd publish/app && 7z a -tzip "../../dist/deveparui-${{ matrix.rid }}.zip" .)
         else
-          tar -C publish/app -czf "dist/DeveParTools-${{ matrix.rid }}.tar.gz" .
+          tar -C publish/app -czf "dist/deveparui-${{ matrix.rid }}.tar.gz" .
         fi
     - uses: actions/upload-artifact@v7
       with:

@@ -9,8 +9,8 @@ namespace DeveParTools.App.Services;
 /// HKEY_CURRENT_USER\Software\Classes, so no administrator rights are needed:
 /// <list type="bullet">
 /// <item>files and folders: "Create recovery set with DeveParTools", which runs
-/// <c>"…\DeveParTools.App.exe" --create "%1"</c>;</item>
-/// <item>.par, .par2 and .par3 files: "Verify with DeveParTools", which runs <c>"…\DeveParTools.App.exe" "%1"</c>.</item>
+/// <c>"…\deveparui.exe" --create "%1"</c>;</item>
+/// <item>.par, .par2 and .par3 files: "Verify with DeveParTools", which runs <c>"…\deveparui.exe" "%1"</c>.</item>
 /// </list>
 /// </summary>
 /// <remarks>
@@ -18,14 +18,14 @@ namespace DeveParTools.App.Services;
 /// command line. The registry after <see cref="Install"/> (with the app at C:\Tools):</para>
 /// <code>
 /// HKCU\Software\Classes\*\shell\DeveParTools.Create            MUIVerb = Create recovery set with DeveParTools
-///                                                               Icon = C:\Tools\DeveParTools.App.exe
+///                                                               Icon = C:\Tools\deveparui.exe
 ///                                                               MultiSelectModel = Player
-/// HKCU\Software\Classes\*\shell\DeveParTools.Create\command    (Default) = "C:\Tools\DeveParTools.App.exe" --create "%1"
+/// HKCU\Software\Classes\*\shell\DeveParTools.Create\command    (Default) = "C:\Tools\deveparui.exe" --create "%1"
 /// HKCU\Software\Classes\Directory\shell\DeveParTools.Create    (the same, for folders)
 /// HKCU\Software\Classes\SystemFileAssociations\.par2\shell\DeveParTools.Verify
 ///                                                               MUIVerb = Verify with DeveParTools
 /// HKCU\Software\Classes\SystemFileAssociations\.par2\shell\DeveParTools.Verify\command
-///                                                               (Default) = "C:\Tools\DeveParTools.App.exe" "%1"
+///                                                               (Default) = "C:\Tools\deveparui.exe" "%1"
 /// (and the same for .par and .par3)
 /// </code>
 /// <para>Explorer runs a static verb's command once per selected item: selecting 20 files starts 20 processes.
@@ -84,7 +84,7 @@ public sealed partial class ExplorerContextMenu
 
     /// <summary>
     /// The program the installed entries start, or null when they are not installed. Read from the files-and-folders
-    /// "Create" entry: <c>"C:\Tools\DeveParTools.App.exe" --create "%1"</c> gives <c>C:\Tools\DeveParTools.App.exe</c>.
+    /// "Create" entry: <c>"C:\Tools\deveparui.exe" --create "%1"</c> gives <c>C:\Tools\deveparui.exe</c>.
     /// </summary>
     [SupportedOSPlatform("windows")]
     public string? RegisteredExecutable()

@@ -48,10 +48,11 @@ Get the latest build from [Releases](https://github.com/devedse/DeveParTools/rel
 
 | | Windows | Linux | macOS |
 |---|---|---|---|
-| Desktop app | `DeveParTools-win-x64.zip` | `DeveParTools-linux-x64.tar.gz` | `DeveParTools-osx-arm64.tar.gz` |
+| Desktop app (`deveparui`) | `deveparui-win-x64.zip` | `deveparui-linux-x64.tar.gz` | `deveparui-osx-arm64.tar.gz` |
 | Command line (`devepar`) | `devepar-win-x64.zip` | `devepar-linux-x64.tar.gz`, `devepar-linux-arm64.tar.gz` | `devepar-osx-arm64.tar.gz` |
 
-Both are single self-contained executables; no .NET installation is needed.
+Each archive holds one self-contained executable, `deveparui` (`deveparui.exe` on Windows) or `devepar`; no .NET
+installation is needed.
 
 ## The desktop app
 
@@ -199,7 +200,7 @@ Pass an `OperationContext` to get progress, log lines, cancellation, a thread co
 | `DeveParTools.Par1` / `.Par2` / `.Par3` | Each format: packets, create, verify, repair |
 | `DeveParTools` | `ParClient`: one API for all formats (detection, create, verify, repair) and `ParBenchmark` |
 | `DeveParTools.Cli` | `devepar` |
-| `DeveParTools.App` | The Avalonia desktop app |
+| `DeveParTools.App` | The Avalonia desktop app (`deveparui`) |
 
 The hard parts are documented in the source with worked examples:
 - Gauss-Jordan inversion over GF(2^8): `GfMatrix`.

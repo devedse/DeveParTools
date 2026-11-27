@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <AssemblyName>DeveParTools.App</AssemblyName>
+    <AssemblyName>deveparui</AssemblyName>
     <RootNamespace>DeveParTools.App</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>..\Assets\icon.ico</ApplicationIcon>

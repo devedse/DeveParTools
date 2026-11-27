@@ -34,7 +34,7 @@ Check(parsed.OpenFile == null && parsed.CreatePaths.SequenceEqual([Path.Combine(
 Check(AppArguments.Parse(["-x", Path.Combine(work, "notes.txt")]) is { CreatePaths.Count: 0, OpenFile: not null }, "a plain file argument is opened for verification");
 
 // Explorer entries: the quoting of the command lines, and reading the program back from one.
-const string ProgramFilesExe = @"C:\Program Files\DeveParTools\DeveParTools.App.exe";
+const string ProgramFilesExe = @"C:\Program Files\DeveParTools\deveparui.exe";
 var entries = ExplorerContextMenu.Entries(ProgramFilesExe);
 Check(entries.Count(e => e.Text == ExplorerContextMenu.CreateText && e.MultiSelect) == 2 && entries.Count(e => e.KeyPath.EndsWith(@"\shell\" + ExplorerContextMenu.VerifyVerb, StringComparison.Ordinal)) == 3, "create entries for files and folders, verify entries for .par/.par2/.par3");
 Check(entries[0].Command == $"\"{ProgramFilesExe}\" --create \"%1\"" && entries[2].Command == $"\"{ProgramFilesExe}\" \"%1\"", "menu command lines quote the program and the item: " + entries[0].Command);
@@ -247,7 +247,7 @@ if (OperatingSystem.IsWindows())
 {
     // The Settings switch writes the entries into a scratch key that stands in for HKCU\Software\Classes.
     var root = $@"Software\DeveParTools.Tests\{Guid.NewGuid():N}";
-    const string Exe = @"C:\Tools\DeveParTools.App.exe";
+    const string Exe = @"C:\Tools\deveparui.exe";
     var menu = new ExplorerContextMenu(root);
     var settings = new SettingsViewModel(Path.Combine(work, "settings.txt"), menu, Exe);
     Check(settings is { ExplorerMenuSupported: true, ExplorerMenu: false, ExplorerMenuEditable: true }, "the Explorer option is offered and off");
@@ -259,7 +259,7 @@ if (OperatingSystem.IsWindows())
     }
 
     Check(menu.RegisteredExecutable() == Exe && settings.ExplorerMenuStatus?.Contains(Exe, StringComparison.Ordinal) == true, "the switch shows which program the entries start");
-    Check(new SettingsViewModel(Path.Combine(work, "settings.txt"), menu, @"D:\Other\DeveParTools.App.exe").ExplorerMenuStatus?.Contains("another copy", StringComparison.Ordinal) == true, "another copy of the app sees that the entries are not its own");
+    Check(new SettingsViewModel(Path.Combine(work, "settings.txt"), menu, @"D:\Other\deveparui.exe").ExplorerMenuStatus?.Contains("another copy", StringComparison.Ordinal) == true, "another copy of the app sees that the entries are not its own");
     Microsoft.Win32.Registry.CurrentUser.CreateSubKey($@"{root}\SystemFileAssociations\.par3\shell\SomeoneElse").Dispose();
 
     settings.ExplorerMenu = false;
