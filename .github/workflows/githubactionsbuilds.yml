@@ -154,7 +154,7 @@ jobs:
         if [ "${{ matrix.interop }}" = "true" ]; then projects="$projects DeveParTools.InteropTests"; fi
         for p in $projects; do
           (cd $p/bin/Release/net10.0 && dotnet-coverage collect --settings "$GITHUB_WORKSPACE/coverage.runsettings.xml" -f cobertura \
-            -o "$GITHUB_WORKSPACE/TestResults/$p.cobertura.xml" "dotnet exec $p.dll --ignore-exit-code 8")
+            -o "$GITHUB_WORKSPACE/TestResults/coverage.$p.cobertura.xml" "dotnet exec $p.dll --ignore-exit-code 8")
         done
     - name: Core tests with coverage on an emulated CPU (${{ matrix.sde }})
       if: matrix.sde
@@ -169,10 +169,14 @@ jobs:
         "$SDE_PATH/sde64" -${{ matrix.sde }} -- dotnet DeveParTools.Cli/bin/Release/net10.0/devepar.dll info || true
         cd DeveParTools.Core.Tests/bin/Release/net10.0
         dotnet-coverage collect --settings "$GITHUB_WORKSPACE/coverage.runsettings.xml" -f cobertura \
-          -o "$GITHUB_WORKSPACE/TestResults/core-${{ matrix.sde }}.cobertura.xml" "$SDE_PATH/sde64 -${{ matrix.sde }} -- dotnet exec DeveParTools.Core.Tests.dll"
+          -o "$GITHUB_WORKSPACE/TestResults/coverage.core-${{ matrix.sde }}.cobertura.xml" "$SDE_PATH/sde64 -${{ matrix.sde }} -- dotnet exec DeveParTools.Core.Tests.dll"
+    - name: List coverage reports
+      shell: bash
+      run: ls -la TestResults
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v7
       with:
+        # The uploader searches this directory for names containing "coverage" (hence the "coverage." prefix).
         directory: ./TestResults
         flags: ${{ matrix.name }}
         fail_ci_if_error: false
