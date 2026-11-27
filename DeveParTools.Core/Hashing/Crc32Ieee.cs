@@ -28,16 +28,13 @@ public static class Crc32Ieee
         return t;
     }
 
-    /// <summary>Continue a CRC (start with 0), zlib style.</summary>
+    /// <summary>Continues a CRC: pass the previous result, or 0 to start (zlib style).</summary>
     public static uint Compute(ReadOnlySpan<byte> data, uint crc = 0)
     {
-        if (crc == 0)
-        {
-            return System.IO.Hashing.Crc32.HashToUInt32(data);
-        }
-
-        // System.IO.Hashing cannot be seeded; fall back to the table for continuation.
-        return ~UpdateRaw(~crc, data);
+        // System.IO.Hashing is vectorized (PCLMULQDQ / ARM CRC32) but cannot start from a given CRC, so hash the new
+        // data on its own and combine.
+        uint fresh = System.IO.Hashing.Crc32.HashToUInt32(data);
+        return crc == 0 ? fresh : Combine(crc, fresh, data.Length);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -53,16 +50,61 @@ public static class Crc32Ieee
         return reg;
     }
 
-    /// <summary>CRC of the data followed by <paramref name="count"/> zero bytes, given the CRC of the data.</summary>
-    public static uint AppendZeros(uint crc, long count)
+    /// <summary>CRC of the data followed by <paramref name="count"/> zero bytes, given the CRC of the data. O(log count).</summary>
+    public static uint AppendZeros(uint crc, long count) => ~MultiplyModP(XPow8N(count), ~crc);
+
+    /// <summary>
+    /// CRC of A followed by B from CRC(A), CRC(B) and |B|: <c>CRC(A‖B) = CRC(A)·x^(8|B|) ⊕ CRC(B)</c> (mod P).
+    /// The derivation is in <see cref="Crc64Iso.Combine"/>; only the width differs.
+    /// </summary>
+    public static uint Combine(uint crcA, uint crcB, long lengthB) => MultiplyModP(XPow8N(lengthB), crcA) ^ crcB;
+
+    /// <summary>x^(8·2^k) mod P for k = 0..63.</summary>
+    private static readonly uint[] X8Pow2K = BuildPowers();
+
+    private static uint[] BuildPowers()
     {
-        uint reg = ~crc;
-        while (count-- > 0)
+        var t = new uint[64];
+        t[0] = 1u << (31 - 8); // x^8
+        for (int k = 1; k < 64; k++)
         {
-            reg = (reg >> 8) ^ Table[reg & 0xFF];
+            t[k] = MultiplyModP(t[k - 1], t[k - 1]);
         }
 
-        return ~reg;
+        return t;
+    }
+
+    /// <summary>x^(8n) mod P by square-and-multiply.</summary>
+    internal static uint XPow8N(long n)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(n);
+        uint p = 1u << 31; // x^0
+        for (int k = 0; n != 0; k++, n >>= 1)
+        {
+            if ((n & 1) != 0)
+            {
+                p = MultiplyModP(X8Pow2K[k], p);
+            }
+        }
+
+        return p;
+    }
+
+    /// <summary>a·b mod P for reflected polynomials (bit 31 = x^0); see <see cref="Crc64Iso.MultiplyModP"/>.</summary>
+    internal static uint MultiplyModP(uint a, uint b)
+    {
+        uint product = 0;
+        for (uint m = 1u << 31; m != 0; m >>= 1)
+        {
+            if ((a & m) != 0)
+            {
+                product ^= b;
+            }
+
+            b = (b & 1) != 0 ? (b >> 1) ^ ReflectedPolynomial : b >> 1;
+        }
+
+        return product;
     }
 }
 

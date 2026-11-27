@@ -1,13 +1,11 @@
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Styling;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using DeveParTools.Core.Codes.Fft;
 using DeveParTools.Core.Galois;
-using DeveParTools.Core.Hashing;
 
 namespace DeveParTools.App.ViewModels;
 
@@ -216,12 +214,12 @@ public sealed partial class BenchmarkViewModel : ObservableObject
         Results.Clear();
         try
         {
-            var results = await Task.Run(Measure);
-            double max = results.Max(r => r.Item2);
-            foreach (var (name, gbps) in results)
+            // Results appear one by one; bars are scaled to the fastest result so far.
+            await Task.Run(() => ParBenchmark.Run(new ParBenchmarkOptions
             {
-                Results.Add(new BenchmarkResult(name, gbps, gbps / max));
-            }
+                TimePerItem = TimePerItem,
+                Progress = r => Dispatcher.UIThread.Post(() => AddResult(r)),
+            }));
         }
         finally
         {
@@ -229,66 +227,17 @@ public sealed partial class BenchmarkViewModel : ObservableObject
         }
     }
 
-    internal static unsafe List<(string, double)> Measure()
+    /// <summary>Time per measurement; the UI tests shorten it.</summary>
+    public TimeSpan TimePerItem { get; set; } = TimeSpan.FromMilliseconds(450);
+
+    private void AddResult(ParBenchmarkResult r)
     {
-        const int size = 256 * 1024;
-        var src = new byte[size];
-        var dst = new byte[size];
-        new Random(1).NextBytes(src);
-        var list = new List<(string, double)>();
-        foreach (var level in SimdSupport.SupportedLevels)
+        var all = Results.Select(x => (x.Name, x.GigabytesPerSecond)).Append((r.Name, r.GigabytesPerSecond)).ToList();
+        double max = all.Max(x => x.GigabytesPerSecond);
+        Results.Clear();
+        foreach (var (name, gbps) in all)
         {
-            list.Add(($"GF(2^16) multiply-add · {level}", Time(() =>
-            {
-                using var t = Gf16MulTables.Create(GaloisField16.Par2, [0x1234, 0x4321, 0x9999, 0x0101], level);
-                fixed (byte* s = src)
-                fixed (byte* d = dst)
-                {
-                    byte** ptrs = stackalloc byte*[4];
-                    for (int i = 0; i < 4; i++)
-                    {
-                        ptrs[i] = s;
-                    }
-
-                    Gf16Kernels.MulAddMulti(t, 0, 4, ptrs, d, size);
-                }
-            }, 4L * size)));
+            Results.Add(new BenchmarkResult(name, gbps, max > 0 ? gbps / max : 0));
         }
-
-        list.Add(("BLAKE3", Time(() => Blake3.Hash(src, dst.AsSpan(0, 32)), size)));
-        list.Add(("CRC-64-ISO", Time(() => Crc64Iso.Compute(src), size)));
-        list.Add(("CRC-32", Time(() => Crc32Ieee.Compute(src), size)));
-        list.Add(("MD5", Time(() => System.Security.Cryptography.MD5.HashData(src), size)));
-
-        const int k = 1000, r = 100, bytes = 4096;
-        var orig = Enumerable.Range(0, k).Select(_ => (nint)NativeMemory.AlignedAlloc(bytes, 64)).ToArray();
-        var work = Enumerable.Range(0, LeopardCodec.EncodeWorkCount(k, r)).Select(_ => (nint)NativeMemory.AlignedAlloc(bytes, 64)).ToArray();
-        list.Add(("FFT Reed-Solomon encode (all cores)", Time(() => LeopardCodec.Encode(LeopardField.FF16, orig, r, work, bytes, Environment.ProcessorCount), (long)k * bytes)));
-        foreach (var p in orig.Concat(work))
-        {
-            NativeMemory.AlignedFree((void*)p);
-        }
-
-        return list;
-    }
-
-    private static double Time(Action action, long bytes)
-    {
-        action();
-        double best = double.MaxValue;
-        for (int run = 0; run < 3; run++)
-        {
-            var sw = Stopwatch.StartNew();
-            int it = 0;
-            do
-            {
-                action();
-                it++;
-            }
-            while (sw.ElapsedMilliseconds < 50);
-            best = Math.Min(best, sw.Elapsed.TotalSeconds / it);
-        }
-
-        return bytes / best / 1e9;
     }
 }

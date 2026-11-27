@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <IsAotCompatible>true</IsAotCompatible>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Description>DeveParTools: one API for PAR1, PAR2 and PAR3 (create, verify, repair) with live block state for UIs.</Description>
   </PropertyGroup>
   <ItemGroup>

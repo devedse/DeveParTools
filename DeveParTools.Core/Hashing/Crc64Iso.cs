@@ -78,20 +78,84 @@ public static class Crc64Iso
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static ulong UpdateRawByte(ulong reg, byte b) => (reg >> 8) ^ Tables[0][(reg ^ b) & 0xFF];
 
-    /// <summary>CRC of <paramref name="count"/> zero bytes appended to a running CRC.</summary>
-    public static ulong AppendZeros(ulong crc, long count)
+    /// <summary>
+    /// The CRC after appending <paramref name="count"/> zero bytes to data whose CRC is <paramref name="crc"/>.
+    /// O(log count): see <see cref="Combine"/> for the math.
+    /// </summary>
+    public static ulong AppendZeros(ulong crc, long count) => ~MultiplyModP(XPow8N(count), ~crc);
+
+    /// <summary>
+    /// CRC of A followed by B, from CRC(A), CRC(B) and the length of B, without reading the data again.
+    /// </summary>
+    /// <remarks>
+    /// <para>In the reflected form used here, a 64-bit register is a polynomial over GF(2) with bit 63 = x^0 and
+    /// bit 0 = x^63. Feeding one zero byte into the raw register multiplies it by x^8 mod P. Feeding a byte b
+    /// multiplies by x^8 and adds a term that depends only on b. So after A and then B (raw, without the initial or
+    /// final inversion):</para>
+    /// <code>
+    ///   raw(A‖B) = raw(A)·x^(8|B|) ⊕ R(B)            where R(B) depends only on B
+    /// </code>
+    /// <para>With the initial value ~0 and the final inversion, both CRC(A‖B) and CRC(B) contain R(B) and the same
+    /// constant, so XOR-ing them cancels both:</para>
+    /// <code>
+    ///   CRC(A‖B) ⊕ CRC(B) = CRC(A)·x^(8|B|)    ⇒    CRC(A‖B) = CRC(A)·x^(8|B|) ⊕ CRC(B)
+    /// </code>
+    /// <para>x^(8|B|) mod P is computed by square-and-multiply from a table of x^(8·2^k) mod P, so a gigabyte
+    /// costs about 30 small multiplications. This is the same method as zlib's crc32_combine.</para>
+    /// </remarks>
+    public static ulong Combine(ulong crcA, ulong crcB, long lengthB) => MultiplyModP(XPow8N(lengthB), crcA) ^ crcB;
+
+    /// <summary>x^(8·2^k) mod P for k = 0..63.</summary>
+    private static readonly ulong[] X8Pow2K = BuildPowers();
+
+    private static ulong[] BuildPowers()
     {
-        ulong reg = ~crc;
-        Span<byte> zeros = stackalloc byte[4096];
-        zeros.Clear();
-        while (count > 0)
+        var t = new ulong[64];
+        t[0] = 1UL << (63 - 8); // x^8 (degree below 64, so no reduction needed)
+        for (int k = 1; k < 64; k++)
         {
-            int n = (int)Math.Min(count, zeros.Length);
-            reg = UpdateRaw(reg, zeros[..n]);
-            count -= n;
+            t[k] = MultiplyModP(t[k - 1], t[k - 1]);
         }
 
-        return ~reg;
+        return t;
+    }
+
+    /// <summary>x^(8n) mod P: the factor by which n zero bytes multiply the raw register.</summary>
+    internal static ulong XPow8N(long n)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(n);
+        ulong p = 1UL << 63; // x^0 = 1
+        for (int k = 0; n != 0; k++, n >>= 1)
+        {
+            if ((n & 1) != 0)
+            {
+                p = MultiplyModP(X8Pow2K[k], p);
+            }
+        }
+
+        return p;
+    }
+
+    /// <summary>a·b mod P for reflected polynomials (bit 63 = x^0).</summary>
+    /// <remarks>
+    /// Shift-and-add: walk a's coefficients from x^0 (bit 63) upward. For each set bit add the current b, then
+    /// multiply b by x. In reflected form, multiplying by x is a right shift, and when x^63 (bit 0) falls off the end,
+    /// P is subtracted (XOR).
+    /// </remarks>
+    internal static ulong MultiplyModP(ulong a, ulong b)
+    {
+        ulong product = 0;
+        for (ulong m = 1UL << 63; m != 0; m >>= 1)
+        {
+            if ((a & m) != 0)
+            {
+                product ^= b;
+            }
+
+            b = (b & 1) != 0 ? (b >> 1) ^ ReflectedPolynomial : b >> 1;
+        }
+
+        return product;
     }
 }
 

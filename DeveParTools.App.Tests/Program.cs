@@ -77,6 +77,7 @@ Check(shell.Verify.StatusText?.StartsWith("Repaired") == true, "repair succeeded
 Save(window, output, "verify-repaired");
 
 shell.Page = AppPage.Benchmark;
+shell.Benchmark.TimePerItem = TimeSpan.FromMilliseconds(120);
 Await(shell.Benchmark.RunCommand.ExecuteAsync(null));
 Check(shell.Benchmark.Results.Count > 0, "benchmark produced results");
 Save(window, output, "benchmark");
