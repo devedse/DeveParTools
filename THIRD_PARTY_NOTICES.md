@@ -22,3 +22,12 @@ Corporation, MIT License: see [LICENSES/FluentUI-System-Icons-MIT.txt](LICENSES/
 ## Reference implementations (tests only)
 par2cmdline (GPL-2.0), par2cmdline-turbo (GPL-2.0) and par3cmdline (LGPL-2.1) are used only as external test
 oracles in `DeveParTools.InteropTests`; none of their code is included.
+
+## BLAKE3 test vectors (tests only)
+`DeveParTools.Core.Tests/TestData/blake3_vectors.txt` holds the official test vectors from
+[BLAKE3](https://github.com/BLAKE3-team/BLAKE3) (`test_vectors/test_vectors.json`), released under CC0-1.0 /
+Apache-2.0. The BLAKE3 implementation itself is written from the specification.
+
+## Intel Software Development Emulator (CI only)
+CI runs the tests under [Intel SDE](https://www.intel.com/software/sde) to emulate other CPUs. It is downloaded
+during the build and is not part of this repository or of the releases.
