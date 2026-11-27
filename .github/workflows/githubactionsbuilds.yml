@@ -93,12 +93,16 @@ jobs:
         - name: linux-x64
           os: ubuntu-latest
           interop: true
+        # Microsoft's coverage profiler does not start on ARM64 ("Profiler was not initialized"), so the ARM64 runs use
+        # coverlet, which instruments the IL instead.
         - name: linux-arm64
           os: ubuntu-24.04-arm
+          coverlet: true
         - name: windows-x64
           os: windows-latest
         - name: macos-arm64
           os: macos-latest
+          coverlet: true
         - name: sde-sapphirerapids
           os: ubuntu-latest
           sde: spr
@@ -137,8 +141,8 @@ jobs:
       with:
         environmentVariableName: SDE_PATH
         sdeVersion: ${{ env.SDE_VERSION }}
-    - name: Install dotnet-coverage
-      run: dotnet tool install --global dotnet-coverage
+    - name: Install the coverage tool
+      run: dotnet tool install --global ${{ matrix.coverlet && 'coverlet.console' || 'dotnet-coverage' }}
     - name: dotnet build
       shell: bash
       run: |
@@ -153,8 +157,15 @@ jobs:
         projects="DeveParTools.Core.Tests DeveParTools.Par1.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests DeveParTools.Tests"
         if [ "${{ matrix.interop }}" = "true" ]; then projects="$projects DeveParTools.InteropTests"; fi
         for p in $projects; do
-          (cd $p/bin/Release/net10.0 && dotnet-coverage collect --settings "$GITHUB_WORKSPACE/coverage.runsettings.xml" -f cobertura \
-            -o "$GITHUB_WORKSPACE/TestResults/coverage.$p.cobertura.xml" "dotnet exec $p.dll --ignore-exit-code 8")
+          out="$GITHUB_WORKSPACE/TestResults/coverage.$p.cobertura.xml"
+          if [ "${{ matrix.coverlet }}" = "true" ]; then
+            (cd $p/bin/Release/net10.0 && coverlet $p.dll --target dotnet --targetargs "exec $p.dll --ignore-exit-code 8" --format cobertura --output "$out" \
+              --include "[DeveParTools]*" --include "[DeveParTools.Core]*" --include "[DeveParTools.Par1]*" --include "[DeveParTools.Par2]*" --include "[DeveParTools.Par3]*" \
+              --exclude-by-attribute ExcludeFromCodeCoverage)
+          else
+            (cd $p/bin/Release/net10.0 && dotnet-coverage collect --settings "$GITHUB_WORKSPACE/coverage.runsettings.xml" -f cobertura \
+              -o "$out" "dotnet exec $p.dll --ignore-exit-code 8")
+          fi
         done
     - name: Core tests with coverage on an emulated CPU (${{ matrix.sde }})
       if: matrix.sde
