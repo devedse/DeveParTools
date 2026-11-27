@@ -103,6 +103,13 @@ data inside gets a **Remove recovery data** button, which restores its original 
 **Benchmark** shows the speed of every kernel on your machine (buffer size and time per test are adjustable). **Settings** sets threads, memory, the SIMD kernel
 (to compare kernels) and the theme.
 
+**File associations (Windows and Linux).** A switch in Settings makes `.par`, `.par2` and `.par3` files (and PAR1
+volumes `.p01`, `.p02`, …) open in DeveParTools when you double-click them, for your account only. On Windows the
+types are also listed under "Open with" and in Settings > Default apps. If you already chose another program for a
+type, Windows doesn't let an app change that; the app tells you which types are affected and opens the Default apps
+page, where you can pick DeveParTools. On Linux it adds a desktop entry and MIME types, and sets the defaults in
+`~/.config/mimeapps.list`. Turning the switch off gives the files back to the program they had before.
+
 **Explorer context menu (Windows).** A switch in Settings adds two entries to the Explorer context menu:
 - "Create recovery set with DeveParTools" on files and folders. A multi-selection opens one Create window with all
   the selected items.

@@ -18,6 +18,9 @@ public interface IFileDialogs
 
     /// <summary>Asks before something that cannot be undone; true when the user chose <paramref name="confirm"/>.</summary>
     Task<bool> ConfirmAsync(string title, string message, string confirm);
+
+    /// <summary>Opens a link with the system (a web page, or a Settings page such as ms-settings:defaultapps).</summary>
+    Task LaunchAsync(Uri uri);
 }
 
 public sealed record LogLine(DateTime Time, ParLogLevel Level, string Message)

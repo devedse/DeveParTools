@@ -18,6 +18,18 @@
           <ComboBox Grid.Row="3" Grid.Column="1" ItemsSource="{Binding Themes}" SelectedItem="{Binding Theme}" Width="160" />
         </Grid>
       </Border>
+      <Border Classes="Card" IsVisible="{Binding AssociationsSupported}">
+        <StackPanel Spacing="8">
+          <TextBlock Classes="Section" Text="File associations" />
+          <ToggleSwitch IsChecked="{Binding AssociateFiles}" IsEnabled="{Binding AssociationsEditable}"
+                        OnContent="PAR files open with DeveParTools" OffContent="PAR files open with DeveParTools"
+                        AutomationProperties.Name="Open PAR files with DeveParTools" />
+          <TextBlock TextWrapping="Wrap" Opacity="0.8"
+                     Text="Double-click .par, .par2 and .par3 files (and PAR1 volumes .p01, .p02 …) to verify them in DeveParTools. Only for your account; turning it off gives the files back to the program they had before." />
+          <TextBlock Text="{Binding AssociationStatus}" TextWrapping="Wrap" IsVisible="{Binding AssociationStatus, Converter={x:Static ObjectConverters.IsNotNull}}" />
+          <Button Content="Choose in Windows…" Command="{Binding OpenDefaultAppsCommand}" IsVisible="{Binding CanOpenDefaultApps}" />
+        </StackPanel>
+      </Border>
       <Border Classes="Card" IsVisible="{Binding ExplorerMenuSupported}">
         <StackPanel Spacing="8">
           <TextBlock Classes="Section" Text="Windows Explorer" />

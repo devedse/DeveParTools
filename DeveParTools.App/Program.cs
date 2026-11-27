@@ -38,22 +38,30 @@ internal static class Program
     public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<App>().UsePlatformDetect().LogToTrace();
 
     /// <summary>
-    /// When the Explorer entries point to an executable that no longer exists (the app was moved or updated to
-    /// another folder), point them to this one.
+    /// When the Explorer entries or the file associations point to an executable that no longer exists (the app was
+    /// moved, renamed or updated to another folder), point them to this one.
     /// </summary>
     private static void RepairMovedContextMenu()
     {
-        if (!OperatingSystem.IsWindows() || ExplorerContextMenu.CurrentExecutable is not { } self)
+        if (ExplorerContextMenu.CurrentExecutable is not { } self)
         {
             return;
         }
 
         try
         {
-            var menu = new ExplorerContextMenu();
-            if (menu.RegisteredExecutable() is { } registered && !File.Exists(registered))
+            if (OperatingSystem.IsWindows())
             {
-                menu.Install(self);
+                var menu = new ExplorerContextMenu();
+                if (menu.RegisteredExecutable() is { } registered && !File.Exists(registered))
+                {
+                    menu.Install(self);
+                }
+            }
+
+            if (FileAssociations.ForThisPlatform() is { } associations && associations.Read() is { Installed: true, Executable: { } old } && !File.Exists(old))
+            {
+                associations.Install(self);
             }
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException)

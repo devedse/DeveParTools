@@ -98,6 +98,8 @@ public sealed partial class MainWindow : Window, IFileDialogs
         return await dialog.ShowAsync(this) == FAContentDialogResult.Primary;
     }
 
+    public async Task LaunchAsync(Uri uri) => await Launcher.LaunchUriAsync(uri);
+
     public async Task<string?> SaveFileAsync(string title, string suggestedName, string extension)
     {
         var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = title, SuggestedFileName = suggestedName, DefaultExtension = extension });

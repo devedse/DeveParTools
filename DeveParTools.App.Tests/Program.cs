@@ -241,6 +241,41 @@ Await(shell.Benchmark.RunCommand.ExecuteAsync(null));
 Check(shell.Benchmark.Results.Count > 0, "benchmark produced results");
 Save(window, output, "benchmark");
 
+
+// File associations, Linux style (plain files, so this runs everywhere): desktop entry, MIME types, default apps.
+{
+    var xdg = Path.Combine(work, "xdg");
+    var linux = new LinuxFileAssociations(Path.Combine(xdg, "data"), Path.Combine(xdg, "config"), () => new MemoryStream([1, 2, 3]), runTools: false);
+    Directory.CreateDirectory(Path.Combine(xdg, "config"));
+    File.WriteAllLines(linux.MimeAppsList, ["[Default Applications]", "text/plain=gedit.desktop", "application/x-par2=other-par.desktop", "", "[Added Associations]", "image/png=eog.desktop;"]);
+    const string WeirdExe = "/opt/my apps/$dir \"x\"/deveparui";
+    var settings = new SettingsViewModel(Path.Combine(work, "settings-linux.txt"), new ExplorerContextMenu(), WeirdExe, linux);
+    Check(settings is { AssociationsSupported: true, AssociateFiles: false, AssociationsEditable: true }, "file associations are offered and off");
+    settings.AssociateFiles = true;
+    var desktop = File.ReadAllText(linux.DesktopFile);
+    var mimeApps = File.ReadAllLines(linux.MimeAppsList);
+    Check(desktop.Contains("MimeType=application/x-par2;application/x-par3;application/x-par;", StringComparison.Ordinal) && File.Exists(linux.MimePackage) && File.ReadAllBytes(linux.IconFile).Length == 3,
+        "the desktop entry, MIME types and icon are written");
+    Check(LinuxFileAssociations.UnquoteExec(LinuxFileAssociations.QuoteExec(WeirdExe)) == WeirdExe && linux.Read().Executable == WeirdExe, "a program path with spaces, $ and quotes survives the Exec quoting: " + desktop.Split('\n').First(l => l.StartsWith("Exec=", StringComparison.Ordinal)));
+    Check(mimeApps.Contains("application/x-par2=deveparui.desktop") && mimeApps.Contains("application/x-par3=deveparui.desktop") && mimeApps.Contains("text/plain=gedit.desktop") && mimeApps.Contains("image/png=eog.desktop;"),
+        "the PAR types default to DeveParTools; other defaults are kept");
+    Check(settings.AssociationStatus == $"PAR files open with {WeirdExe}.", "the status names the program: " + settings.AssociationStatus);
+
+    // The user picks another program for .par3 afterwards.
+    var lines = File.ReadAllLines(linux.MimeAppsList).Select(l => l == "application/x-par3=deveparui.desktop" ? "application/x-par3=someone.desktop" : l).ToArray();
+    File.WriteAllLines(linux.MimeAppsList, lines);
+    settings.ReadAssociations();
+    Check(settings.AssociationStatus?.StartsWith(".par3 files still open with someone.desktop", StringComparison.Ordinal) == true && !settings.CanOpenDefaultApps, "a type the user gave to another program is reported: " + settings.AssociationStatus);
+
+    settings.AssociateFiles = false;
+    mimeApps = File.ReadAllLines(linux.MimeAppsList);
+    Check(!File.Exists(linux.DesktopFile) && !File.Exists(linux.MimePackage) && !mimeApps.Any(l => l.Contains("deveparui.desktop", StringComparison.Ordinal)) && mimeApps.Contains("text/plain=gedit.desktop") && mimeApps.Contains("application/x-par3=someone.desktop"),
+        "turning it off removes only DeveParTools' files and entries");
+    var fresh = new List<string>();
+    LinuxFileAssociations.SetEntry(fresh, "Default Applications", "a/b", "x.desktop");
+    LinuxFileAssociations.SetEntry(fresh, "Default Applications", "a/b", "y.desktop");
+    Check(fresh.SequenceEqual(["[Default Applications]", "a/b=y.desktop"]) && LinuxFileAssociations.GetEntry(fresh, "Other", "a/b") == null, "mimeapps.list editing: add, replace, missing section");
+}
 shell.Page = AppPage.Settings;
 Save(window, output, "settings");
 if (OperatingSystem.IsWindows())
@@ -270,6 +305,52 @@ if (OperatingSystem.IsWindows())
     }
 
     Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(root);
+
+    // File associations in a scratch key standing in for HKCU\Software.
+    var softwareRoot = $@"Software\DeveParTools.Tests\{Guid.NewGuid():N}";
+    var classesRoot = softwareRoot + @"\Classes";
+    var user = Microsoft.Win32.Registry.CurrentUser;
+    using (var par2 = user.CreateSubKey(classesRoot + @"\.par2"))
+    {
+        par2.SetValue(null, "MultiPar.par2");
+    }
+
+    var windows = new WindowsFileAssociations(softwareRoot);
+    var dialogs = new ConfirmingDialogs();
+    var assoc = new SettingsViewModel(Path.Combine(work, "settings-win.txt"), new ExplorerContextMenu(classesRoot), Exe, windows) { Dialogs = dialogs };
+    Check(assoc is { AssociationsSupported: true, AssociateFiles: false }, "file associations are offered and off");
+    assoc.AssociateFiles = true;
+    using (var par2 = user.OpenSubKey(classesRoot + @"\.par2"))
+    using (var open = user.OpenSubKey(classesRoot + @"\DeveParTools.par2\shell\open\command"))
+    using (var p05 = user.OpenSubKey(classesRoot + @"\.p05\OpenWithProgids"))
+    using (var app = user.OpenSubKey(classesRoot + @"\Applications\deveparui.exe\SupportedTypes"))
+    using (var registered = user.OpenSubKey(softwareRoot + @"\RegisteredApplications"))
+    {
+        Check((string?)par2?.GetValue(null) == "DeveParTools.par2" && (string?)par2?.GetValue("DeveParTools.Previous") == "MultiPar.par2" && (string?)open?.GetValue(null) == $"\"{Exe}\" \"%1\"",
+            "the types open with DeveParTools; the previous default is remembered");
+        Check(p05?.GetValueNames().Contains("DeveParTools.par") == true && app?.GetValueNames().Contains(".par3") == true && (string?)registered?.GetValue("DeveParTools") == softwareRoot + @"\DeveParTools\Capabilities",
+            "PAR1 volumes, Open with and Default apps registration");
+    }
+
+    Check(assoc.AssociationStatus == $"PAR files open with {Exe}." && !assoc.CanOpenDefaultApps, "the status names the program: " + assoc.AssociationStatus);
+    using (var choice = user.CreateSubKey(softwareRoot + @"\Microsoft\Windows\CurrentVersion\Explorer\FileExts\.par2\UserChoice"))
+    {
+        choice.SetValue("ProgId", "MultiPar.par2");
+    }
+
+    assoc.ReadAssociations();
+    Check(assoc.CanOpenDefaultApps && assoc.AssociationStatus?.Contains("still open with MultiPar.par2", StringComparison.Ordinal) == true, "a type the user gave to another program is reported: " + assoc.AssociationStatus);
+    Await(assoc.OpenDefaultAppsCommand.ExecuteAsync(null));
+    Check(dialogs.Launched.SingleOrDefault()?.ToString() == "ms-settings:defaultapps?registeredAppUser=DeveParTools", "\"Choose in Windows\" opens the Default apps page");
+
+    assoc.AssociateFiles = false;
+    using (var classes = user.OpenSubKey(classesRoot))
+    {
+        Check((string?)classes?.OpenSubKey(".par2")?.GetValue(null) == "MultiPar.par2" && classes?.OpenSubKey(".par3") == null && classes?.OpenSubKey("DeveParTools.par2") == null && classes?.OpenSubKey(@"Applications\deveparui.exe") == null,
+            "turning it off gives .par2 back to the previous program and removes the rest");
+    }
+
+    Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(softwareRoot);
     Save(window, output, "settings-windows");
 }
 
@@ -339,4 +420,12 @@ internal sealed class ConfirmingDialogs : IFileDialogs
     public Task<string?> SaveFileAsync(string title, string suggestedName, string extension) => Task.FromResult<string?>(null);
 
     public Task<bool> ConfirmAsync(string title, string message, string confirm) => Task.FromResult(true);
+
+    public List<Uri> Launched { get; } = [];
+
+    public Task LaunchAsync(Uri uri)
+    {
+        Launched.Add(uri);
+        return Task.CompletedTask;
+    }
 }

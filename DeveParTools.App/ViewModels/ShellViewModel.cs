@@ -56,6 +56,7 @@ public sealed partial class ShellViewModel : ObservableObject
     {
         Verify.Dialogs = dialogs;
         Create.Dialogs = dialogs;
+        Settings.Dialogs = dialogs;
     }
 }
 
@@ -67,21 +68,120 @@ public sealed partial class SettingsViewModel : ObservableObject
 {
     private readonly string _path;
     private readonly ExplorerContextMenu _contextMenu;
+    private readonly IFileAssociations? _associations;
     private readonly string? _executable;
     private bool _readingExplorerMenu;
+    private bool _readingAssociations;
 
     /// <param name="path">The settings file (default: %AppData%\DeveParTools\settings.txt).</param>
     /// <param name="explorerMenu">Where the context menu entries go (default: the user's real classes key).</param>
     /// <param name="executable">The program the entries start (default: this one).</param>
-    public SettingsViewModel(string? path = null, ExplorerContextMenu? explorerMenu = null, string? executable = null)
+    /// <param name="associations">The file associations (default: this platform's, see <see cref="FileAssociations.ForThisPlatform"/>).</param>
+    public SettingsViewModel(string? path = null, ExplorerContextMenu? explorerMenu = null, string? executable = null, IFileAssociations? associations = null)
     {
         _path = path ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DeveParTools", "settings.txt");
         _contextMenu = explorerMenu ?? new ExplorerContextMenu();
+        _associations = associations ?? FileAssociations.ForThisPlatform();
         _executable = executable ?? ExplorerContextMenu.CurrentExecutable;
         Kernels = SimdSupport.SupportedLevels.Select(l => l.ToString()).ToArray();
         _kernel = SimdSupport.Best.ToString();
         Load();
         ReadExplorerMenu();
+        ReadAssociations();
+    }
+
+    /// <summary>Opens links (the Windows Default apps page); set by the window.</summary>
+    public IFileDialogs? Dialogs { get; set; }
+
+    // ---------------------------------------------------------------- file associations
+
+    /// <summary>True where PAR files can be associated with the app (Windows and Linux).</summary>
+    public bool AssociationsSupported => _associations != null;
+
+    /// <summary>Whether .par/.par2/.par3 (and PAR1 volumes) open with this app. Changing it registers or removes that.</summary>
+    [ObservableProperty]
+    private bool _associateFiles;
+
+    [ObservableProperty]
+    private bool _associationsEditable;
+
+    /// <summary>Which program opens PAR files, or which types another program still opens (the user's own choice).</summary>
+    [ObservableProperty]
+    private string? _associationStatus;
+
+    /// <summary>Windows: some types still open with another program, which only the user can change in Settings.</summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(OpenDefaultAppsCommand))]
+    private bool _canOpenDefaultApps;
+
+    partial void OnAssociateFilesChanged(bool value)
+    {
+        if (_readingAssociations || _associations == null)
+        {
+            return;
+        }
+
+        string? error = null;
+        try
+        {
+            if (!value)
+            {
+                _associations.Uninstall();
+            }
+            else if (_executable != null)
+            {
+                _associations.Install(_executable);
+            }
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            error = "The file associations could not be changed: " + e.Message;
+        }
+
+        ReadAssociations();
+        AssociationStatus = error ?? AssociationStatus;
+    }
+
+    /// <summary>Reads the current associations back from the system.</summary>
+    public void ReadAssociations()
+    {
+        if (_associations == null)
+        {
+            return;
+        }
+
+        FileAssociationState state;
+        try
+        {
+            state = _associations.Read();
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            state = new FileAssociationState(false, null, []);
+        }
+
+        _readingAssociations = true;
+        AssociateFiles = state.Installed;
+        _readingAssociations = false;
+        AssociationsEditable = state.Installed || _executable != null;
+        CanOpenDefaultApps = state.Installed && state.TakenBy.Count > 0 && _associations.DefaultAppsPage != null;
+        AssociationStatus = !state.Installed
+            ? _executable == null ? "Start deveparui itself (not through dotnet) to associate the files." : null
+            : state.TakenBy.Count > 0
+                ? $"{string.Join(", ", state.TakenBy.Select(t => t.Extension))} files still open with {string.Join(", ", state.TakenBy.Select(t => t.Program).Distinct())}, "
+                  + (_associations.DefaultAppsPage != null
+                      ? "because you chose that program. Windows only lets you change that yourself: click \"Choose in Windows\" and pick DeveParTools."
+                      : "set in your default applications.")
+                : $"PAR files open with {state.Executable}.";
+    }
+
+    [RelayCommand(CanExecute = nameof(CanOpenDefaultApps))]
+    private async Task OpenDefaultAppsAsync()
+    {
+        if (_associations?.DefaultAppsPage is { } page && Dialogs != null)
+        {
+            await Dialogs.LaunchAsync(page);
+        }
     }
 
     /// <summary>True on Windows, where the Explorer context menu option is shown.</summary>
