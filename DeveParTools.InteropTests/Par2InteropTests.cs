@@ -241,6 +241,33 @@ public sealed class Par2InteropTests
 
     [TestMethod]
     [DynamicData(nameof(Tools))]
+    public void NonAsciiNamesAndSubdirectories_RoundTripBothWays(string toolName, string exe)
+    {
+        SkipWithoutTool(exe);
+        using var ws = new Workspace();
+        var files = MakeFiles(ws, 6, ("naïve café.bin", 20_000), ("日本/ファイル.dat", 9_000), ("a b/c d.txt", 300));
+        string[] names = ["naïve café.bin", "日本/ファイル.dat", "a b/c d.txt"];
+
+        // Ours, checked by them.
+        Par2Creator.Create(new Par2CreateOptions { InputFiles = files.Keys.ToList(), OutputPath = ws["ours.par2"], SliceSize = 1024, RecoverySliceCount = 12 });
+        File.Delete(ws["日本/ファイル.dat"]);
+        var (code, output) = ExternalTool.Run(exe, ws.Dir, "r", "ours.par2");
+        Assert.AreEqual(Success, code, $"{toolName}:\n{output}");
+        AssertFiles(files);
+
+        // Theirs, checked by us.
+        (code, output) = ExternalTool.Run(exe, ws.Dir, ["c", "-s1024", "-c12", "theirs.par2", .. names]);
+        Assert.AreEqual(Success, code, $"{toolName}:\n{output}");
+        var verify = Par2Verifier.Verify(new Par2VerifyOptions { Par2Path = ws["theirs.par2"] });
+        CollectionAssert.AreEquivalent(names, verify.Files.Select(f => f.File.Name).ToArray());
+        Assert.IsTrue(verify.AllFilesComplete);
+        File.Delete(ws["a b/c d.txt"]);
+        Assert.IsTrue(Par2Repairer.Repair(Par2Verifier.Verify(new Par2VerifyOptions { Par2Path = ws["theirs.par2"] })).Success);
+        AssertFiles(files);
+    }
+
+    [TestMethod]
+    [DynamicData(nameof(Tools))]
     public void BothSidesAgree_OnWhetherRepairIsPossible(string toolName, string exe)
     {
         SkipWithoutTool(exe);
