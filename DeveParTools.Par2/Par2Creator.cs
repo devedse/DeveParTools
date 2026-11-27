@@ -116,8 +116,9 @@ public static class Par2Creator
         var baseDir = Path.GetFullPath(options.BaseDirectory ?? Path.GetDirectoryName(outputPath)!);
 
         // 1. Inputs: names, lengths, MD5 of the first 16 KiB, File IDs. The same file given twice (also spelled
-        //    differently, e.g. "a/../b" or, on Windows, in other letter case) gets the same stored name and is
-        //    used once; different files always get different names (relative paths below one base directory).
+        //    differently, e.g. "x/../a" for "a", or on Windows with the base directory part in other letter case)
+        //    gets the same stored name and is used once; different files always get different names (relative
+        //    paths below one base directory).
         observer.Stage("Preparing");
         var inputs = options.InputFiles
             .Select(p => Path.GetFullPath(p))

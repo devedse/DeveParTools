@@ -193,7 +193,8 @@ public sealed class Par1File
 /// missing, only volumes 1 and 4 left. Then</para>
 /// <code>det A = 7^0·24^3 − 7^3·24^0 = 24^3 + 7^3 = 0     because (24/7)^3 = 1 in GF(2^8)</code>
 /// <para>(24/7 = 214 = 2^85 has order 3), so those two files cannot be rebuilt from those two volumes, although
-/// the counts match. <see cref="Par1Set.Repair"/> then fails instead of writing wrong data.</para>
+/// the counts match. <see cref="Par1Set.Repair"/> then tries the next volumes, and fails instead of writing wrong
+/// data when no selection works.</para>
 /// </remarks>
 public static class Par1Math
 {
@@ -474,17 +475,7 @@ public static class Par1Set
 
         var field = new Gf8Field(Par1Math.Field);
         int l = missing.Count;
-        var chosen = verify.Volumes.OrderBy(v => v.VolumeNumber).Take(l).ToList();
-        var a = new GfMatrix<byte>(l, l, field);
-        for (int r = 0; r < l; r++)
-        {
-            for (int c = 0; c < l; c++)
-            {
-                a[r, c] = Par1Math.Coefficient(missing[c], (int)chosen[r].VolumeNumber);
-            }
-        }
-
-        if (!a.TryInvert())
+        if (ChooseVolumes(verify.Volumes, missing, context.CancellationToken) is not var (chosen, a))
         {
             return false;
         }
@@ -533,6 +524,38 @@ public static class Par1Set
         }
 
         return ok;
+    }
+
+    /// <summary>
+    /// L = |missing| volumes whose matrix <c>A[r][c] = (missing[c] + 1)^(v_r − 1)</c> is invertible: the first L by
+    /// volume number, else the window slides along the sorted volumes; null when no window works (see the remarks of
+    /// <see cref="Par1Math"/>). Example: files 7 and 24 missing with volumes 1, 4 and 5 left: {1, 4} is singular,
+    /// {4, 5} is used.
+    /// </summary>
+    internal static (List<Par1File> Volumes, GfMatrix<byte> Inverse)? ChooseVolumes(IReadOnlyList<Par1File> volumes, List<int> missing, CancellationToken cancellationToken)
+    {
+        var field = new Gf8Field(Par1Math.Field);
+        int l = missing.Count;
+        var sorted = volumes.OrderBy(v => v.VolumeNumber).ToList();
+        for (int start = 0; start + l <= sorted.Count; start++)
+        {
+            var candidate = sorted.GetRange(start, l);
+            var a = new GfMatrix<byte>(l, l, field);
+            for (int r = 0; r < l; r++)
+            {
+                for (int c = 0; c < l; c++)
+                {
+                    a[r, c] = Par1Math.Coefficient(missing[c], (int)candidate[r].VolumeNumber);
+                }
+            }
+
+            if (a.TryInvert(cancellationToken))
+            {
+                return (candidate, a);
+            }
+        }
+
+        return null;
     }
 
     private static byte[] Md5Of(string path)

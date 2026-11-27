@@ -187,8 +187,8 @@ public sealed class Par1VerifyRepairTests
         File.Copy(dir["set.p02"], dir["set.p123"]);             // not a .pNN extension
         File.Copy(dir["set.p02"], dir["set.a01"]);              // below 'p'
 
-        var verify = Par1Set.Verify(dir["set.par"]);
-        CollectionAssert.AreEquivalent(new ulong[] { 1, 2 }, verify.Volumes.Select(v => v.VolumeNumber).ToArray());
+        var verify = Par1Set.Verify(dir["set.par"], extraFiles: []);
+        CollectionAssert.AreEqual(new ulong[] { 1, 2 }, verify.Volumes.Select(v => v.VolumeNumber).ToArray(), "sorted by number");
         Assert.IsTrue(verify.AllFilesComplete);
     }
 
@@ -206,21 +206,33 @@ public sealed class Par1VerifyRepairTests
     }
 
     [TestMethod]
-    public void Repair_SingularVolumeSelection_FailsWithoutWritingWrongData()
+    public void Repair_SingularVolumeSelection_SlidesToOtherVolumes_OrFails()
     {
         // See Par1Math: with files 7 and 24 missing and only volumes 1 and 4 left, the 2×2 matrix is singular.
         using var dir = new TempDir();
-        var files = MakeSet(dir, 24, 4);
+        var files = MakeSet(dir, 24, 5);
         File.Move(dir["set.p02"], dir["p02.bak"]);
+        File.Move(dir["set.p05"], dir["p05.bak"]);
         File.Delete(dir["set.p03"]);
         File.Delete(dir["f06"]);
         File.Delete(dir["f23"]);
         var verify = Par1Set.Verify(dir["set.par"]);
         Assert.IsTrue(verify.RepairPossible, "the counts match");
+        Assert.IsNull(Par1Set.ChooseVolumes(verify.Volumes, [6, 23], default));
         Assert.IsFalse(Par1Set.Repair(verify));
-        Assert.IsFalse(File.Exists(dir["f06"]) || File.Exists(dir["f23"]));
+        Assert.IsFalse(File.Exists(dir["f06"]) || File.Exists(dir["f23"]), "no wrong data is written");
 
-        // With volume 2 back, volumes 1 and 2 are chosen (consecutive: always invertible).
+        // With volume 5 as well, the window slides from {1, 4} to {4, 5}.
+        File.Move(dir["p05.bak"], dir["set.p05"]);
+        verify = Par1Set.Verify(dir["set.par"]);
+        CollectionAssert.AreEqual(new ulong[] { 4, 5 }, Par1Set.ChooseVolumes(verify.Volumes, [6, 23], default)!.Value.Volumes.Select(v => v.VolumeNumber).ToArray());
+        Assert.IsTrue(Par1Set.Repair(verify));
+        AssertAllRestored(files);
+
+        // With volume 2 instead, volumes 1 and 2 are chosen (consecutive: always invertible).
+        File.Delete(dir["set.p05"]);
+        File.Delete(dir["f06"]);
+        File.Delete(dir["f23"]);
         File.Move(dir["p02.bak"], dir["set.p02"]);
         verify = Par1Set.Verify(dir["set.par"]);
         Assert.IsTrue(Par1Set.Repair(verify));
