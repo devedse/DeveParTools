@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="DeveParTools.Core/DeveParTools.Core.csproj" />
+  <Project Path="DeveParTools.Tests/DeveParTools.Tests.csproj" />
+</Solution>

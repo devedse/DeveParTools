@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <Description>High-performance primitives for DeveParTools: SIMD Galois field arithmetic, erasure codes and hashing.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.IO.Hashing" Version="10.0.15" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="DeveParTools.Tests" />
+    <InternalsVisibleTo Include="DeveParTools.Benchmarks" />
+  </ItemGroup>
+</Project>
