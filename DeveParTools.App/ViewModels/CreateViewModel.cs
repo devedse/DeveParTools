@@ -12,7 +12,11 @@ public sealed partial class CreateViewModel : OperationViewModel
     public CreateViewModel(SettingsViewModel settings)
         : base(settings)
     {
-        Inputs.CollectionChanged += (_, _) => Recalculate();
+        Inputs.CollectionChanged += (_, _) =>
+        {
+            Recalculate();
+            OnPropertyChanged(nameof(CanInsertIntoArchive));
+        };
     }
 
     public ObservableCollection<string> Inputs { get; } = new();
@@ -69,9 +73,17 @@ public sealed partial class CreateViewModel : OperationViewModel
 
     public bool IsPar3 => FormatIndex == 1;
 
+    /// <summary>"PAR inside" is offered for PAR3 when the only input is a .zip, .7z or .rar archive.</summary>
+    public bool CanInsertIntoArchive => IsPar3 && Inputs.Count == 1 && File.Exists(Inputs[0])
+        && Path.GetExtension(Inputs[0]).ToLowerInvariant() is ".zip" or ".7z" or ".rar";
+
+    [ObservableProperty]
+    private bool _insideArchive;
+
     partial void OnFormatIndexChanged(int value)
     {
         OnPropertyChanged(nameof(IsPar3));
+        OnPropertyChanged(nameof(CanInsertIntoArchive));
         if (OutputPath != null)
         {
             OutputPath = Path.ChangeExtension(OutputPath, Extension);
@@ -172,6 +184,20 @@ public sealed partial class CreateViewModel : OperationViewModel
     [RelayCommand(CanExecute = nameof(CanCreate))]
     private async Task CreateAsync()
     {
+        if (InsideArchive && CanInsertIntoArchive)
+        {
+            var archive = Inputs[0];
+            var percent = Redundancy;
+            var inserted = await RunAsync("Adding recovery data to the archive", ctx => ParClient.Insert(new ParInsertRequest { ArchivePath = archive, RedundancyPercent = percent }, ctx));
+            if (inserted != null)
+            {
+                StatusText = $"{Path.GetFileName(archive)} now carries {inserted.RecoveryBlocks:N0} recovery block(s) of {Formatting.Bytes(inserted.BlockSize)} ({Formatting.Bytes(inserted.OriginalLength)} → {Formatting.Bytes(inserted.NewLength)}). Open it on the Verify page to check or repair it.";
+                Log.Add(new LogLine(DateTime.Now, ParLogLevel.Info, StatusText));
+            }
+
+            return;
+        }
+
         var request = new ParCreateRequest
         {
             Inputs = Inputs.ToList(),

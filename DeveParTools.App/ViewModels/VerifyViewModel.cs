@@ -31,7 +31,21 @@ public sealed partial class VerifyViewModel : OperationViewModel
     public VerifyViewModel(SettingsViewModel settings)
         : base(settings)
     {
+        PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(IsBusy))
+            {
+                ExtendCommand.NotifyCanExecuteChanged();
+            }
+        };
     }
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(ExtendCommand))]
+    private decimal? _extendPercent = 10;
+
+    /// <summary>Extending is offered for PAR3 sets whose input data is all there.</summary>
+    public bool CanOfferExtend => Report is { Format: ParFormat.Par3, MissingBlocks: 0 };
 
     public ObservableCollection<string> ExtraFiles { get; } = new();
 
@@ -102,7 +116,8 @@ public sealed partial class VerifyViewModel : OperationViewModel
             Files.Add(new FileRowViewModel { Report = f });
         }
 
-        foreach (var name in new[] { nameof(Headline), nameof(HealthIconKey), nameof(Details), nameof(FilesOk), nameof(FilesBad), nameof(MissingBlocks), nameof(RecoveryAvailable), nameof(NeedRatio), nameof(NeedText) })
+        ExtendCommand.NotifyCanExecuteChanged();
+        foreach (var name in new[] { nameof(CanOfferExtend), nameof(Headline), nameof(HealthIconKey), nameof(Details), nameof(FilesOk), nameof(FilesBad), nameof(MissingBlocks), nameof(RecoveryAvailable), nameof(NeedRatio), nameof(NeedText) })
         {
             OnPropertyChanged(name);
         }
@@ -212,6 +227,30 @@ public sealed partial class VerifyViewModel : OperationViewModel
                 StatusText = result.Message;
             }
         }
+    }
+
+    private bool CanExtend() => CanOfferExtend && !IsBusy && ExtendPercent > 0;
+
+    /// <summary>Adds recovery blocks to the open PAR3 set, then verifies again so the counts update.</summary>
+    [RelayCommand(CanExecute = nameof(CanExtend))]
+    private async Task ExtendAsync()
+    {
+        var request = new ParExtendRequest { ParFile = ParFile!, RedundancyPercent = (double)ExtendPercent!.Value, ExtraFiles = ExtraFiles.ToList() };
+        var report = await RunAsync("Adding recovery data", ctx => ParClient.Extend(request, ctx));
+        if (report == null)
+        {
+            return;
+        }
+
+        var message = $"Added {report.RecoveryBlocks:N0} recovery block(s) in {report.WrittenFiles.Count} new file(s).";
+        Log.Add(new LogLine(DateTime.Now, ParLogLevel.Info, message));
+        foreach (var f in report.WrittenFiles)
+        {
+            Log.Add(new LogLine(DateTime.Now, ParLogLevel.Info, "  " + f));
+        }
+
+        await VerifyAsync();
+        StatusText = message;
     }
 
     /// <summary>Opens a file passed on the command line or by a file association.</summary>

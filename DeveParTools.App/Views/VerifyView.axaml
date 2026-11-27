@@ -8,7 +8,7 @@
     <!-- Header -->
     <StackPanel Grid.Row="0" Spacing="2">
       <TextBlock Classes="Title" Text="Verify &amp; repair" />
-      <TextBlock Classes="Subtitle" Text="Open a .par, .par2 or .par3 file: every file and every block is checked, wherever it is." />
+      <TextBlock Classes="Subtitle" Text="Open a .par, .par2 or .par3 file (or an archive with PAR3 data inside): every file and every block is checked, wherever it is." />
     </StackPanel>
 
     <!-- Input -->
@@ -25,6 +25,12 @@
           <CheckBox Content="Delete damaged originals (no backups)" IsChecked="{Binding PurgeBackups}" Margin="0,0,20,0" />
           <CheckBox Content="Restore permissions (PAR3)" IsChecked="{Binding RestorePermissions}" Margin="0,0,20,0" />
           <CheckBox Content="Restore links (PAR3)" IsChecked="{Binding RestoreLinks}" Margin="0,0,20,0" />
+          <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,0,20,0" IsVisible="{Binding CanOfferExtend}">
+            <TextBlock VerticalAlignment="Center" Text="Add" />
+            <NumericUpDown Value="{Binding ExtendPercent}" Minimum="1" Maximum="200" Increment="1" FormatString="0" Width="120" />
+            <TextBlock VerticalAlignment="Center" Text="% recovery data" />
+            <Button Content="Add" Command="{Binding ExtendCommand}" ToolTip.Tip="Writes new recovery files next to the set; the existing ones stay as they are." />
+          </StackPanel>
           <Button Content="Add extra files to search…" Command="{Binding AddExtraFilesCommand}" Margin="0,0,10,0" />
           <ItemsControl ItemsSource="{Binding ExtraFiles}">
             <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>

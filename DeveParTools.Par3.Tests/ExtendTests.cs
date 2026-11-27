@@ -78,10 +78,12 @@ public sealed class ExtendTests
         StringAssert.Contains(created.CodeDescription, "FFT");
 
         var ex = Assert.ThrowsExactly<ArgumentException>(() => Par3Extender.Extend(new Par3ExtendOptions { Par3Path = dir["set.par3"], RecoveryBlockCount = 7 }));
-        StringAssert.Contains(ex.Message, "at most 8");
+        StringAssert.Contains(ex.Message, "at most 8 recovery blocks");
+        StringAssert.Contains(ex.Message, "at most 6 more");
 
         var extended = Par3Extender.Extend(new Par3ExtendOptions { Par3Path = dir["set.par3"], RecoveryBlockCount = 6 });
         Assert.AreEqual(6, extended.RecoveryBlocks);
+        StringAssert.Contains(Assert.ThrowsExactly<ArgumentException>(() => Par3Extender.Extend(new Par3ExtendOptions { Par3Path = dir["set.par3"], RecoveryBlockCount = 1, FirstRecoveryBlock = 9 })).Message, "at most 0 more");
         AssertNewBlocksRepair(dir, created.WrittenFiles.Skip(1).ToList(), contents, 5 * 4096);
     }
 

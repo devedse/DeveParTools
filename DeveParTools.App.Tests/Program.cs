@@ -76,6 +76,30 @@ Await(shell.Verify.RepairCommand.ExecuteAsync(null));
 Check(shell.Verify.StatusText?.StartsWith("Repaired") == true, "repair succeeded: " + shell.Verify.StatusText);
 Save(window, output, "verify-repaired");
 
+// Extend: the set is complete again, so more recovery data can be added.
+Check(shell.Verify.CanOfferExtend && shell.Verify.ExtendCommand.CanExecute(null), "extend is offered for a complete PAR3 set");
+int recoveryBefore = shell.Verify.RecoveryAvailable;
+shell.Verify.ExtendPercent = 3; // the FFT set was made for up to 1024 recovery blocks and has 899
+Await(shell.Verify.ExtendCommand.ExecuteAsync(null));
+Check(shell.Verify.RecoveryAvailable > recoveryBefore && shell.Verify.StatusText?.StartsWith("Added") == true, $"extend added recovery blocks: {recoveryBefore} -> {shell.Verify.RecoveryAvailable} ({shell.Verify.StatusText})");
+
+// PAR inside: protect a ZIP through the Create page, then verify the ZIP itself.
+var zipPath = Path.Combine(work, "photos.zip");
+System.IO.Compression.ZipFile.CreateFromDirectory(Path.Combine(work, "photos"), zipPath);
+shell.Page = AppPage.Create;
+shell.Create.ClearInputsCommand.Execute(null);
+shell.Create.Add(zipPath);
+shell.Create.FormatIndex = 1;
+Check(shell.Create.CanInsertIntoArchive, "PAR inside is offered for a single archive");
+shell.Create.InsideArchive = true;
+shell.Create.Redundancy = 5;
+Await(shell.Create.CreateCommand.ExecuteAsync(null));
+Check(shell.Create.StatusText?.Contains("now carries", StringComparison.Ordinal) == true, "archive protected: " + shell.Create.StatusText);
+shell.Page = AppPage.Verify;
+Await(shell.Verify.OpenAsync(zipPath));
+Check(shell.Verify.Report is { AllFilesComplete: true, Format: DeveParTools.ParFormat.Par3 }, "the archive verifies itself");
+Save(window, output, "verify-inside-zip");
+
 shell.Page = AppPage.Benchmark;
 shell.Benchmark.TimePerItem = TimeSpan.FromMilliseconds(120);
 Await(shell.Benchmark.RunCommand.ExecuteAsync(null));

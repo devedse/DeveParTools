@@ -88,6 +88,8 @@
                 <CheckBox Content="Store permissions" IsChecked="{Binding UnixPermissions}" Margin="0,0,16,0" />
                 <CheckBox Content="Reproducible output" IsChecked="{Binding Reproducible}" />
               </WrapPanel>
+              <CheckBox IsVisible="{Binding CanInsertIntoArchive}" IsChecked="{Binding InsideArchive}"
+                        Content="Store the recovery data inside the archive itself, so it can repair itself (PAR inside)" />
             </StackPanel>
           </Grid>
         </Border>

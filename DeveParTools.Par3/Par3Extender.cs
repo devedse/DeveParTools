@@ -97,7 +97,8 @@ public static class Par3Extender
             ulong capacity = fft.Field == null ? 1 : (ulong)fft.M * (ulong)fft.Cohorts;
             if (indices[^1] >= capacity)
             {
-                throw new ArgumentException($"This FFT set holds at most {capacity} recovery blocks (indices 0 to {capacity - 1}); it was created for that maximum.");
+                ulong room = first >= capacity ? 0 : capacity - first;
+                throw new ArgumentException($"This FFT set holds at most {capacity} recovery blocks (the maximum chosen when it was created), so at most {room} more can be added from block {first} on.");
             }
         }
         else if (generator.Length < 8)
