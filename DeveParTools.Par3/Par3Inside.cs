@@ -526,10 +526,7 @@ public static class Par3Inside
         var setId = Par3PacketWriter.ComputeSetId(unique, StartBody(plan));
         var common = Common(setId, plan, (ulong)length, footer, packetBytes, Path.GetFileName(path), Fingerprint.FromBytes(hash), crc16k, checks, dataTail, footerTail);
         var creator = Par3PacketWriter.Text(setId, Par3PacketTypes.Creator, creatorText);
-        if (common.Sum(p => (long)p.Length) != plan.CommonBytes || creator.Length != plan.CreatorBytes)
-        {
-            throw new InvalidOperationException("Internal error: packet sizes differ from the plan.");
-        }
+        System.Diagnostics.Debug.Assert(common.Sum(p => (long)p.Length) == plan.CommonBytes && creator.Length == plan.CreatorBytes, "packet sizes differ from the plan");
 
         return new Packets(setId, common, creator, Par3PacketWriter.ChecksumOf(common[^1]), Par3PacketWriter.ChecksumOf(common[1]), source, handles);
     }
@@ -552,32 +549,27 @@ public static class Par3Inside
                 pos += bytes.Length;
             }
 
-            // [common][recovery group][common][recovery group]...[common][creator]
+            // [common][recovery group][common]...[recovery group][common][creator]: Repeats copies of the common packets,
+            // with the recovery packets split as evenly as possible into Repeats − 1 groups (group g holds blocks
+            // g·n/(R−1) up to (g+1)·n/(R−1)).
             var recoveryIndices = Enumerable.Range(0, plan.RecoveryBlocks).Select(i => (ulong)i).ToList();
             var outputs = new (FileStream, long, byte[])[plan.RecoveryBlocks];
-            int perGroup = (plan.RecoveryBlocks + plan.Repeats - 2) / (plan.Repeats - 1);
+            int groups = plan.Repeats - 1;
             Put(common);
-            for (int r = 0; r < plan.RecoveryBlocks; r++)
+            for (int g = 0; g < groups; g++)
             {
-                var header = Par3PacketWriter.RecoveryDataHeader(packets.SetId, packets.RootChecksum, packets.MatrixChecksum, (ulong)r, bs);
-                outputs[r] = (fs, pos + header.Length, header);
-                pos += header.Length + bs;
-                if ((r + 1) % perGroup == 0 || r == plan.RecoveryBlocks - 1)
+                for (int r = g * plan.RecoveryBlocks / groups; r < (g + 1) * plan.RecoveryBlocks / groups; r++)
                 {
-                    Put(common);
+                    var header = Par3PacketWriter.RecoveryDataHeader(packets.SetId, packets.RootChecksum, packets.MatrixChecksum, (ulong)r, bs);
+                    outputs[r] = (fs, pos + header.Length, header);
+                    pos += header.Length + bs;
                 }
-            }
 
-            for (int c = (plan.RecoveryBlocks + perGroup - 1) / perGroup + 1; c < plan.Repeats; c++)
-            {
                 Put(common);
             }
 
             Put(packets.Creator);
-            if (pos != length + plan.TotalPacketBytes)
-            {
-                throw new InvalidOperationException("Internal error: written size differs from the plan.");
-            }
+            System.Diagnostics.Debug.Assert(pos == length + plan.TotalPacketBytes, "written size differs from the plan");
 
             if (footer > 0)
             {

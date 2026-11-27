@@ -169,4 +169,13 @@ public sealed class ExtendTests
         {
         }
     }
+
+    [TestMethod]
+    public void SetWithoutInputBlocks_CannotBeExtended()
+    {
+        using var dir = new TempDir();
+        dir.Write("empty.bin", []);
+        Par3Creator.Create(new Par3CreateOptions { Inputs = [dir["empty.bin"]], OutputPath = dir["set.par3"], BlockSize = 1024, RecoveryBlockCount = 0 });
+        Assert.ThrowsExactly<InvalidOperationException>(() => Par3Extender.Extend(new Par3ExtendOptions { Par3Path = dir["set.par3"], RecoveryBlockCount = 1 }));
+    }
 }

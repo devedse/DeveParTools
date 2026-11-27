@@ -211,4 +211,110 @@ public sealed class InsideTests
         Par3Creator.Create(new Par3CreateOptions { Inputs = [dir["x.bin"]], OutputPath = dir["x.par3"], BlockSize = 1024, RecoveryBlockCount = 1 });
         Assert.ThrowsExactly<InvalidDataException>(() => Par3Inside.Delete(dir["x.par3"]));
     }
+
+    /// <summary>Rewrites a ZIP's footer as ZIP64: a ZIP64 EOCD record and locator, and an EOCD with saturated fields.</summary>
+    private static byte[] ToZip64(byte[] zip, bool brokenLocator = false)
+    {
+        int eocd = zip.Length - 22;
+        uint cdSize = BinaryPrimitives.ReadUInt32LittleEndian(zip.AsSpan(eocd + 12));
+        uint cdOffset = BinaryPrimitives.ReadUInt32LittleEndian(zip.AsSpan(eocd + 16));
+        ushort entries = BinaryPrimitives.ReadUInt16LittleEndian(zip.AsSpan(eocd + 10));
+        var record = new byte[56];
+        BinaryPrimitives.WriteUInt32LittleEndian(record, 0x06064b50);
+        BinaryPrimitives.WriteUInt64LittleEndian(record.AsSpan(4), 44);
+        BinaryPrimitives.WriteUInt64LittleEndian(record.AsSpan(24), entries);
+        BinaryPrimitives.WriteUInt64LittleEndian(record.AsSpan(32), entries);
+        BinaryPrimitives.WriteUInt64LittleEndian(record.AsSpan(40), cdSize);
+        BinaryPrimitives.WriteUInt64LittleEndian(record.AsSpan(48), cdOffset);
+        var locator = new byte[20];
+        BinaryPrimitives.WriteUInt32LittleEndian(locator, 0x07064b50);
+        BinaryPrimitives.WriteUInt64LittleEndian(locator.AsSpan(8), (ulong)eocd + (brokenLocator ? 7UL : 0));
+        BinaryPrimitives.WriteUInt32LittleEndian(locator.AsSpan(16), 1);
+        var end = zip.AsSpan(eocd, 22).ToArray();
+        BinaryPrimitives.WriteUInt16LittleEndian(end.AsSpan(8), 0xFFFF);
+        BinaryPrimitives.WriteUInt16LittleEndian(end.AsSpan(10), 0xFFFF);
+        BinaryPrimitives.WriteUInt32LittleEndian(end.AsSpan(12), uint.MaxValue);
+        BinaryPrimitives.WriteUInt32LittleEndian(end.AsSpan(16), uint.MaxValue);
+        return [.. zip.AsSpan(0, eocd), .. record, .. locator, .. end];
+    }
+
+    [TestMethod]
+    public void Zip64Footer_IsCopiedWhole()
+    {
+        using var dir = new TempDir();
+        var original = ToZip64(MakeZip(20));
+        dir.Write("z64.zip", original);
+        Assert.AreEqual(98, Par3Inside.ZipFooterLength(dir["z64.zip"], original.Length), "ZIP64 record + locator + EOCD");
+        var result = Par3Inside.Insert(new Par3InsideOptions { ArchivePath = dir["z64.zip"], RedundancyPercent = 10, BlockSize = 64 });
+        CollectionAssert.AreEqual(original.AsSpan(original.Length - 98).ToArray(), File.ReadAllBytes(dir["z64.zip"]).AsSpan((int)result.NewLength - 98).ToArray(), "the footer copy ends the file");
+        Assert.AreEqual(original.Length, Par3Inside.Delete(dir["z64.zip"]));
+        CollectionAssert.AreEqual(original, File.ReadAllBytes(dir["z64.zip"]));
+
+        // A locator that points nowhere: no valid footer.
+        var broken = ToZip64(MakeZip(21), brokenLocator: true);
+        dir.Write("broken64.zip", broken);
+        Assert.ThrowsExactly<InvalidDataException>(() => Par3Inside.ZipFooterLength(dir["broken64.zip"], broken.Length));
+    }
+
+    [TestMethod]
+    public void Zip_DataBetweenCentralDirectoryAndEnd_IsRefused()
+    {
+        using var dir = new TempDir();
+        var zip = MakeZip(22);
+        var padded = zip.AsSpan(0, zip.Length - 22).ToArray().Concat(new byte[50]).Concat(zip.AsSpan(zip.Length - 22).ToArray()).ToArray();
+        dir.Write("gap.zip", padded);
+        StringAssert.Contains(Assert.ThrowsExactly<InvalidDataException>(() => Par3Inside.Insert(new Par3InsideOptions { ArchivePath = dir["gap.zip"] })).Message, "extra data");
+    }
+
+    [TestMethod]
+    public void LargeFooter_GetsFullBlocks_AndSeparateTailBlocks()
+    {
+        using var dir = new TempDir();
+
+        // A 2978-byte comment makes a 3000-byte footer: two full 1024-byte blocks and a 952-byte tail.
+        var original = MakeZip(23, comment: new string('c', 2978));
+        dir.Write("big.zip", original);
+        ulong dataTail = (ulong)(original.Length - 3000) % 1024;
+        Assert.IsTrue(dataTail >= 40 && dataTail + 952 > 1024, $"the two tails need separate blocks (data tail {dataTail})");
+        var result = Par3Inside.Insert(new Par3InsideOptions { ArchivePath = dir["big.zip"], RecoveryBlockCount = 4, BlockSize = 1024 });
+        VerifyRepairDelete(dir, "big.zip", original, result);
+    }
+
+    [TestMethod]
+    public void RecoveryWrittenInSlices_GetsItsChecksumFromDisk()
+    {
+        using var dir = new TempDir();
+        var original = MakeZip(24, files: 2, size: 600_000);
+        dir.Write("slices.zip", original);
+
+        // A tiny memory budget makes the combiner write each recovery block in several slices.
+        var context = new Core.Operations.OperationContext { MemoryBudget = 64 * 1024 };
+        var result = Par3Inside.Insert(new Par3InsideOptions { ArchivePath = dir["slices.zip"], RecoveryBlockCount = 2, BlockSize = 256 * 1024 }, context);
+        VerifyRepairDelete(dir, "slices.zip", original, result);
+    }
+
+    [TestMethod]
+    public void Cancellation_LeavesTheArchiveAsItWas()
+    {
+        using var dir = new TempDir();
+        var original = MakeZip(25);
+        dir.Write("c.zip", original);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        Assert.ThrowsExactly<OperationCanceledException>(() => Par3Inside.Insert(new Par3InsideOptions { ArchivePath = dir["c.zip"] }, new Core.Operations.OperationContext { CancellationToken = cts.Token }));
+        CollectionAssert.AreEqual(original, File.ReadAllBytes(dir["c.zip"]));
+    }
+
+    [TestMethod]
+    public void Delete_FileThatProtectsItselfWithoutAnUnprotectedChunk_IsNotInsideData()
+    {
+        using var dir = new TempDir();
+        dir.Write("a.bin", TestData.Random(26, 3000));
+        Par3Creator.Create(new Par3CreateOptions { Inputs = [dir["a.bin"]], OutputPath = dir["a.par3"], BlockSize = 1024, RecoveryBlockCount = 1 });
+
+        // Append the set to the protected file itself: its File packet now describes the file that carries it.
+        File.WriteAllBytes(dir["a.bin"], [.. dir.Read("a.bin"), .. dir.Read("a.par3")]);
+        File.Delete(dir["a.par3"]);
+        StringAssert.Contains(Assert.ThrowsExactly<InvalidDataException>(() => Par3Inside.Delete(dir["a.bin"])).Message, "no unprotected chunk");
+    }
 }
