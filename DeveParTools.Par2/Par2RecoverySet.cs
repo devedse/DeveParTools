@@ -55,23 +55,35 @@ public sealed class Par2RecoverySet
     public int DamagedPackets { get; init; }
 
     /// <summary>
-    /// Builds a recovery set from packets read from one or more .par2 files. When several sets are present, the
-    /// one with the most packets wins.
+    /// Builds a recovery set from packets read from one or more .par2 files (the file the user named first).
     /// </summary>
+    /// <remarks>
+    /// <para><b>Which set.</b> Files with the same base name can hold packets of other recovery sets (e.g. "set.par2"
+    /// next to "set.old.par2"). Like par2cmdline, the set of the first packet read wins, i.e. the set of the file the
+    /// user named; packets of sets without a main packet are skipped for that choice, so a stray packet cannot
+    /// select a set that cannot be used. Returns null when no main packet exists at all.</para>
+    /// <para><b>Duplicates.</b> Critical packets are repeated in every volume file. The first intact copy of each
+    /// packet is used, except for a slice checksum packet whose entry count does not match the file length (which
+    /// only a broken client writes): it is ignored, as par2cmdline does, and the file is then verified by its
+    /// whole-file MD5 alone.</para>
+    /// </remarks>
     public static Par2RecoverySet? Assemble(IReadOnlyList<Par2FileReadResult> files)
     {
         var all = files.SelectMany(f => f.Packets).ToList();
-        var mains = all.OfType<Par2MainPacket>().ToList();
-        if (mains.Count == 0)
+        var mains = new Dictionary<Md5Hash, Par2MainPacket>();
+        foreach (var m in all.OfType<Par2MainPacket>())
+        {
+            mains.TryAdd(m.SetId, m);
+        }
+
+        var first = all.FirstOrDefault(p => mains.ContainsKey(p.SetId));
+        if (first == null)
         {
             return null;
         }
 
-        var setId = all.Where(p => mains.Any(m => m.SetId == p.SetId))
-            .GroupBy(p => p.SetId)
-            .OrderByDescending(g => g.Count())
-            .First().Key;
-        var main = mains.First(m => m.SetId == setId);
+        var setId = first.SetId;
+        var main = mains[setId];
         var packets = all.Where(p => p.SetId == setId).ToList();
 
         var descriptions = new Dictionary<Md5Hash, Par2FileDescriptionPacket>();
@@ -83,7 +95,11 @@ public sealed class Par2RecoverySet
         var checksums = new Dictionary<Md5Hash, Par2SliceChecksumPacket>();
         foreach (var c in packets.OfType<Par2SliceChecksumPacket>())
         {
-            checksums.TryAdd(c.FileId, c);
+            bool fits = !descriptions.TryGetValue(c.FileId, out var d) || c.Slices.Count == (d.Length + main.SliceSize - 1) / main.SliceSize;
+            if (fits)
+            {
+                checksums.TryAdd(c.FileId, c);
+            }
         }
 
         var unicodeNames = new Dictionary<Md5Hash, string>();
@@ -154,38 +170,31 @@ public sealed class Par2RecoverySet
     }
 
     /// <summary>
-    /// Finds the .par2 files belonging to <paramref name="par2Path"/>: the file itself plus every
-    /// "basename.*.par2" / "basename.par2" sibling (case-insensitive), as par2cmdline does.
+    /// Finds the .par2 files belonging to <paramref name="par2Path"/>: the file itself first, then every
+    /// "basename.*.par2" sibling (case-insensitive) in name order, as par2cmdline does.
     /// </summary>
+    /// <remarks>
+    /// The base name is the file name without ".par2" and without a volume part ".volNN+MM" / ".volNN-MM" (the part
+    /// after the last dot must be "vol", digits, an optional '+' or '-' and digits, matched like par2cmdline):
+    /// <code>
+    /// set.par2              → set     (finds set.vol00+01.par2, set.vol01+02.par2, ...)
+    /// set.vol07+08.PAR2     → set     (finds set.par2 too)
+    /// my.volume.par2        → my.volume
+    /// </code>
+    /// </remarks>
     public static List<string> DiscoverFiles(string par2Path)
     {
         var full = Path.GetFullPath(par2Path);
         var dir = Path.GetDirectoryName(full)!;
-        var name = Path.GetFileName(full);
-        string baseName = name;
-        if (baseName.EndsWith(".par2", StringComparison.OrdinalIgnoreCase))
-        {
-            baseName = baseName[..^5];
-        }
-
-        int vol = baseName.LastIndexOf(".vol", StringComparison.OrdinalIgnoreCase);
-        if (vol > 0)
-        {
-            baseName = baseName[..vol];
-        }
-
+        var baseName = BaseNameOf(Path.GetFileName(full));
         var result = new List<string> { full };
         if (Directory.Exists(dir))
         {
-            foreach (var f in Directory.EnumerateFiles(dir))
+            foreach (var f in Directory.EnumerateFiles(dir).Order(StringComparer.Ordinal))
             {
                 var fn = Path.GetFileName(f);
-                if (!fn.EndsWith(".par2", StringComparison.OrdinalIgnoreCase) || string.Equals(f, full, StringComparison.Ordinal))
-                {
-                    continue;
-                }
-
-                if (fn.StartsWith(baseName + ".", StringComparison.OrdinalIgnoreCase))
+                if (fn.EndsWith(".par2", StringComparison.OrdinalIgnoreCase) && !string.Equals(f, full, StringComparison.Ordinal)
+                    && fn.StartsWith(baseName + ".", StringComparison.OrdinalIgnoreCase))
                 {
                     result.Add(f);
                 }
@@ -193,5 +202,37 @@ public sealed class Par2RecoverySet
         }
 
         return result;
+    }
+
+    /// <summary>"set.vol03+04.par2" → "set"; see <see cref="DiscoverFiles"/>.</summary>
+    internal static string BaseNameOf(string fileName)
+    {
+        var name = fileName.EndsWith(".par2", StringComparison.OrdinalIgnoreCase) ? fileName[..^5] : fileName;
+        int dot = name.LastIndexOf('.');
+        return dot >= 0 && IsVolumeTag(name.AsSpan(dot + 1)) ? name[..dot] : name;
+    }
+
+    /// <summary>"vol" + digits + optional ('+' or '-') + digits, case-insensitive: "vol0+1", "VOL12-3", "vol7".</summary>
+    private static bool IsVolumeTag(ReadOnlySpan<char> tail)
+    {
+        if (!tail.StartsWith("vol", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        bool separatorSeen = false;
+        foreach (var c in tail[3..])
+        {
+            if (c is '+' or '-' && !separatorSeen)
+            {
+                separatorSeen = true;
+            }
+            else if (!char.IsAsciiDigit(c))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }
