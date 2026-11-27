@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsAotCompatible>true</IsAotCompatible>
+    <Description>PAR 3.0 (Parity Volume Set 3.0, draft) create, verify and repair for DeveParTools, including the par3cmdline FFT extension.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\DeveParTools.Core\DeveParTools.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="DeveParTools.Par3.Tests" />
+  </ItemGroup>
+</Project>

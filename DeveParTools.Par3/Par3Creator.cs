@@ -1,0 +1,832 @@
+using System.Security.Cryptography;
+using DeveParTools.Core.Codes;
+using DeveParTools.Core.Galois;
+using DeveParTools.Core.Hashing;
+using DeveParTools.Core.IO;
+using DeveParTools.Core.Operations;
+using DeveParTools.Core.Util;
+using DeveParTools.Par3.Packets;
+
+namespace DeveParTools.Par3;
+
+public enum Par3Code
+{
+    /// <summary>Cauchy for small sets, FFT for larger ones.</summary>
+    Auto,
+
+    /// <summary>Cauchy matrix (Reed-Solomon, readable by every PAR3 client).</summary>
+    Cauchy,
+
+    /// <summary>par3cmdline's FFT Reed-Solomon (Leopard). Much faster for large sets.</summary>
+    Fft,
+}
+
+public enum Par3Dedup
+{
+    None,
+
+    /// <summary>Identical block-aligned blocks (in the same or different files) are stored once.</summary>
+    Blocks,
+}
+
+public sealed class Par3CreateOptions
+{
+    /// <summary>Files and/or directories to protect.</summary>
+    public required IReadOnlyList<string> Inputs { get; init; }
+
+    /// <summary>Path of the index file, e.g. "/data/set.par3".</summary>
+    public required string OutputPath { get; init; }
+
+    /// <summary>Directory names are relative to (default: directory of <see cref="OutputPath"/>).</summary>
+    public string? BaseDirectory { get; init; }
+
+    public bool Recursive { get; init; } = true;
+
+    /// <summary>Block size in bytes (a multiple of 8). When null it is derived from <see cref="BlockCount"/>.</summary>
+    public ulong? BlockSize { get; init; }
+
+    public int BlockCount { get; init; } = 2000;
+
+    public int? RecoveryBlockCount { get; init; }
+
+    public double RedundancyPercent { get; init; } = 10;
+
+    public ulong FirstRecoveryBlock { get; init; }
+
+    /// <summary>FFT only: the most recovery blocks this set may ever get (later "extend" can add up to it).</summary>
+    public int? MaxRecoveryBlocks { get; init; }
+
+    public Par3Code Code { get; init; } = Par3Code.Auto;
+
+    public Par3Dedup Dedup { get; init; } = Par3Dedup.None;
+
+    /// <summary>Pack file tails of 40+ bytes together into shared blocks.</summary>
+    public bool PackTails { get; init; } = true;
+
+    /// <summary>Also store the input data in the PAR3 files ("archive" mode, .partXX+YY.par3 files).</summary>
+    public bool StoreData { get; init; }
+
+    /// <summary>Number of recovery files; null = exponential sizing (1, 2, 4, ...).</summary>
+    public int? VolumeCount { get; init; }
+
+    public string? Comment { get; init; }
+
+    public string Creator { get; init; } = Par3Creator.DefaultCreator;
+
+    public bool UnixPermissions { get; init; }
+
+    public bool FatPermissions { get; init; }
+
+    /// <summary>Derive the unique number from the contents so identical inputs give identical files.</summary>
+    public bool Reproducible { get; init; }
+
+    /// <summary>FFT only: number of extra cohorts (0 = automatic).</summary>
+    public int Interleave { get; init; }
+
+    /// <summary>Cauchy x_I convention (par3cmdline-compatible by default).</summary>
+    public Par3CauchyConvention CauchyConvention { get; init; } = Par3CauchyConvention.Par3cmdline;
+}
+
+public sealed class Par3CreateResult
+{
+    public required InputSetId SetId { get; init; }
+
+    public required ulong BlockSize { get; init; }
+
+    public required ulong InputBlocks { get; init; }
+
+    public required int RecoveryBlocks { get; init; }
+
+    public required string CodeDescription { get; init; }
+
+    public required IReadOnlyList<string> WrittenFiles { get; init; }
+}
+
+/// <summary>Creates PAR 3.0 recovery sets.</summary>
+public static class Par3Creator
+{
+    public const string DefaultCreator = "DeveParTools (https://github.com/devedse/DeveParTools)";
+
+    private sealed class FileInfoEntry
+    {
+        public required string FullPath { get; init; }
+
+        public required string RelativePath { get; init; }
+
+        public required long Length { get; init; }
+
+        public Fingerprint FileHash { get; set; }
+
+        public ulong Hash16k { get; set; }
+
+        public BlockChecksum[] BlockChecks { get; set; } = [];
+
+        public byte[]? InlineTail { get; set; }
+
+        public ulong TailCrc { get; set; }
+
+        public Fingerprint TailHash { get; set; }
+
+        public ulong TailBlock { get; set; }
+
+        public ulong TailOffset { get; set; }
+
+        public ulong[] BlockIndices { get; set; } = [];
+
+        public List<Par3Chunk> Chunks { get; } = new();
+
+        public Fingerprint PacketChecksum { get; set; }
+
+        public byte[] Packet { get; set; } = [];
+
+        public List<byte[]> OptionPackets { get; } = new();
+    }
+
+    public static Par3CreateResult Create(Par3CreateOptions options, OperationContext? context = null)
+    {
+        context ??= OperationContext.Default;
+        var observer = context.Observer;
+        var token = context.CancellationToken;
+        var outputPath = Path.GetFullPath(options.OutputPath);
+        var baseDir = Path.GetFullPath(options.BaseDirectory ?? Path.GetDirectoryName(outputPath)!);
+
+        // 1. Input tree.
+        observer.Stage("Preparing");
+        var (files, directories) = Enumerate(options, baseDir);
+        if (files.Count == 0 && directories.Count == 0)
+        {
+            throw new ArgumentException("No input files.");
+        }
+
+        long total = files.Sum(f => f.Length);
+        ulong blockSize = options.BlockSize ?? ChooseBlockSize(total, options.BlockCount);
+        if (blockSize == 0 || blockSize % 8 != 0)
+        {
+            throw new ArgumentException("Block size must be a positive multiple of 8.");
+        }
+
+        // 2. Hash every file once: block checksums, tails, file hash, 16 KiB rolling hash.
+        observer.Stage("Hashing");
+        HashFiles(files, blockSize, context);
+
+        // 3. Block numbering (with optional deduplication) and tail packing.
+        var blockPieces = new List<List<(ulong BlockOffset, ulong Length, PieceSource Source)>>();
+        var blockChecks = new List<BlockChecksum?>();
+        var dedup = new Dictionary<Fingerprint, ulong>();
+        foreach (var f in files)
+        {
+            int full = (int)((ulong)f.Length / blockSize);
+            f.BlockIndices = new ulong[full];
+            for (int b = 0; b < full; b++)
+            {
+                var check = f.BlockChecks[b];
+                if (options.Dedup == Par3Dedup.Blocks && dedup.TryGetValue(check.Hash, out var existing) && blockChecks[(int)existing]!.Value.Crc64 == check.Crc64)
+                {
+                    f.BlockIndices[b] = existing;
+                    continue;
+                }
+
+                ulong idx = (ulong)blockPieces.Count;
+                blockPieces.Add([(0, blockSize, new PieceSource(f.FullPath, b * (long)blockSize))]);
+                blockChecks.Add(check);
+                dedup.TryAdd(check.Hash, idx);
+                f.BlockIndices[b] = idx;
+            }
+        }
+
+        // Tails of 40+ bytes go into blocks (packed first-fit when enabled).
+        var openTailBlocks = new List<(ulong Index, ulong Used)>();
+        foreach (var f in files.OrderByDescending(f => (ulong)f.Length % blockSize))
+        {
+            ulong tail = (ulong)f.Length % blockSize;
+            if (tail < Par3Chunk.InlineLimit)
+            {
+                continue;
+            }
+
+            int slot = options.PackTails ? openTailBlocks.FindIndex(t => blockSize - t.Used >= tail) : -1;
+            if (slot < 0)
+            {
+                ulong idx = (ulong)blockPieces.Count;
+                blockPieces.Add(new List<(ulong, ulong, PieceSource)>());
+                blockChecks.Add(null);
+                openTailBlocks.Add((idx, 0));
+                slot = openTailBlocks.Count - 1;
+            }
+
+            var (tailIdx, used) = openTailBlocks[slot];
+            f.TailBlock = tailIdx;
+            f.TailOffset = used;
+            blockPieces[(int)tailIdx].Add((used, tail, new PieceSource(f.FullPath, f.Length - (long)tail)));
+            openTailBlocks[slot] = (tailIdx, used + tail);
+        }
+
+        ulong blockCount = (ulong)blockPieces.Count;
+        using var handles = new FileHandleCache();
+        var pieceArray = blockPieces.Select(p => (IReadOnlyList<(ulong, ulong, PieceSource)>)p).ToArray();
+        var blockSource = new Par3BlockSource(pieceArray, handles);
+
+        // Checksums of tail-packed blocks.
+        var buf = new byte[blockSize];
+        for (int i = 0; i < blockChecks.Count; i++)
+        {
+            if (blockChecks[i] == null)
+            {
+                blockSource.ReadBlock(i, 0, buf);
+                blockChecks[i] = new BlockChecksum(Crc64Iso.Compute(buf), Fingerprint.Compute(buf));
+            }
+        }
+
+        // Chunks: maximal runs of consecutive block indices, the last one carries the tail.
+        foreach (var f in files)
+        {
+            BuildChunks(f, blockSize);
+        }
+
+        // 4. Recovery parameters, field and code.
+        int recoveryCount = blockCount == 0 ? 0 : options.RecoveryBlockCount ?? (int)Math.Ceiling(blockCount * options.RedundancyPercent / 100.0);
+        if (recoveryCount < 0)
+        {
+            throw new ArgumentException("Recovery block count must not be negative.");
+        }
+
+        var code = options.Code;
+        if (code == Par3Code.Auto)
+        {
+            code = blockCount + (ulong)recoveryCount <= 256 || (ulong)recoveryCount > blockCount ? Par3Code.Cauchy : Par3Code.Fft;
+        }
+
+        if (code == Par3Code.Fft && (ulong)Math.Max(recoveryCount, options.MaxRecoveryBlocks ?? 0) > blockCount)
+        {
+            throw new ArgumentException("The FFT code needs at least as many input blocks as recovery blocks; use the Cauchy code.");
+        }
+
+        byte[] generator;
+        Par3Fft.Layout? fftLayout = null;
+        int maxRecovery = Math.Max(recoveryCount + (int)options.FirstRecoveryBlock, options.MaxRecoveryBlocks ?? 0);
+        if (code == Par3Code.Fft && recoveryCount > 0)
+        {
+            int cohorts = options.Interleave > 0 ? options.Interleave + 1 : Par3Fft.ChooseCohorts(blockCount, maxRecovery);
+            fftLayout = Par3Fft.Plan(blockCount, maxRecovery, cohorts);
+            generator = fftLayout.Field == null ? [] : fftLayout.Field.Bits == 8 ? [0x1D] : [0x2D, 0x00];
+        }
+        else
+        {
+            ulong needed = blockCount + options.FirstRecoveryBlock + (ulong)recoveryCount;
+            // Cauchy needs x_I = I+1 and y_R = MAX-R to never collide: blocks + recovery ≤ 2^bits - 1.
+            generator = needed <= 255 ? [0x1D] : needed <= 65535 ? [0x0B, 0x10] : [0x8D, 0, 0, 0];
+        }
+
+        // 5. Packets.
+        observer.Stage("Writing metadata");
+        ulong unique = options.Reproducible ? ReproducibleUnique(files, blockSize, generator) : BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8));
+        var startBody = Par3PacketWriter.StartBody(default, default, blockSize, generator);
+        var setId = Par3PacketWriter.ComputeSetId(unique, startBody);
+        var vital = new List<byte[]>
+        {
+            Par3PacketWriter.Build(setId, Par3PacketTypes.Start, startBody),
+        };
+
+        byte[] matrixPacket = fftLayout != null
+            ? Par3PacketWriter.Fft(setId, 0, 0, (byte)LeopardLog2(fftLayout.M), (uint)(fftLayout.Cohorts - 1))
+            : Par3PacketWriter.Cauchy(setId, 0, 0, (ulong)maxRecovery);
+        var matrixChecksum = Par3PacketWriter.ChecksumOf(matrixPacket);
+        vital.Add(matrixPacket);
+
+        // External data packets (block checksums), at most 1024 blocks per packet.
+        for (ulong first = 0; first < blockCount; first += 1024)
+        {
+            var slice = blockChecks.Skip((int)first).Take((int)Math.Min(1024, blockCount - first)).Select(c => c!.Value).ToList();
+            vital.Add(Par3PacketWriter.ExternalData(setId, first, slice));
+        }
+
+        // Option packets, file packets, directory packets (bottom-up) and the root.
+        var optionCache = new Dictionary<Fingerprint, byte[]>();
+        foreach (var f in files)
+        {
+            var opts = MakeOptions(setId, f.FullPath, options, optionCache);
+            var name = Path.GetFileName(f.RelativePath.Replace('/', Path.DirectorySeparatorChar));
+            f.Packet = Par3PacketWriter.File(setId, name, f.Hash16k, f.FileHash, opts, f.Chunks, blockSize);
+            f.PacketChecksum = Par3PacketWriter.ChecksumOf(f.Packet);
+            vital.Add(f.Packet);
+        }
+
+        var dirChecksums = new Dictionary<string, Fingerprint>(StringComparer.Ordinal);
+        foreach (var dir in directories.OrderByDescending(d => d.Count(ch => ch == '/')).ThenBy(d => d, StringComparer.Ordinal))
+        {
+            var children = ChildrenOf(dir, files, dirChecksums);
+            var opts = MakeOptions(setId, Path.Combine(baseDir, dir.Replace('/', Path.DirectorySeparatorChar)), options, optionCache, isDirectory: true);
+            var packet = Par3PacketWriter.Directory(setId, dir[(dir.LastIndexOf('/') + 1)..], opts, children);
+            dirChecksums[dir] = Par3PacketWriter.ChecksumOf(packet);
+            vital.Add(packet);
+        }
+
+        var rootPacket = Par3PacketWriter.Root(setId, blockCount, false, [], ChildrenOf(string.Empty, files, dirChecksums));
+        var rootChecksum = Par3PacketWriter.ChecksumOf(rootPacket);
+        vital.Add(rootPacket);
+        vital.InsertRange(1, optionCache.Values);
+        if (!string.IsNullOrEmpty(options.Comment))
+        {
+            vital.Add(Par3PacketWriter.Text(setId, Par3PacketTypes.Comment, options.Comment));
+        }
+
+        var creatorPacket = Par3PacketWriter.Text(setId, Par3PacketTypes.Creator, options.Creator);
+
+        // 6. Recovery data.
+        var map = context.CreateBlockMap((int)blockCount, recoveryCount);
+        var written = new List<string> { outputPath };
+        var volumes = PlanVolumes(outputPath, options, recoveryCount, ".vol");
+        var recoveryIndices = Enumerable.Range(0, recoveryCount).Select(i => options.FirstRecoveryBlock + (ulong)i).ToList();
+        if (recoveryCount > 0)
+        {
+            observer.Stage("Encoding");
+            WriteRecovery(setId, rootChecksum, matrixChecksum, generator, fftLayout, blockCount, recoveryIndices, volumes, blockSource, (long)blockSize, vital, creatorPacket, options, context, map);
+            written.AddRange(volumes.Select(v => v.Path));
+        }
+
+        // 7. Data packets (archive mode).
+        if (options.StoreData && blockCount > 0)
+        {
+            written.AddRange(WriteDataPackets(setId, outputPath, blockCount, blockSource, blockSize, vital, creatorPacket, options));
+        }
+
+        // 8. Index file: every vital packet once, plus the creator.
+        using (var index = new FileStream(outputPath, FileMode.Create, FileAccess.Write))
+        {
+            foreach (var p in vital)
+            {
+                index.Write(p);
+            }
+
+            index.Write(creatorPacket);
+        }
+
+        observer.Progress(1);
+        return new Par3CreateResult
+        {
+            SetId = setId,
+            BlockSize = blockSize,
+            InputBlocks = blockCount,
+            RecoveryBlocks = recoveryCount,
+            CodeDescription = fftLayout != null
+                ? $"FFT Reed-Solomon ({(fftLayout.Field == null ? "XOR" : $"GF(2^{fftLayout.Field.Bits})")}, {fftLayout.Cohorts} cohort(s))"
+                : $"Cauchy Reed-Solomon (GF(2^{generator.Length * 8}))",
+            WrittenFiles = written,
+        };
+    }
+
+    public static ulong ChooseBlockSize(long total, int targetCount)
+    {
+        targetCount = Math.Max(1, targetCount);
+        ulong size = (ulong)Math.Max(1, (total + targetCount - 1) / targetCount);
+        size = Math.Max(64, (size + 7) / 8 * 8);
+        return size;
+    }
+
+    private static int LeopardLog2(int m) => System.Numerics.BitOperations.Log2((uint)m);
+
+    private static (List<FileInfoEntry> Files, List<string> Directories) Enumerate(Par3CreateOptions options, string baseDir)
+    {
+        var files = new Dictionary<string, FileInfoEntry>(StringComparer.Ordinal);
+        var dirs = new HashSet<string>(StringComparer.Ordinal);
+        void AddDirChain(string rel)
+        {
+            var parts = rel.Split('/');
+            for (int i = 1; i < parts.Length; i++)
+            {
+                dirs.Add(string.Join('/', parts.Take(i)));
+            }
+        }
+
+        foreach (var input in options.Inputs)
+        {
+            var full = Path.GetFullPath(input);
+            if (Directory.Exists(full))
+            {
+                var rel = PathSafety.ToStoredName(baseDir, full);
+                if (rel != ".")
+                {
+                    dirs.Add(rel);
+                    AddDirChain(rel + "/x");
+                }
+
+                var option = options.Recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
+                foreach (var d in Directory.EnumerateDirectories(full, "*", option))
+                {
+                    var dr = PathSafety.ToStoredName(baseDir, d);
+                    dirs.Add(dr);
+                    AddDirChain(dr + "/x");
+                }
+
+                foreach (var f in Directory.EnumerateFiles(full, "*", option))
+                {
+                    AddFile(f);
+                }
+            }
+            else if (File.Exists(full))
+            {
+                AddFile(full);
+            }
+            else
+            {
+                throw new FileNotFoundException($"Input '{input}' does not exist.", input);
+            }
+        }
+
+        void AddFile(string path)
+        {
+            var full = Path.GetFullPath(path);
+            if (string.Equals(full, Path.GetFullPath(options.OutputPath), StringComparison.Ordinal) || full.EndsWith(".par3", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            var rel = PathSafety.ToStoredName(baseDir, full);
+            AddDirChain(rel);
+            files.TryAdd(rel, new FileInfoEntry { FullPath = full, RelativePath = rel, Length = new FileInfo(full).Length });
+        }
+
+        return (files.Values.OrderBy(f => f.RelativePath, StringComparer.Ordinal).ToList(), dirs.OrderBy(d => d, StringComparer.Ordinal).ToList());
+    }
+
+    private static void HashFiles(List<FileInfoEntry> files, ulong blockSize, OperationContext context)
+    {
+        long total = Math.Max(1, files.Sum(f => f.Length));
+        long done = 0;
+        Parallel.ForEach(files, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, context.Threads), CancellationToken = context.CancellationToken }, f =>
+        {
+            int full = (int)((ulong)f.Length / blockSize);
+            f.BlockChecks = new BlockChecksum[full];
+            var hasher = new Blake3Hasher();
+            using var fs = new FileStream(f.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16, FileOptions.SequentialScan);
+            var buf = new byte[blockSize];
+            ulong crc16k = 0;
+            long pos = 0;
+            for (int b = 0; b <= full; b++)
+            {
+                int want = b < full ? (int)blockSize : (int)((ulong)f.Length % blockSize);
+                if (want == 0)
+                {
+                    break;
+                }
+
+                int n = fs.ReadAtLeast(buf.AsSpan(0, want), want, throwOnEndOfStream: true);
+                var data = buf.AsSpan(0, n);
+                hasher.Update(data);
+                if (pos < 16384)
+                {
+                    int take = (int)Math.Min(16384 - pos, n);
+                    crc16k = Crc64Iso.Compute(data[..take], crc16k);
+                }
+
+                if (b < full)
+                {
+                    f.BlockChecks[b] = new BlockChecksum(Crc64Iso.Compute(data), Fingerprint.Compute(data));
+                }
+                else if (n < Par3Chunk.InlineLimit)
+                {
+                    f.InlineTail = data.ToArray();
+                }
+                else
+                {
+                    f.TailCrc = Crc64Iso.Compute(data[..Par3Chunk.InlineLimit]);
+                    f.TailHash = Fingerprint.Compute(data);
+                }
+
+                pos += n;
+                context.Observer.Progress((double)Interlocked.Add(ref done, n) / total, "Hashing");
+            }
+
+            var h = new byte[16];
+            hasher.Finalize(h);
+            f.FileHash = Fingerprint.FromBytes(h);
+            f.Hash16k = crc16k;
+        });
+    }
+
+    private static void BuildChunks(FileInfoEntry f, ulong blockSize)
+    {
+        if (f.Length == 0)
+        {
+            return;
+        }
+
+        ulong tail = (ulong)f.Length % blockSize;
+        int i = 0;
+        var idx = f.BlockIndices;
+        while (i < idx.Length)
+        {
+            int j = i + 1;
+            while (j < idx.Length && idx[j] == idx[j - 1] + 1)
+            {
+                j++;
+            }
+
+            bool last = j == idx.Length;
+            f.Chunks.Add(MakeChunk(f, (ulong)(j - i) * blockSize + (last ? tail : 0), idx[i], last ? tail : 0));
+            i = j;
+        }
+
+        if (idx.Length == 0)
+        {
+            f.Chunks.Add(MakeChunk(f, tail, 0, tail));
+        }
+    }
+
+    private static Par3Chunk MakeChunk(FileInfoEntry f, ulong length, ulong firstBlock, ulong tail) => new()
+    {
+        Length = length,
+        FirstBlock = firstBlock,
+        InlineTail = tail is > 0 and < Par3Chunk.InlineLimit ? f.InlineTail : null,
+        TailCrc = tail >= Par3Chunk.InlineLimit ? f.TailCrc : 0,
+        TailHash = tail >= Par3Chunk.InlineLimit ? f.TailHash : default,
+        TailBlock = tail >= Par3Chunk.InlineLimit ? f.TailBlock : 0,
+        TailOffset = tail >= Par3Chunk.InlineLimit ? f.TailOffset : 0,
+    };
+
+    private static List<Fingerprint> ChildrenOf(string dir, List<FileInfoEntry> files, Dictionary<string, Fingerprint> dirChecksums)
+    {
+        var children = new List<Fingerprint>();
+        string prefix = dir.Length == 0 ? string.Empty : dir + "/";
+        foreach (var f in files)
+        {
+            if (f.RelativePath.StartsWith(prefix, StringComparison.Ordinal) && f.RelativePath.IndexOf('/', prefix.Length) < 0)
+            {
+                children.Add(f.PacketChecksum);
+            }
+        }
+
+        foreach (var (d, checksum) in dirChecksums)
+        {
+            if (d.StartsWith(prefix, StringComparison.Ordinal) && d.Length > prefix.Length && d.IndexOf('/', prefix.Length) < 0)
+            {
+                children.Add(checksum);
+            }
+        }
+
+        return children;
+    }
+
+    private static List<Fingerprint> MakeOptions(InputSetId setId, string path, Par3CreateOptions options, Dictionary<Fingerprint, byte[]> cache, bool isDirectory = false)
+    {
+        var list = new List<Fingerprint>();
+        void Add(byte[] packet)
+        {
+            var c = Par3PacketWriter.ChecksumOf(packet);
+            cache.TryAdd(c, packet);
+            list.Add(c);
+        }
+
+        if (options.UnixPermissions)
+        {
+            var info = isDirectory ? (FileSystemInfo)new DirectoryInfo(path) : new FileInfo(path);
+            long mtime = (info.LastWriteTimeUtc - DateTime.UnixEpoch).Ticks * 100;
+            ushort mode = OperatingSystem.IsWindows() ? (ushort)(isDirectory ? 0x1ED : 0x1A4) : (ushort)((int)File.GetUnixFileMode(path) & 0xFFF);
+            Add(Par3PacketWriter.UnixPermissions(setId, Par3UnixPermissionsPacket.UnsetTime, Par3UnixPermissionsPacket.UnsetTime, mtime,
+                Par3UnixPermissionsPacket.UnsetId, Par3UnixPermissionsPacket.UnsetId, mode, string.Empty, string.Empty));
+        }
+
+        if (options.FatPermissions)
+        {
+            var info = isDirectory ? (FileSystemInfo)new DirectoryInfo(path) : new FileInfo(path);
+            const long epochDiff = 504911232000000000L; // 1600-01-01 → 0001-01-01 in 100 ns ticks
+            ushort attributes = (ushort)((int)info.Attributes & 0x2027);
+            Add(Par3PacketWriter.FatPermissions(setId, (ulong)(info.CreationTimeUtc.Ticks - epochDiff), Par3FatPermissionsPacket.UnsetTime,
+                (ulong)(info.LastWriteTimeUtc.Ticks - epochDiff), attributes));
+        }
+
+        return list;
+    }
+
+    private static ulong ReproducibleUnique(List<FileInfoEntry> files, ulong blockSize, byte[] generator)
+    {
+        var h = new Blake3Hasher();
+        h.Update(BitConverter.GetBytes(blockSize));
+        h.Update(generator);
+        foreach (var f in files)
+        {
+            h.Update(System.Text.Encoding.UTF8.GetBytes(f.RelativePath));
+            h.Update(f.FileHash.ToArray());
+        }
+
+        var b = new byte[8];
+        h.Finalize(b);
+        return BitConverter.ToUInt64(b);
+    }
+
+    internal sealed record Volume(string Path, int First, int Count);
+
+    internal static List<Volume> PlanVolumes(string outputPath, Par3CreateOptions options, int count, string marker)
+    {
+        var counts = new List<int>();
+        int remaining = count;
+        if (options.VolumeCount is int n && n > 0)
+        {
+            n = Math.Min(n, Math.Max(1, count));
+            for (int i = 0; i < n && remaining > 0; i++)
+            {
+                int c = (remaining + (n - i) - 1) / (n - i);
+                counts.Add(c);
+                remaining -= c;
+            }
+        }
+        else
+        {
+            int next = 1;
+            while (remaining > 0)
+            {
+                int c = Math.Min(next, remaining);
+                counts.Add(c);
+                remaining -= c;
+                next = (int)Math.Min(int.MaxValue / 2, (long)next * 2);
+            }
+        }
+
+        var baseName = outputPath.EndsWith(".par3", StringComparison.OrdinalIgnoreCase) ? outputPath[..^5] : outputPath;
+        int first = (int)options.FirstRecoveryBlock;
+        int d1 = Math.Max(2, (first + count).ToString().Length);
+        int d2 = Math.Max(2, (counts.Count == 0 ? 0 : counts.Max()).ToString().Length);
+        var result = new List<Volume>();
+        int pos = 0;
+        foreach (var c in counts)
+        {
+            result.Add(new Volume($"{baseName}{marker}{(first + pos).ToString().PadLeft(d1, '0')}+{c.ToString().PadLeft(d2, '0')}.par3", pos, c));
+            pos += c;
+        }
+
+        return result;
+    }
+
+    /// <summary>Copies of each vital packet needed for a 1-in-a-million loss chance (spec Appendix D).</summary>
+    internal static int VitalCopies(int vitalPackets, double failureRate)
+    {
+        double f = Math.Clamp(failureRate, 0.01, 0.5);
+        double n = (Math.Log(1e-6) - Math.Log(Math.Max(1, vitalPackets))) / Math.Log(f);
+        return Math.Max(1, (int)Math.Ceiling(n));
+    }
+
+    private static void WriteRecovery(InputSetId setId, Fingerprint rootChecksum, Fingerprint matrixChecksum, byte[] generator, Par3Fft.Layout? fft, ulong blockCount,
+        List<ulong> recoveryIndices, List<Volume> volumes, Par3BlockSource blocks, long blockSize, List<byte[]> vital, byte[] creator, Par3CreateOptions options, OperationContext context, BlockStateMap map)
+    {
+        int recoveryCount = recoveryIndices.Count;
+        var streams = volumes.Select(v => new FileStream(v.Path, FileMode.Create, FileAccess.ReadWrite, FileShare.Read, 1, FileOptions.RandomAccess)).ToList();
+        try
+        {
+            var outputs = new (FileStream Stream, long DataOffset, byte[] Header)[recoveryCount];
+            for (int v = 0; v < volumes.Count; v++)
+            {
+                long pos = 0;
+                for (int k = 0; k < volumes[v].Count; k++)
+                {
+                    int j = volumes[v].First + k;
+                    var header = Par3PacketWriter.RecoveryDataHeader(setId, rootChecksum, matrixChecksum, recoveryIndices[j], blockSize);
+                    outputs[j] = (streams[v], pos + header.Length, header);
+                    map.RecoveryContainer[j] = Path.GetFileName(volumes[v].Path);
+                    pos += header.Length + blockSize;
+                }
+
+                streams[v].SetLength(pos);
+            }
+
+            var done = new bool[recoveryCount];
+            var sink = new RecoverySink(outputs, blockSize, done, map);
+            var progress = new Progress<double>(p => context.Observer.Progress(p, "Encoding"));
+            var combine = context.Combine.Create(progress);
+            var source = new Par3BlockSource(blocks.Blocks, blocks.Handles) { OnRead = b => map.Set(b, BlockState.Processed) };
+            if (fft != null)
+            {
+                Par3Fft.Encode(fft, blockCount, recoveryIndices, source, sink, blockSize, combine);
+            }
+            else
+            {
+                Par3Fields.With(generator, new CauchyEncode(blockCount, recoveryIndices, source, sink, blockSize, combine, options.CauchyConvention));
+            }
+
+            for (int j = 0; j < recoveryCount; j++)
+            {
+                if (!done[j])
+                {
+                    FinishChecksumFromDisk(outputs[j].Stream, outputs[j].DataOffset, outputs[j].Header, blockSize);
+                }
+
+                RandomAccess.Write(outputs[j].Stream.SafeFileHandle, outputs[j].Header, outputs[j].DataOffset - outputs[j].Header.Length);
+                map.SetRecovery(j, RecoveryBlockState.Created);
+            }
+
+            // Vital packets after the recovery data, repeated per spec Appendix D.
+            int copies = VitalCopies(vital.Count, Math.Max(0.01, (double)recoveryCount / Math.Max(1, (double)blockCount)));
+            int perFile = Math.Max(1, (copies + volumes.Count - 1) / Math.Max(1, volumes.Count));
+            foreach (var s in streams)
+            {
+                s.Seek(0, SeekOrigin.End);
+                for (int c = 0; c < perFile; c++)
+                {
+                    foreach (var p in vital)
+                    {
+                        s.Write(p);
+                    }
+                }
+
+                s.Write(creator);
+            }
+        }
+        finally
+        {
+            foreach (var s in streams)
+            {
+                s.Dispose();
+            }
+        }
+
+        _ = options;
+    }
+
+    private static List<string> WriteDataPackets(InputSetId setId, string outputPath, ulong blockCount, Par3BlockSource blocks, ulong blockSize, List<byte[]> vital, byte[] creator, Par3CreateOptions options)
+    {
+        var parts = PlanVolumes(outputPath, new Par3CreateOptions { Inputs = [], OutputPath = outputPath, VolumeCount = options.VolumeCount }, (int)blockCount, ".part");
+        var buf = new byte[blockSize];
+        foreach (var part in parts)
+        {
+            using var fs = new FileStream(part.Path, FileMode.Create, FileAccess.Write);
+            for (int i = 0; i < part.Count; i++)
+            {
+                ulong idx = (ulong)(part.First + i);
+                blocks.ReadBlock((int)idx, 0, buf);
+                int len = buf.Length;
+                var header = Par3PacketWriter.DataHeader(setId, idx, len);
+                var hasher = new Blake3Hasher();
+                hasher.Update(header.AsSpan(24));
+                hasher.Update(buf.AsSpan(0, len));
+                hasher.Finalize(header.AsSpan(8, 16));
+                fs.Write(header);
+                fs.Write(buf, 0, len);
+            }
+
+            foreach (var p in vital)
+            {
+                fs.Write(p);
+            }
+
+            fs.Write(creator);
+        }
+
+        return parts.Select(p => p.Path).ToList();
+    }
+
+    internal static void FinishChecksumFromDisk(FileStream stream, long dataOffset, byte[] header, long dataLength)
+    {
+        var hasher = new Blake3Hasher();
+        hasher.Update(header.AsSpan(24));
+        var buf = new byte[(int)Math.Min(dataLength, 1 << 20)];
+        long left = dataLength, off = dataOffset;
+        while (left > 0)
+        {
+            int n = (int)Math.Min(left, buf.Length);
+            FileHandleCache.ReadPadded(stream.SafeFileHandle, off, buf.AsSpan(0, n));
+            hasher.Update(buf.AsSpan(0, n));
+            off += n;
+            left -= n;
+        }
+
+        hasher.Finalize(header.AsSpan(8, 16));
+    }
+
+    private sealed class CauchyEncode(ulong blockCount, List<ulong> recoveryIndices, IRegionSource source, IRegionSink sink, long blockSize, LinearCombineOptions options, Par3CauchyConvention convention) : IFieldAction<bool>
+    {
+        public bool Run<T>(IGaloisField<T> field) where T : IEquatable<T>
+        {
+            LinearCombiner.Combine(field, new CauchyCoefficients<T>(field, recoveryIndices, convention), (int)blockCount, recoveryIndices.Count, source, sink, blockSize, options);
+            return true;
+        }
+    }
+
+    internal sealed class CauchyCoefficients<T>(IGaloisField<T> field, IReadOnlyList<ulong> recoveryIndices, Par3CauchyConvention convention) : ICoefficientProvider<T> where T : IEquatable<T>
+    {
+        public void Fill(int output, int firstInput, Span<T> destination)
+        {
+            for (int i = 0; i < destination.Length; i++)
+            {
+                destination[i] = Par3Cauchy.Coefficient(field, recoveryIndices[output], (ulong)(firstInput + i), convention);
+            }
+        }
+    }
+
+    private sealed class RecoverySink((FileStream Stream, long DataOffset, byte[] Header)[] outputs, long blockSize, bool[] done, BlockStateMap map) : IRegionSink
+    {
+        public void Write(int index, long offset, ReadOnlySpan<byte> source)
+        {
+            var (stream, dataOffset, header) = outputs[index];
+            RandomAccess.Write(stream.SafeFileHandle, source, dataOffset + offset);
+            if (offset == 0 && source.Length == blockSize)
+            {
+                var hasher = new Blake3Hasher();
+                hasher.Update(header.AsSpan(24));
+                hasher.Update(source);
+                hasher.Finalize(header.AsSpan(8, 16));
+                done[index] = true;
+            }
+
+            map.SetRecovery(index, RecoveryBlockState.Created);
+        }
+    }
+}
