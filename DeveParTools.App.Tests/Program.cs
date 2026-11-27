@@ -29,6 +29,11 @@ if (OperatingSystem.IsWindows() && args is [AppArguments.CreateSwitch, ..])
     return;
 }
 
+// Pipes and sockets finish their asynchronous work on thread-pool threads. These checks run many blocking operations in
+// one process (the real app spreads them over separate processes), so keep enough pool threads ready that the pipe
+// replies are not held up by a slowly growing pool on small CI runners.
+ThreadPool.GetMinThreads(out int minWorkers, out int minIo);
+ThreadPool.SetMinThreads(Math.Max(32, minWorkers), Math.Max(32, minIo));
 AppBuilder.Configure<App>().UseSkia().UseHeadless(new AvaloniaHeadlessPlatformOptions { UseHeadlessDrawing = false }).SetupWithoutStarting();
 // The view models await background work; their continuations must come back to this (the UI) thread.
 SynchronizationContext.SetSynchronizationContext(new AvaloniaSynchronizationContext());
@@ -60,7 +65,8 @@ Check(ExplorerContextMenu.ExecutableOf(entries[0].Command) == ProgramFilesExe &&
 // A multi-selection in Explorer starts one process per item; the first collects the others' paths.
 {
     var name = "DeveParTools.App.Tests." + Guid.NewGuid().ToString("N")[..12];
-    using var first = CreateRequestCollector.StartOrForward(name, ["item0"], TimeSpan.FromSeconds(2));
+    // A generous idle time: a busy CI runner can take seconds to start six senders (each a process in real life).
+    using var first = CreateRequestCollector.StartOrForward(name, ["item0"], TimeSpan.FromSeconds(10));
     Check(first is { IsCollecting: true }, "the first process of a multi-selection collects");
     var arrived = new List<string>();
     // Each sender on a thread of its own, as each is a process of its own in Explorer: thread-pool tasks that block
@@ -85,7 +91,7 @@ Check(ExplorerContextMenu.ExecutableOf(entries[0].Command) == ProgramFilesExe &&
         Check(arrived.Count == 12 && Enumerable.Range(1, 6).All(i => arrived.Contains($"item{i}") && arrived.Contains($"extra{i}")), $"all paths arrive in the first window, each once ({arrived.Count})");
     }
 
-    var until = DateTime.UtcNow.AddSeconds(10);
+    var until = DateTime.UtcNow.AddSeconds(30);
     while (first.IsCollecting && DateTime.UtcNow < until)
     {
         Thread.Sleep(50);
