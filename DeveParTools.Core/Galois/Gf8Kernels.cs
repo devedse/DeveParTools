@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.Arm;
@@ -198,7 +199,7 @@ public static unsafe class Gf8Kernels
             SimdLevel.Gfni128 => Gfni128Multi(dst, srcs, tables, stride, count, length, overwrite),
             SimdLevel.Gfni256 => Gfni256Multi(dst, srcs, tables, stride, count, length, overwrite),
             SimdLevel.Gfni512 => Gfni512Multi(dst, srcs, tables, stride, count, length, overwrite),
-            _ => 0,
+            _ => ScalarMulti(dst, srcs, tables, stride, count, length, overwrite),
         };
 
         if (done < length)
@@ -214,6 +215,37 @@ public static unsafe class Gf8Kernels
                 dst[pos] = (byte)acc;
             }
         }
+    }
+
+    /// <summary>
+    /// Portable kernel: one 256-entry product table per coefficient, applied source by source, eight bytes per step.
+    /// The eight looked-up products are packed back into a 64-bit word, so the destination is read and written once per
+    /// eight bytes. The byte order does not matter: byte k of the result is the product of byte k of the input.
+    /// </summary>
+    private static nint ScalarMulti(byte* dst, byte** srcs, byte* tables, int stride, int count, nint length, bool overwrite)
+    {
+        nint words = length & ~(nint)7;
+        for (int f = 0; f < count; f++)
+        {
+            byte* t = tables + (nint)f * stride;
+            byte* s = srcs[f];
+            bool store = overwrite && f == 0;
+            for (nint pos = 0; pos < words; pos += 8)
+            {
+                ulong x = Unsafe.ReadUnaligned<ulong>(s + pos);
+                ulong p = t[(byte)x]
+                    | ((ulong)t[(byte)(x >> 8)] << 8)
+                    | ((ulong)t[(byte)(x >> 16)] << 16)
+                    | ((ulong)t[(byte)(x >> 24)] << 24)
+                    | ((ulong)t[(byte)(x >> 32)] << 32)
+                    | ((ulong)t[(byte)(x >> 40)] << 40)
+                    | ((ulong)t[(byte)(x >> 48)] << 48)
+                    | ((ulong)t[(byte)(x >> 56)] << 56);
+                Unsafe.WriteUnaligned(dst + pos, store ? p : p ^ Unsafe.ReadUnaligned<ulong>(dst + pos));
+            }
+        }
+
+        return words;
     }
 
     private static int ScalarProduct(SimdLevel level, IGf8Multiplier field, byte* t, byte x)
