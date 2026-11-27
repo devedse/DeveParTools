@@ -13,6 +13,12 @@ public sealed record AppArguments(IReadOnlyList<string> CreatePaths, string? Ope
 {
     public const string CreateSwitch = "--create";
 
+    /// <summary>
+    /// "--finish-update &lt;program&gt; &lt;process id&gt;": started by an updating app from the new version's extracted
+    /// copy; puts itself at &lt;program&gt; once that process has exited, and starts it (no window of its own).
+    /// </summary>
+    public const string FinishUpdateSwitch = "--finish-update";
+
     public static AppArguments Parse(IReadOnlyList<string> args)
     {
         int create = args.ToList().FindIndex(a => string.Equals(a, CreateSwitch, StringComparison.OrdinalIgnoreCase));

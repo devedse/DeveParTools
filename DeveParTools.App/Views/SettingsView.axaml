@@ -42,6 +42,24 @@
         </StackPanel>
       </Border>
       <Border Classes="Card">
+        <StackPanel Spacing="8">
+          <TextBlock Classes="Section" Text="Updates" />
+          <ToggleSwitch ToolTip.Tip="When DeveParTools starts, ask GitHub whether a newer version was released (at most once a day; only the program's name and version are sent). A banner then offers the update."
+                        IsChecked="{Binding CheckForUpdates}"
+                        OnContent="Check for updates automatically" OffContent="Check for updates automatically"
+                        AutomationProperties.Name="Check for updates automatically" />
+          <TextBlock Text="{Binding Updates.StatusText}" TextWrapping="Wrap" IsVisible="{Binding Updates.StatusText, Converter={x:Static ObjectConverters.IsNotNull}}" />
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button Content="Check now" Command="{Binding Updates.CheckNowCommand}"
+                    ToolTip.Tip="Ask GitHub now for the latest release." />
+            <Button Classes="accent" Content="Update…" Command="{Binding Updates.OpenUpdateWindowCommand}" IsVisible="{Binding Updates.IsUpdateAvailable}"
+                    ToolTip.Tip="Shows what the update does, then downloads and installs it with a progress bar. DeveParTools restarts when it is done." />
+            <Button Content="What's new" Command="{Binding Updates.OpenReleasePageCommand}" IsVisible="{Binding Updates.IsUpdateAvailable}"
+                    ToolTip.Tip="Opens the release page on GitHub." />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+      <Border Classes="Card">
         <StackPanel Spacing="6">
           <TextBlock Classes="Section" Text="About" />
           <TextBlock Text="{Binding Version, StringFormat='DeveParTools {0}'}" FontWeight="SemiBold" />

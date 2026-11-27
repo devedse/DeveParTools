@@ -63,7 +63,7 @@ jobs:
     - name: dotnet test
       shell: bash
       run: |
-        for p in DeveParTools.Core.Tests DeveParTools.Par1.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests DeveParTools.Tests DeveParTools.Cli.Tests; do
+        for p in DeveParTools.Core.Tests DeveParTools.Par1.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests DeveParTools.Tests DeveParTools.Updates.Tests DeveParTools.Cli.Tests; do
           dotnet test --project $p/$p.csproj -c Release --no-build --verbosity normal
         done
         # Interop tests are inconclusive (skipped) where the reference tools are not available.
@@ -154,7 +154,7 @@ jobs:
     - name: dotnet build
       shell: bash
       run: |
-        for p in DeveParTools.Core.Tests DeveParTools.Par1.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests DeveParTools.Tests DeveParTools.InteropTests; do
+        for p in DeveParTools.Core.Tests DeveParTools.Par1.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests DeveParTools.Tests DeveParTools.Updates.Tests DeveParTools.InteropTests; do
           dotnet build $p/$p.csproj -c Release
         done
     - name: Tests with coverage
@@ -162,13 +162,13 @@ jobs:
       shell: bash
       run: |
         mkdir -p TestResults
-        projects="DeveParTools.Core.Tests DeveParTools.Par1.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests DeveParTools.Tests"
+        projects="DeveParTools.Core.Tests DeveParTools.Par1.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests DeveParTools.Tests DeveParTools.Updates.Tests"
         if [ "${{ matrix.interop }}" = "true" ]; then projects="$projects DeveParTools.InteropTests"; fi
         for p in $projects; do
           out="$GITHUB_WORKSPACE/TestResults/coverage.$p.cobertura.xml"
           if [ "${{ matrix.coverlet }}" = "true" ]; then
             (cd $p/bin/Release/net10.0 && coverlet $p.dll --target dotnet --targetargs "exec $p.dll --ignore-exit-code 8" --format cobertura --output "$out" \
-              --include "[DeveParTools]*" --include "[DeveParTools.Core]*" --include "[DeveParTools.Par1]*" --include "[DeveParTools.Par2]*" --include "[DeveParTools.Par3]*" \
+              --include "[DeveParTools]*" --include "[DeveParTools.Core]*" --include "[DeveParTools.Par1]*" --include "[DeveParTools.Par2]*" --include "[DeveParTools.Par3]*" --include "[DeveParTools.Updates]*" \
               --exclude-by-attribute ExcludeFromCodeCoverage)
           else
             (cd $p/bin/Release/net10.0 && dotnet-coverage collect --settings "$GITHUB_WORKSPACE/coverage.runsettings.xml" -f cobertura \

@@ -4,7 +4,7 @@ using DeveParTools.Cli;
 using DeveParTools.Core.Operations;
 using DeveParTools.Par3;
 
-return CliApp.Run(args);
+return CliApp.RunProgram(args);
 
 namespace DeveParTools.Cli
 {
@@ -22,7 +22,7 @@ namespace DeveParTools.Cli
         public const int MemoryError = 8;
     }
 
-    public static class CliApp
+    public static partial class CliApp
     {
         public static int Run(string[] args, TextWriter? output = null, TextWriter? error = null)
         {
@@ -313,7 +313,8 @@ namespace DeveParTools.Cli
                 return ExitCodes.Success;
             }));
 
-            foreach (var cmd in new[] { create, verify, repair, extend, insert, delete, list, bench, info })
+            var update = BuildUpdate(Ctx);
+            foreach (var cmd in new[] { create, verify, repair, extend, insert, delete, list, bench, info, update })
             {
                 root.Subcommands.Add(cmd);
             }
@@ -332,6 +333,11 @@ namespace DeveParTools.Cli
             {
                 c.Error("invalid-arguments", e.Message);
                 return ExitCodes.InvalidArguments;
+            }
+            catch (DeveParTools.Updates.UpdateException e)
+            {
+                c.Error("update-failed", e.Message);
+                return ExitCodes.LogicError;
             }
             catch (InvalidDataException e)
             {

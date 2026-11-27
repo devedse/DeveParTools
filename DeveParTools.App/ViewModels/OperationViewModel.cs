@@ -21,6 +21,9 @@ public interface IViewServices
 
     /// <summary>Opens a link with the system (a web page, or a Settings page such as ms-settings:defaultapps).</summary>
     Task LaunchAsync(Uri uri);
+
+    /// <summary>Shows the update window (download and installation progress) until the user closes it.</summary>
+    Task ShowUpdateAsync(UpdateViewModel updates);
 }
 
 public sealed record LogLine(DateTime Time, ParLogLevel Level, string Message)

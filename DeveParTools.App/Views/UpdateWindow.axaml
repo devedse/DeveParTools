@@ -1,0 +1,44 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:DeveParTools.App.ViewModels"
+        x:Class="DeveParTools.App.Views.UpdateWindow"
+        x:DataType="vm:UpdateViewModel"
+        Title="Update DeveParTools"
+        Icon="/Assets/icon.png"
+        Width="540" SizeToContent="Height" CanResize="False"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
+        Background="{DynamicResource SolidBackgroundFillColorBaseBrush}">
+  <StackPanel Margin="24,20" Spacing="16">
+    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="14">
+      <Image Source="/Assets/icon.png" Width="48" Height="48" VerticalAlignment="Top" />
+      <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+        <TextBlock Text="{Binding WindowTitle}" FontSize="20" FontWeight="SemiBold" />
+        <TextBlock Text="{Binding CurrentVersion, StringFormat='You have {0}.'}" Opacity="0.75" />
+      </StackPanel>
+    </Grid>
+
+    <TextBlock Text="{Binding WindowText}" TextWrapping="Wrap" IsVisible="{Binding !IsBusy}" />
+
+    <!-- Download, extract, replace: one bar for the current step, with the numbers under it. -->
+    <StackPanel Spacing="6" IsVisible="{Binding IsBusy}" AutomationProperties.Name="Update progress">
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBlock Text="{Binding StageText}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+        <TextBlock Grid.Column="1" Text="{Binding PercentText}" Margin="12,0,0,0" />
+      </Grid>
+      <ProgressBar Value="{Binding Progress}" Maximum="100" MinHeight="6"
+                   IsIndeterminate="{Binding IsIndeterminate}" />
+      <TextBlock Text="{Binding ProgressText}" Opacity="0.75" IsVisible="{Binding ProgressText, Converter={x:Static ObjectConverters.IsNotNull}}" />
+    </StackPanel>
+
+    <TextBlock Text="{Binding Error}" TextWrapping="Wrap" Foreground="{DynamicResource BlockMissingBrush}"
+               IsVisible="{Binding Error, Converter={x:Static ObjectConverters.IsNotNull}}" />
+
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+      <Button Content="What's new" Command="{Binding OpenReleasePageCommand}" ToolTip.Tip="Opens the release page on GitHub." />
+      <Button Content="Cancel" Command="{Binding CancelCommand}" IsVisible="{Binding IsInstalling}" ToolTip.Tip="Stops the download; nothing is changed." />
+      <Button x:Name="LaterButton" Content="Later" IsVisible="{Binding !IsBusy}" Click="OnLater" ToolTip.Tip="Closes this window without updating." />
+      <Button Classes="accent" Content="{Binding InstallButtonText}" Command="{Binding InstallCommand}" IsVisible="{Binding ShowInstallButton}"
+              ToolTip.Tip="Downloads the new version from GitHub, checks it, replaces this program and restarts DeveParTools." />
+    </StackPanel>
+  </StackPanel>
+</Window>

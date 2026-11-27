@@ -54,9 +54,10 @@ public sealed partial class ShellViewModel : ObservableObject
         }
     }
 
-    public ShellViewModel()
+    /// <param name="settings">The settings (default: the user's; the UI checks pass their own).</param>
+    public ShellViewModel(SettingsViewModel? settings = null)
     {
-        Settings = new SettingsViewModel();
+        Settings = settings ?? new SettingsViewModel();
         Verify = new VerifyViewModel(Settings);
         Create = new CreateViewModel(Settings);
         Benchmark = new BenchmarkViewModel();
@@ -64,6 +65,9 @@ public sealed partial class ShellViewModel : ObservableObject
     }
 
     public SettingsViewModel Settings { get; }
+
+    /// <summary>The update banner and window (owned by Settings, which has the "check automatically" switch).</summary>
+    public UpdateViewModel Updates => Settings.Updates;
 
     public VerifyViewModel Verify { get; }
 
@@ -94,5 +98,6 @@ public sealed partial class ShellViewModel : ObservableObject
         Verify.Dialogs = dialogs;
         Create.Dialogs = dialogs;
         Settings.Dialogs = dialogs;
+        Settings.Updates.Dialogs = dialogs;
     }
 }

@@ -25,8 +25,10 @@ public sealed partial class SettingsViewModel : ObservableObject
     /// <param name="explorerMenu">Where the context menu entries go (default: the user's real classes key).</param>
     /// <param name="executable">The program the entries start (default: this one).</param>
     /// <param name="associations">The file associations (default: this platform's, see <see cref="FileAssociations.ForThisPlatform"/>).</param>
-    public SettingsViewModel(string? path = null, ExplorerContextMenu? explorerMenu = null, string? executable = null, IFileAssociations? associations = null)
+    /// <param name="updates">The self-update (default: the real one, which asks GitHub).</param>
+    public SettingsViewModel(string? path = null, ExplorerContextMenu? explorerMenu = null, string? executable = null, IFileAssociations? associations = null, UpdateViewModel? updates = null)
     {
+        Updates = updates ?? new UpdateViewModel();
         _path = path ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DeveParTools", "settings.txt");
         _contextMenu = explorerMenu ?? new ExplorerContextMenu();
         _associations = associations ?? FileAssociations.ForThisPlatform();
@@ -40,6 +42,17 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     /// <summary>Opens links (the Windows Default apps page); set by the window.</summary>
     public IViewServices? Dialogs { get; set; }
+
+    // ---------------------------------------------------------------- updates
+
+    /// <summary>The self-update: banner, status line and update window.</summary>
+    public UpdateViewModel Updates { get; }
+
+    /// <summary>Whether the app looks for a newer version when it starts (asking GitHub at most once a day).</summary>
+    [ObservableProperty]
+    private bool _checkForUpdates = true;
+
+    partial void OnCheckForUpdatesChanged(bool value) => Save();
 
     // ---------------------------------------------------------------- file associations
 
@@ -291,6 +304,9 @@ public sealed partial class SettingsViewModel : ObservableObject
                     case "theme" when Themes.Contains(parts[1]):
                         Theme = parts[1];
                         break;
+                    case "updates":
+                        CheckForUpdates = parts[1] != "off";
+                        break;
                 }
             }
         }
@@ -310,7 +326,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
-            File.WriteAllLines(_path, [$"threads={Threads}", $"memory={MemoryMiB}", $"kernel={Kernel}", $"theme={Theme}"]);
+            File.WriteAllLines(_path, [$"threads={Threads}", $"memory={MemoryMiB}", $"kernel={Kernel}", $"theme={Theme}", $"updates={(CheckForUpdates ? "auto" : "off")}"]);
         }
         catch (IOException)
         {

@@ -70,6 +70,8 @@ public sealed partial class MainWindow : Window, IViewServices
 
     public async Task LaunchAsync(Uri uri) => await Launcher.LaunchUriAsync(uri);
 
+    public Task ShowUpdateAsync(UpdateViewModel updates) => new UpdateWindow { DataContext = updates }.ShowDialog(this);
+
     public async Task<string?> SaveFileAsync(string title, string suggestedName, string extension)
     {
         var file = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions { Title = title, SuggestedFileName = suggestedName, DefaultExtension = extension });

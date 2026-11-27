@@ -8,6 +8,7 @@
         <ModulePath>.*DeveParTools\.Par2\.dll$</ModulePath>
         <ModulePath>.*DeveParTools\.Par3\.dll$</ModulePath>
         <ModulePath>.*DeveParTools\.dll$</ModulePath>
+        <ModulePath>.*DeveParTools\.Updates\.dll$</ModulePath>
       </Include>
     </ModulePaths>
     <Attributes>

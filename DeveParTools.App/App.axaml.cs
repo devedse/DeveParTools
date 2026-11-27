@@ -39,6 +39,15 @@ public sealed class App : Application
                 window.Opened += async (_, _) => await shell.Verify.OpenAsync(file);
             }
 
+            // A newer release on GitHub shows a banner (asked at most once a day; off in Settings).
+            window.Opened += async (_, _) =>
+            {
+                if (shell.Settings.CheckForUpdates)
+                {
+                    await shell.Updates.CheckAutomaticallyAsync();
+                }
+            };
+
             // The rest of an Explorer multi-selection arrives from the other processes it started.
             Program.Collector?.Attach(paths => Dispatcher.UIThread.Post(() =>
             {

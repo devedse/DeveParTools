@@ -36,6 +36,18 @@
                                  IconSource="{Binding IconKey, Converter={x:Static c:ResourceIconSourceConverter.Instance}}" />
       </DataTemplate>
     </ui:FANavigationView.MenuItemTemplate>
-    <ContentControl Content="{Binding CurrentPage}" />
+    <DockPanel>
+      <!-- A newer version on GitHub (checked when the window opens, at most once a day; see Settings). -->
+      <ui:FAInfoBar DockPanel.Dock="Top" Margin="24,12,24,0" Severity="Informational" IsClosable="True"
+                    IsOpen="{Binding Updates.BannerVisible, Mode=TwoWay}"
+                    Title="Update available" Message="{Binding Updates.BannerText}"
+                    AutomationProperties.Name="Update available">
+        <ui:FAInfoBar.ActionButton>
+          <Button Classes="accent" Content="Update…" Command="{Binding Updates.OpenUpdateWindowCommand}"
+                  ToolTip.Tip="Shows what the update does, then downloads and installs it with a progress bar. DeveParTools restarts when it is done." />
+        </ui:FAInfoBar.ActionButton>
+      </ui:FAInfoBar>
+      <ContentControl Content="{Binding CurrentPage}" />
+    </DockPanel>
   </ui:FANavigationView>
 </Window>

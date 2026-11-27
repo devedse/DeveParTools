@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsAotCompatible>true</IsAotCompatible>
+    <Description>Self-update for the devepar and deveparui programs: finds the latest GitHub release and replaces the running program with it.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="DeveParTools.Updates.Tests" />
+  </ItemGroup>
+</Project>

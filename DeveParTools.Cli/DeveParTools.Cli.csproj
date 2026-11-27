@@ -14,6 +14,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\DeveParTools\DeveParTools.csproj" />
+    <ProjectReference Include="..\DeveParTools.Updates\DeveParTools.Updates.csproj" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="DeveParTools.Cli.Tests" />

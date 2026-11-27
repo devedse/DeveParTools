@@ -56,6 +56,16 @@ installation is needed. Both are trimmed (code the app never uses is left out) a
 time, so they start quickly; the JIT still optimizes the hot loops for your CPU's AVX2, AVX-512, GFNI or NEON).
 The desktop app shows its window in about a third of a second.
 
+### Updating
+
+Both programs update themselves from these releases (see [Updates](#updates)):
+
+- **Desktop app:** when a new version is out, a banner offers it. **Update…** shows the download, extraction and
+  installation progress, then restarts DeveParTools. **Settings > Updates** has **Check now** and a switch for the
+  automatic check.
+- **Command line:** after a command, a line tells you when a new version is out. `devepar update` installs it, and
+  `devepar update --check` only checks.
+
 ## The desktop app
 
 | Verify after damage | After repair |
@@ -153,6 +163,7 @@ devepar insert  <archive.zip|.7z|.rar> [-r <percent>]
 devepar delete  <archive.zip|.7z|.rar>
 devepar list    <parfile>
 devepar bench | info
+devepar update  [--check]
 ```
 
 Examples:
@@ -167,6 +178,7 @@ devepar extend backup.par3 -r 5                          # add 5% more recovery 
 devepar insert photos.zip -r 3                           # the ZIP now carries recovery data for itself...
 devepar repair photos.zip                                # ...so it can repair itself
 devepar delete photos.zip                                # back to the original bytes
+devepar update                                           # install the latest release over this devepar
 ```
 
 Common options:
@@ -197,8 +209,37 @@ Exit codes are the same as par2cmdline's, so existing scripts keep working:
 | 4 | Not enough critical data in the PAR files to verify |
 | 5 | Repair failed |
 | 6 | File I/O error |
-| 7 | Logic error |
+| 7 | Logic error (also: an update could not be checked or installed) |
 | 8 | Out of memory |
+
+## Updates
+
+**Checking.** The programs ask GitHub's public API for the latest release
+(`GET https://api.github.com/repos/devedse/DeveParTools/releases/latest`, no account). That is at most once a day: the
+answer is kept in `update-check.txt` in the local app-data folder and shared by both programs. The request carries
+only the program's name and version (`User-Agent: DeveParTools/1.0.40`).
+
+- **Command line.** The check runs in the background while a command works, and a command never waits more than 2.5
+  seconds for it. There is no check with `--json` or `--quiet`, when standard error is redirected, in CI (`CI` set),
+  or with `DEVEPAR_NO_UPDATE_CHECK=1`.
+- **Desktop app.** The check runs when the window opens, unless it is turned off in Settings.
+- **Development builds** (version 1.0.0, or a build folder with its `.dll` files) never check by themselves and do not
+  replace themselves.
+
+**Installing.** The new version is downloaded into the program's own folder and checked against the SHA-256 that
+GitHub publishes for every release file. Then:
+
+- `devepar` renames itself to `devepar.old`, moves the new program into place and exits.
+- `deveparui` starts the new program from the folder it was extracted to and exits. The new copy waits for it to close,
+  copies itself over `deveparui` and starts it.
+
+Why the app hands over instead of swapping itself: a single-file .NET program reads parts of itself from its file as
+it first needs them, so it must not keep running once its file is a different version. Renaming a running program is
+allowed on Windows (overwriting it is not). If putting the new file in place fails, the old one is put back. Leftovers
+(`.old`, the download, the extract folder) are removed at the next start.
+
+The program needs write access to its own folder. For `/usr/local/bin` or `Program Files`, run `sudo devepar update`
+(or as administrator), or download the release by hand.
 
 ## Library
 
@@ -251,7 +292,7 @@ The hard parts are documented in the source with worked examples:
 
 ```bash
 dotnet build DeveParTools.slnx
-dotnet test --project DeveParTools.Core.Tests     # also .Par1.Tests, .Par2.Tests, .Par3.Tests, .Tests
+dotnet test --project DeveParTools.Core.Tests     # also .Par1/.Par2/.Par3/.Updates/.Cli.Tests, .Tests
 dotnet run --project DeveParTools.App.Tests -- out # headless UI checks + screenshots
 
 # Release builds, as CI makes them (use win-x64, linux-arm64, osx-arm64, ... for other systems)
@@ -260,6 +301,10 @@ dotnet publish DeveParTools.App -c Release -r linux-x64 --self-contained -p:Publ
 dotnet publish DeveParTools.Cli -c Release -r linux-x64 --self-contained -p:PublishSingleFile=true \
   -p:PublishTrimmed=true -p:PublishReadyToRun=true
 ```
+
+**Updates against a local server.** Set `DEVEPARTOOLS_UPDATE_API=http://127.0.0.1:8765` and serve
+`repos/devedse/DeveParTools/releases/latest` (GitHub's JSON) plus the files it links to. The programs then update from
+there, which tests the whole flow, restart included, without publishing a release.
 
 **Trimming.** Trim warnings fail the build. The desktop app's few harmless ones (in packages, for code the app
 never runs) are suppressed one method at a time in `DeveParTools.App/ILLink.Suppressions.xml`, with the reason for

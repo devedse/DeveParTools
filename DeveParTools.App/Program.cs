@@ -14,6 +14,12 @@ internal static class Program
     [STAThread]
     public static void Main(string[] args)
     {
+        if (args is [AppArguments.FinishUpdateSwitch, var program, var processId])
+        {
+            FinishUpdate(program, int.TryParse(processId, out var id) ? id : null);
+            return;
+        }
+
         Arguments = AppArguments.Parse(args);
         if (Arguments.CreatePaths.Count > 0)
         {
@@ -25,6 +31,7 @@ internal static class Program
         }
 
         RepairMovedContextMenu();
+        RemoveUpdateLeftovers();
         try
         {
             BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
@@ -36,6 +43,50 @@ internal static class Program
     }
 
     public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<App>().UsePlatformDetect().LogToTrace();
+
+    /// <summary>
+    /// The last step of an update, run by the new version from the folder it was extracted to: once the old app has
+    /// exited, copy this program over it and start it. If that fails, the old program is back in place and is started.
+    /// </summary>
+    private static void FinishUpdate(string program, int? oldProcessId)
+    {
+        try
+        {
+            DeveParTools.Updates.Updater.CompleteStaged(Environment.ProcessPath!, program, oldProcessId, TimeSpan.FromSeconds(30));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // Not replaced; the old version starts again (and offers the update again).
+        }
+
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(program) { UseShellExecute = false });
+    }
+
+    /// <summary>
+    /// Deletes what an update left next to the program: on Windows the previous version (deveparui.exe.old) cannot be
+    /// deleted while it runs, and right after an update it may still be closing, so this tries for a few seconds.
+    /// </summary>
+    private static void RemoveUpdateLeftovers()
+    {
+        if (DeveParTools.Updates.Updater.FindTarget(Environment.ProcessPath, Version.Parse(AppInfo.Version), "deveparui").Executable is not { } self)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            for (int attempt = 0; attempt < 20; attempt++)
+            {
+                DeveParTools.Updates.Updater.RemoveLeftovers(self, "deveparui");
+                if (!File.Exists(self + ".old") && !Directory.Exists(DeveParTools.Updates.Updater.StagingPath(self, "deveparui")))
+                {
+                    return;
+                }
+
+                await Task.Delay(500);
+            }
+        });
+    }
 
     /// <summary>
     /// When the Explorer entries or the file associations point to an executable that no longer exists (the app was

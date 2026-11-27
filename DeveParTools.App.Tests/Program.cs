@@ -9,6 +9,7 @@ using DeveParTools.App;
 using DeveParTools.App.Services;
 using DeveParTools.App.ViewModels;
 using DeveParTools.App.Views;
+using DeveParTools.Updates;
 
 // Headless checks of the desktop app: real PAR operations on temporary files, every page rendered in light and dark.
 // Screenshots go to the output folder (default artifacts/ui-tests).
@@ -403,6 +404,119 @@ if (OperatingSystem.IsWindows())
     Save(window, output, "settings-windows");
 }
 
+// Self-update against a fake GitHub: the banner, the Settings card, and the update window with its progress.
+{
+    var updateDir = Path.Combine(work, "update");
+    Directory.CreateDirectory(updateDir);
+    var program = Path.Combine(updateDir, OperatingSystem.IsWindows() ? "deveparui.exe" : "deveparui");
+    File.WriteAllText(program, "deveparui 1.0.40");
+    var github = new FakeReleases();
+    var newProgram = new byte[3_000_000];
+    new Random(3).NextBytes(newProgram);
+    (string Staged, string Program)? restarted = null;
+    var cachePath = Path.Combine(updateDir, "update-check.txt");
+    Updater NewUpdater() => new("deveparui", new Version(1, 0, 40), github);
+    var updates = new UpdateViewModel(NewUpdater, new UpdateCheckCache(cachePath), program, (staged, path) => restarted = (staged, path));
+    var dialogs = new ConfirmingDialogs();
+    var updateSettings = new SettingsViewModel(Path.Combine(updateDir, "settings.txt"), new ExplorerContextMenu(), program, updates: updates);
+    var updateShell = new ShellViewModel(updateSettings);
+    var updateMain = new MainWindow { DataContext = updateShell, Width = 1280, Height = 820 };
+    updateMain.Show();
+    updateShell.SetDialogs(dialogs); // after the window, which sets itself as the dialogs
+
+    using (var probe = NewUpdater())
+    {
+        github.Release("1.0.41", probe.AssetName(probe.RuntimeId!), "deveparui", newProgram);
+    }
+
+    Await(updates.CheckAutomaticallyAsync());
+    Check(updates is { State: UpdateState.Available, BannerVisible: true, LatestVersion: "1.0.41", CanSelfUpdate: true } && github.Requests == 1
+        && updates.ReleasePage?.ToString() == "https://github.com/devedse/DeveParTools/releases/tag/1.0.41", "a newer release shows the banner: " + updates.BannerText);
+    Await(updates.CheckAutomaticallyAsync());
+    Check(github.Requests == 1, "the automatic check asks GitHub at most once a day");
+    Save(updateMain, output, "update-banner");
+    updateShell.Page = AppPage.Settings;
+    Save(updateMain, output, "update-settings");
+    Await(updates.OpenUpdateWindowCommand.ExecuteAsync(null));
+    Check(dialogs.UpdateWindows.SingleOrDefault() == updates, "the banner's button opens the update window");
+
+    var updateWindow = new UpdateWindow { DataContext = updates };
+    updateWindow.Show();
+    Save(updateWindow, output, "update-window");
+
+    // Download (paused halfway for the screenshot), extract, replace, restart.
+    github.Pause();
+    var install = updates.InstallCommand.ExecuteAsync(null);
+    var until = DateTime.UtcNow.AddSeconds(30);
+    while (updates.Progress < 30 && DateTime.UtcNow < until)
+    {
+        Dispatcher.UIThread.RunJobs();
+        Thread.Sleep(5);
+    }
+
+    Check(updates is { IsBusy: true, StageText: not null } && updates.StageText.StartsWith("Step 1 of 3: Downloading deveparui-", StringComparison.Ordinal) && updates.ProgressText?.Contains(" of ", StringComparison.Ordinal) == true,
+        $"the window shows the download: {updates.StageText}, {updates.PercentText}, {updates.ProgressText}");
+    Save(updateWindow, output, "update-downloading");
+    github.Resume();
+    Await(install);
+    Check(updates is { State: UpdateState.Restarting, ProgressText: null, IsInstalling: false } && restarted is { } handover && handover.Program == program
+        && File.ReadAllBytes(handover.Staged).SequenceEqual(newProgram) && File.ReadAllText(program) == "deveparui 1.0.40",
+        "the new version is extracted next to the program and started from there, without touching the running program: " + updates.StageText);
+    Save(updateWindow, output, "update-installed");
+
+    // What the new copy does when it is started with --finish-update.
+    Updater.CompleteStaged(restarted!.Value.Staged, program, Environment.ProcessId, TimeSpan.FromMilliseconds(10));
+    Updater.RemoveLeftovers(program, "deveparui");
+    Check(File.ReadAllBytes(program).SequenceEqual(newProgram), "the new copy puts itself in place");
+    var left = Directory.GetFileSystemEntries(updateDir).Select(Path.GetFileName).Where(n => n != "settings.txt").Order().ToList();
+    Check(left.SequenceEqual(new[] { Path.GetFileName(program), "update-check.txt" }.Order()), "nothing is left behind: " + string.Join(", ", left));
+
+    // A damaged download: nothing changes, and the window says so.
+    File.WriteAllText(program, "deveparui 1.0.40");
+    var failing = new UpdateViewModel(NewUpdater, new UpdateCheckCache(cachePath), program, (staged, path) => restarted = (staged, path));
+    github.Damage();
+    Await(failing.CheckNowCommand.ExecuteAsync(null));
+    Await(failing.InstallCommand.ExecuteAsync(null));
+    Check(failing is { State: UpdateState.Failed, ShowInstallButton: true, InstallButtonText: "Try again" } && failing.Error?.Contains("damaged", StringComparison.Ordinal) == true && File.ReadAllText(program) == "deveparui 1.0.40",
+        "a damaged download changes nothing: " + failing.Error);
+    updateWindow.DataContext = failing;
+    Save(updateWindow, output, "update-failed");
+    github.Repair();
+
+    // Cancelling during the download.
+    github.Pause();
+    var cancelled = failing.InstallCommand.ExecuteAsync(null);
+    until = DateTime.UtcNow.AddSeconds(30);
+    while (failing.Progress < 30 && DateTime.UtcNow < until)
+    {
+        Dispatcher.UIThread.RunJobs();
+        Thread.Sleep(5);
+    }
+
+    failing.CancelCommand.Execute(null);
+    github.Resume();
+    Await(cancelled);
+    Check(failing.State == UpdateState.Available && File.ReadAllText(program) == "deveparui 1.0.40", "cancelling stops the download and changes nothing");
+    updateWindow.Close();
+
+    // Up to date; and a development build, which only says where to download.
+    github.Release("1.0.40", "none", "deveparui", newProgram);
+    Await(failing.CheckNowCommand.ExecuteAsync(null));
+    Check(failing is { State: UpdateState.UpToDate, BannerVisible: false } && failing.StatusText == "DeveParTools 1.0.40 is the latest version.", "up to date: " + failing.StatusText);
+    var devBuild = new UpdateViewModel(NewUpdater, new UpdateCheckCache(Path.Combine(updateDir, "dev-cache.txt")), processPath: null, restart: (staged, path) => restarted = (staged, path));
+    int before = github.Requests;
+    Await(devBuild.CheckAutomaticallyAsync());
+    github.Release("1.0.41", "none", "deveparui", newProgram);
+    Await(devBuild.CheckNowCommand.ExecuteAsync(null));
+    Check(github.Requests == before + 1 && !devBuild.CanSelfUpdate && !devBuild.InstallCommand.CanExecute(null) && devBuild.StatusText?.Contains("Download a release from", StringComparison.Ordinal) == true,
+        "a build that cannot replace itself never checks on its own, and says why: " + devBuild.StatusText);
+
+    // The switch is remembered.
+    updateSettings.CheckForUpdates = false;
+    Check(!new SettingsViewModel(Path.Combine(updateDir, "settings.txt"), new ExplorerContextMenu(), program, updates: devBuild).CheckForUpdates, "turning automatic checks off is remembered");
+    updateMain.Close();
+}
+
 Application.Current!.RequestedThemeVariant = ThemeVariant.Dark;
 Save(window, output, "settings-dark");
 
@@ -471,6 +585,154 @@ static void ExpandProgress(Window window)
     }
 }
 
+/// <summary>
+/// A stand-in for GitHub: one release with one download, which can pause halfway (for screenshots and cancelling)
+/// or arrive damaged.
+/// </summary>
+internal sealed class FakeReleases : HttpMessageHandler
+{
+    private string _json = "{}";
+    private string _downloadUrl = string.Empty;
+    private byte[] _archive = [];
+    private bool _damaged;
+    private TaskCompletionSource _gate = CompletedGate();
+
+    public int Requests { get; private set; }
+
+    private static TaskCompletionSource CompletedGate()
+    {
+        var done = new TaskCompletionSource();
+        done.SetResult();
+        return done;
+    }
+
+    /// <summary>Publishes a release whose download (named <paramref name="assetName"/>) holds <paramref name="program"/>.</summary>
+    public void Release(string tag, string assetName, string product, byte[] program)
+    {
+        string inside = assetName.EndsWith(".zip", StringComparison.Ordinal) ? product + ".exe" : product;
+        using var ms = new MemoryStream();
+        if (assetName.EndsWith(".zip", StringComparison.Ordinal))
+        {
+            using var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Create, leaveOpen: true);
+            using var entry = zip.CreateEntry(inside, System.IO.Compression.CompressionLevel.NoCompression).Open();
+            entry.Write(program);
+        }
+        else
+        {
+            using var gzip = new System.IO.Compression.GZipStream(ms, System.IO.Compression.CompressionLevel.NoCompression, leaveOpen: true);
+            using var tar = new System.Formats.Tar.TarWriter(gzip, leaveOpen: true);
+            tar.WriteEntry(new System.Formats.Tar.PaxTarEntry(System.Formats.Tar.TarEntryType.RegularFile, "./" + inside) { DataStream = new MemoryStream(program) });
+        }
+
+        _archive = ms.ToArray();
+        _downloadUrl = $"https://github.com/devedse/DeveParTools/releases/download/{tag}/{assetName}";
+        // Written by hand: these checks also run trimmed, where reflection-based JSON is not available.
+        using var json = new MemoryStream();
+        using (var w = new System.Text.Json.Utf8JsonWriter(json))
+        {
+            w.WriteStartObject();
+            w.WriteString("tag_name", tag);
+            w.WriteString("html_url", "https://github.com/devedse/DeveParTools/releases/tag/" + tag);
+            w.WriteStartArray("assets");
+            w.WriteStartObject();
+            w.WriteString("name", assetName);
+            w.WriteString("browser_download_url", _downloadUrl);
+            w.WriteNumber("size", _archive.Length);
+            w.WriteString("digest", "sha256:" + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(_archive)));
+            w.WriteEndObject();
+            w.WriteEndArray();
+            w.WriteEndObject();
+        }
+
+        _json = System.Text.Encoding.UTF8.GetString(json.ToArray());
+    }
+
+    public void Pause() => _gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public void Resume() => _gate.TrySetResult();
+
+    public void Damage() => _damaged = true;
+
+    public void Repair() => _damaged = false;
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        Requests++;
+        var url = request.RequestUri!.ToString();
+        if (url.EndsWith("/releases/latest", StringComparison.Ordinal))
+        {
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent(_json) });
+        }
+
+        if (url == _downloadUrl)
+        {
+            var data = (byte[])_archive.Clone();
+            if (_damaged)
+            {
+                data[^100] ^= 0xFF;
+            }
+
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new GatedContent(data, _gate.Task) });
+        }
+
+        return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.NotFound));
+    }
+
+    /// <summary>The download: the first half at once, the rest after the gate opens.</summary>
+    private sealed class GatedContent(byte[] data, Task gate) : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, System.Net.TransportContext? context) => throw new NotSupportedException();
+
+        protected override Task<Stream> CreateContentReadStreamAsync() => Task.FromResult<Stream>(new GatedStream(data, gate));
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = data.Length;
+            return true;
+        }
+    }
+
+    private sealed class GatedStream(byte[] data, Task gate) : Stream
+    {
+        private int _position;
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => false;
+
+        public override long Length => data.Length;
+
+        public override long Position { get => _position; set => throw new NotSupportedException(); }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (_position >= data.Length / 2)
+            {
+                await gate.WaitAsync(cancellationToken);
+            }
+
+            int n = Math.Min(Math.Min(buffer.Length, 32 * 1024), data.Length - _position);
+            data.AsMemory(_position, n).CopyTo(buffer);
+            _position += n;
+            return n;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+
+        public override void Flush()
+        {
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+}
+
 /// <summary>Dialogs for the checks: confirms everything, picks nothing.</summary>
 internal sealed class ConfirmingDialogs : IViewServices
 {
@@ -483,6 +745,15 @@ internal sealed class ConfirmingDialogs : IViewServices
     public Task<bool> ConfirmAsync(string title, string message, string confirm) => Task.FromResult(true);
 
     public List<Uri> Launched { get; } = [];
+
+    /// <summary>The update windows shown, as their window (the checks look at it and close it).</summary>
+    public List<UpdateViewModel> UpdateWindows { get; } = [];
+
+    public Task ShowUpdateAsync(UpdateViewModel updates)
+    {
+        UpdateWindows.Add(updates);
+        return Task.CompletedTask;
+    }
 
     public Task LaunchAsync(Uri uri)
     {
