@@ -4,14 +4,13 @@
     <AssemblyName>DeveParTools.App</AssemblyName>
     <RootNamespace>DeveParTools.App</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationIcon Condition="Exists('..\Assets\icon.ico')">..\Assets\icon.ico</ApplicationIcon>
+    <ApplicationIcon>..\Assets\icon.ico</ApplicationIcon>
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Description>DeveParTools desktop app: create, verify and repair PAR1/PAR2/PAR3 sets with a live block grid.</Description>
   </PropertyGroup>
   <ItemGroup>
-    <AvaloniaResource Include="..\Assets\icon.png" Link="Assets\icon.png" Condition="Exists('..\Assets\icon.png')" />
-    <AvaloniaResource Include="..\Assets\icon.ico" Link="Assets\icon.ico" Condition="Exists('..\Assets\icon.ico')" />
+    <AvaloniaResource Include="..\Assets\icon.png" Link="Assets\icon.png" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Avalonia.Desktop" Version="12.1.2" />

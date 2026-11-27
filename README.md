@@ -1,5 +1,7 @@
 # DeveParTools
 
+<img src="Assets/logo.png" alt="DeveParTools logo: a shield around a grid of data blocks, with recovery blocks rebuilding the missing one" width="160" align="right" />
+
 Create, verify and repair **PAR1, PAR2 and PAR3** recovery sets, the parity files that can rebuild damaged or
 missing files. DeveParTools is a desktop app (Windows, Linux, macOS), a command-line tool and a .NET library. It is
 fully managed C# with no native dependencies, and as fast as the native tools.
