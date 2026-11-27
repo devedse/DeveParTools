@@ -305,7 +305,7 @@ public static unsafe class LeopardCodec
             return;
         }
 
-        var ops = new RegionOps(field, ofs, len);
+        var ops = RegionOps.For(field, ofs, len);
         int m = NextPow2(recoveryCount);
         int skew = m - 1;
 
@@ -381,64 +381,52 @@ public static unsafe class LeopardCodec
     private static void IfftDitCore(RegionOps ops, nint[] work, int baseIndex, int mTruncated, int m, int skew)
     {
         var f = ops.Field;
+        byte* t01 = stackalloc byte[MaxTable];
+        byte* t23 = stackalloc byte[MaxTable];
+        byte* t02 = stackalloc byte[MaxTable];
         int dist = 1, dist4 = 4;
         for (; dist4 <= m; dist = dist4, dist4 <<= 2)
         {
             for (int r = 0; r < mTruncated; r += dist4)
             {
+                // The twiddles are the same for the whole group: their tables are built once.
                 int iEnd = r + dist;
-                int logM01 = f.FftSkew[skew + iEnd];
-                int logM02 = f.FftSkew[skew + iEnd + dist];
-                int logM23 = f.FftSkew[skew + iEnd + dist * 2];
+                byte* p01 = ops.Table(f.FftSkew[skew + iEnd], t01);
+                byte* p02 = ops.Table(f.FftSkew[skew + iEnd + dist], t02);
+                byte* p23 = ops.Table(f.FftSkew[skew + iEnd + dist * 2], t23);
+                Debug.Assert(p23 != null, "logM23 can never be Modulus");
                 for (int i = r; i < iEnd; i++)
                 {
-                    IfftDit4(ops, work, baseIndex + i, dist, logM01, logM23, logM02);
+                    IfftDit4(ops, work, baseIndex + i, dist, p01, p23, p02);
                 }
             }
         }
 
         if (dist < m)
         {
-            int logM = f.FftSkew[skew + dist];
+            byte* p = ops.Table(f.FftSkew[skew + dist], t01);
             for (int i = 0; i < dist; i++)
             {
-                if (logM == f.Modulus)
-                {
-                    ops.Xor(work[baseIndex + i + dist], work[baseIndex + i]);
-                }
-                else
-                {
-                    ops.IfftButterfly(work[baseIndex + i], work[baseIndex + i + dist], logM);
-                }
+                ops.IfftButterfly(work[baseIndex + i], work[baseIndex + i + dist], p);
             }
         }
     }
 
-    private static void IfftDit4(RegionOps ops, nint[] work, int i, int dist, int logM01, int logM23, int logM02)
+    /// <summary>
+    /// Four IFFT butterflies on four buffers (two layers), a piece of <see cref="ButterflyChunk"/> bytes at a time so
+    /// that all four work on data in the L1 cache: each buffer goes through memory once instead of four times. A
+    /// null table is a multiplication by zero (the butterfly is just the XOR).
+    /// </summary>
+    private static void IfftDit4(RegionOps ops, nint[] work, int i, int dist, byte* t01, byte* t23, byte* t02)
     {
-        int mod = ops.Field.Modulus;
-        if (logM01 == mod)
+        nint w0 = work[i], w1 = work[i + dist], w2 = work[i + dist * 2], w3 = work[i + dist * 3];
+        for (long o = 0; o < ops.Length; o += ButterflyChunk)
         {
-            ops.Xor(work[i + dist], work[i]);
-        }
-        else
-        {
-            ops.IfftButterfly(work[i], work[i + dist], logM01);
-        }
-
-        // logM23 is never Modulus (see the remarks on IfftDitCore), so it needs no XOR-only shortcut.
-        Debug.Assert(logM23 != mod, "logM23 can never be Modulus");
-        ops.IfftButterfly(work[i + dist * 2], work[i + dist * 3], logM23);
-
-        if (logM02 == mod)
-        {
-            ops.Xor(work[i + dist * 2], work[i]);
-            ops.Xor(work[i + dist * 3], work[i + dist]);
-        }
-        else
-        {
-            ops.IfftButterfly(work[i], work[i + dist * 2], logM02);
-            ops.IfftButterfly(work[i + dist], work[i + dist * 3], logM02);
+            var c = ops.Part(o, Math.Min(ButterflyChunk, ops.Length - o));
+            c.IfftButterfly(w0, w1, t01);
+            c.IfftButterfly(w2, w3, t23);
+            c.IfftButterfly(w0, w2, t02);
+            c.IfftButterfly(w1, w3, t02);
         }
     }
 
@@ -446,18 +434,22 @@ public static unsafe class LeopardCodec
     private static void FftDit(RegionOps ops, nint[] work, int baseIndex, int mTruncated, int m, int skew)
     {
         var f = ops.Field;
+        byte* t01 = stackalloc byte[MaxTable];
+        byte* t23 = stackalloc byte[MaxTable];
+        byte* t02 = stackalloc byte[MaxTable];
         int dist4 = m, dist = m >> 2;
         for (; dist != 0; dist4 = dist, dist >>= 2)
         {
             for (int r = 0; r < mTruncated; r += dist4)
             {
                 int iEnd = r + dist;
-                int logM01 = f.FftSkew[skew + iEnd];
-                int logM02 = f.FftSkew[skew + iEnd + dist];
-                int logM23 = f.FftSkew[skew + iEnd + dist * 2];
+                byte* p01 = ops.Table(f.FftSkew[skew + iEnd], t01);
+                byte* p02 = ops.Table(f.FftSkew[skew + iEnd + dist], t02);
+                byte* p23 = ops.Table(f.FftSkew[skew + iEnd + dist * 2], t23);
+                Debug.Assert(p23 != null, "logM23 can never be Modulus");
                 for (int i = r; i < iEnd; i++)
                 {
-                    FftDit4(ops, work, baseIndex + i, dist, logM01, logM23, logM02);
+                    FftDit4(ops, work, baseIndex + i, dist, p01, p23, p02);
                 }
             }
         }
@@ -466,52 +458,30 @@ public static unsafe class LeopardCodec
         {
             for (int r = 0; r < mTruncated; r += 2)
             {
-                int logM = f.FftSkew[skew + r + 1];
-                if (logM == f.Modulus)
-                {
-                    ops.Xor(work[baseIndex + r + 1], work[baseIndex + r]);
-                }
-                else
-                {
-                    ops.FftButterfly(work[baseIndex + r], work[baseIndex + r + 1], logM);
-                }
+                ops.FftButterfly(work[baseIndex + r], work[baseIndex + r + 1], ops.Table(f.FftSkew[skew + r + 1], t01));
             }
         }
     }
 
-    private static void FftDit4(RegionOps ops, nint[] work, int i, int dist, int logM01, int logM23, int logM02)
+    /// <summary>Four FFT butterflies on four buffers, in pieces that stay in the L1 cache (see <see cref="IfftDit4"/>).</summary>
+    private static void FftDit4(RegionOps ops, nint[] work, int i, int dist, byte* t01, byte* t23, byte* t02)
     {
-        int mod = ops.Field.Modulus;
-        if (logM02 == mod)
+        nint w0 = work[i], w1 = work[i + dist], w2 = work[i + dist * 2], w3 = work[i + dist * 3];
+        for (long o = 0; o < ops.Length; o += ButterflyChunk)
         {
-            ops.Xor(work[i + dist * 2], work[i]);
-            ops.Xor(work[i + dist * 3], work[i + dist]);
+            var c = ops.Part(o, Math.Min(ButterflyChunk, ops.Length - o));
+            c.FftButterfly(w0, w2, t02);
+            c.FftButterfly(w1, w3, t02);
+            c.FftButterfly(w0, w1, t01);
+            c.FftButterfly(w2, w3, t23);
         }
-        else
-        {
-            ops.FftButterfly(work[i], work[i + dist * 2], logM02);
-            ops.FftButterfly(work[i + dist], work[i + dist * 3], logM02);
-        }
-
-        if (logM01 == mod)
-        {
-            ops.Xor(work[i + dist], work[i]);
-        }
-        else
-        {
-            ops.FftButterfly(work[i], work[i + dist], logM01);
-        }
-
-        // logM23 is never Modulus (see the remarks on IfftDitCore), so it needs no XOR-only shortcut.
-        Debug.Assert(logM23 != mod, "logM23 can never be Modulus");
-        ops.FftButterfly(work[i + dist * 2], work[i + dist * 3], logM23);
     }
 
     // ------------------------------------------------------------------ decode
 
     private static void DecodeRange(LeopardField field, nint[] originals, nint[] recovery, nint[] work, int m, int n, int[] err, long ofs, long len, StepCounter? counter)
     {
-        var ops = new RegionOps(field, ofs, len);
+        var ops = RegionOps.For(field, ofs, len);
         int k = originals.Length;
         int rc = recovery.Length;
 
@@ -606,10 +576,27 @@ public static unsafe class LeopardCodec
         }
     }
 
-    /// <summary>Region operations restricted to the byte range [ofs, ofs + len) of every buffer.</summary>
-    private readonly struct RegionOps(LeopardField field, long ofs, long len)
+    /// <summary>Bytes of a butterfly group done at once: the pieces of its four buffers (16 KiB) stay in the L1 cache.</summary>
+    private const long ButterflyChunk = 4096;
+
+    /// <summary>The largest multiplication table of any kernel (GF(2^16), scalar: 1 KiB).</summary>
+    private const int MaxTable = 1024;
+
+    /// <summary>
+    /// Region operations restricted to the byte range [ofs, ofs + len) of every buffer, with the kernel
+    /// (<paramref name="level"/>) fixed, so tables built here fit the multiplications done here.
+    /// </summary>
+    private readonly struct RegionOps(LeopardField gf, long ofs, long len, SimdLevel level)
     {
-        public LeopardField Field { get; } = field;
+        public static RegionOps For(LeopardField field, long ofs, long len)
+            => new(field, ofs, len, field.Bits == 16 ? Gf16Kernels.Level : Gf8Kernels.Level);
+
+        public LeopardField Field => gf;
+
+        public long Length => len;
+
+        /// <summary>The bytes [offset, offset + length) of this range.</summary>
+        public RegionOps Part(long offset, long length) => new(gf, ofs + offset, length, level);
 
         private Span<byte> S(nint p) => new((byte*)p + ofs, (int)len);
 
@@ -621,32 +608,82 @@ public static unsafe class LeopardCodec
         public void Xor(nint dst, nint src) => LeopardCodec.Xor((byte*)dst + ofs, (byte*)src + ofs, len);
 
         /// <summary>x = y · exp(logM).</summary>
-        public void Mul(nint x, nint y, int logM) => MulAdd(x, y, logM, overwrite: true);
-
-        /// <summary>IFFT butterfly: y ^= x; x ^= y · exp(logM).</summary>
-        public void IfftButterfly(nint x, nint y, int logM)
-        {
-            Xor(y, x);
-            MulAdd(x, y, logM, overwrite: false);
-        }
-
-        /// <summary>FFT butterfly: x ^= y · exp(logM); y ^= x.</summary>
-        public void FftButterfly(nint x, nint y, int logM)
-        {
-            MulAdd(x, y, logM, overwrite: false);
-            Xor(y, x);
-        }
-
-        private void MulAdd(nint x, nint y, int logM, bool overwrite)
+        public void Mul(nint x, nint y, int logM)
         {
             int c = Field.Exp(logM);
             if (Field.Bits == 16)
             {
-                Gf16Kernels.MulAdd(Field, (ushort)c, S(y), S(x), overwrite);
+                Gf16Kernels.MulAdd(Field, (ushort)c, S(y), S(x), overwrite: true);
             }
             else
             {
-                Gf8Kernels.MulAdd(Field, (byte)c, S(y), S(x), overwrite);
+                Gf8Kernels.MulAdd(Field, (byte)c, S(y), S(x), overwrite: true);
+            }
+        }
+
+        /// <summary>
+        /// Builds the table of exp(<paramref name="logM"/>) into <paramref name="buffer"/> and returns it; null for
+        /// logM = Modulus, a multiplication by zero.
+        /// </summary>
+        public byte* Table(int logM, byte* buffer)
+        {
+            if (logM == Field.Modulus)
+            {
+                return null;
+            }
+
+            int c = Field.Exp(logM);
+            if (Field.Bits == 16)
+            {
+                Gf16Kernels.BuildTableFast(Field, level, (ushort)c, buffer);
+            }
+            else
+            {
+                Gf8Kernels.BuildTableFast(Field, level, (byte)c, buffer);
+            }
+
+            return buffer;
+        }
+
+        /// <summary>IFFT butterfly: y ^= x; x ^= y · c (just the XOR for a null table, c = 0).</summary>
+        public void IfftButterfly(nint x, nint y, byte* table)
+        {
+            for (long o = 0; o < len; o += ButterflyChunk)
+            {
+                var p = Part(o, Math.Min(ButterflyChunk, len - o));
+                p.Xor(y, x);
+                if (table != null)
+                {
+                    p.MulAdd(x, y, table);
+                }
+            }
+        }
+
+        /// <summary>FFT butterfly: x ^= y · c; y ^= x (just the XOR for a null table, c = 0).</summary>
+        public void FftButterfly(nint x, nint y, byte* table)
+        {
+            for (long o = 0; o < len; o += ButterflyChunk)
+            {
+                var p = Part(o, Math.Min(ButterflyChunk, len - o));
+                if (table != null)
+                {
+                    p.MulAdd(x, y, table);
+                }
+
+                p.Xor(y, x);
+            }
+        }
+
+        /// <summary>x ^= y · c, c given by its table.</summary>
+        private void MulAdd(nint x, nint y, byte* table)
+        {
+            if (Field.Bits == 16)
+            {
+                Gf16Kernels.MulAddWithTable(level, table, (byte*)y + ofs, (byte*)x + ofs, (nint)len, overwrite: false);
+            }
+            else
+            {
+                Gf8Kernels.MulAddWithTable(Field, level, table, (byte*)y + ofs, (byte*)x + ofs, (nint)len, overwrite: false);
             }
         }
     }

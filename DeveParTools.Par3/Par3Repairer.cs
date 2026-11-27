@@ -294,7 +294,11 @@ public static class Par3Repairer
         var available = verify.Blocks.Select(b => b != null).ToArray();
         var known = new Par3BlockSource(verify.Blocks.Select(b => b?.Pieces ?? (IReadOnlyList<(ulong, ulong, PieceSource)>)[]).ToArray(), handles);
         var plan = ChoosePlan(set, missing.Count);
-        var options = context.Combine.Create(plan.Fft != null ? context.Observer.ToProgress() : context.Observer.ToProgress(0.1, 1), context.MemoryBudget / 3);
+        // The matrix repair runs two combines at once (the solve inside the first one's writing) next to the inverted
+        // matrix: a third of the budget each. The FFT repair's buffers are all it holds, so they get the whole budget.
+        var options = plan.Fft != null
+            ? context.Combine.Create(context.Observer.ToProgress())
+            : context.Combine.Create(context.Observer.ToProgress(0.1, 1), context.MemoryBudget / 3);
         if (plan.Fft != null)
         {
             var recoveryMap = new Dictionary<ulong, int>();

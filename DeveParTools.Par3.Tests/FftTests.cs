@@ -1,5 +1,6 @@
 using DeveParTools.Core.Codes;
 using DeveParTools.Core.Codes.Fft;
+using DeveParTools.Core.Operations;
 using DeveParTools.Par3.Packets;
 using DeveParTools.Par3.Tests.TestSupport;
 
@@ -200,6 +201,151 @@ public sealed class FftTests
             }
 
             inner.Read(index, offset, destination);
+        }
+    }
+
+    /// <summary>
+    /// The next pass is read while the current one is computed and written (the processor sat idle while every pass
+    /// read before), and when the read is not done yet, the progress says it is reading.
+    /// </summary>
+    [TestMethod]
+    public void Passes_ReadTheNextPassWhileThisOneIsWritten()
+    {
+        const int count = 20, size = 4096;
+        var data = Blocks(count, size, 70);
+        var layout = Par3Fft.Plan(count, 6, 1);
+        ulong[] indices = [0, 1, 2, 3, 4, 5];
+        int slow = 0;
+        var source = new PassSource(data, offset =>
+        {
+            if (offset > 0 && Interlocked.Exchange(ref slow, 1) == 0)
+            {
+                Thread.Sleep(300); // pass 2's first read: still busy when pass 1 is done
+            }
+        });
+        var sink = new WaitingSink(new Memory(Empty(6, size)), source);
+        var progress = new DetailRecorder();
+        // 2 × 20 input slices + 16 work slices + 1 zero slice of 1 KiB: four passes.
+        var options = new LinearCombineOptions { MemoryBudget = 57 * 1024, Threads = 2, Progress = progress };
+        Par3Fft.Encode(layout, count, indices, source, sink, size, options);
+
+        Assert.IsTrue(sink.SawNextPassRead, "pass 2 was read while pass 1 was written");
+        Assert.IsTrue(progress.Details.Any(d => d.StartsWith("pass 2 of 4: reading the input blocks", StringComparison.Ordinal)), string.Join("\n", progress.Details.Distinct()));
+        var expected = new Memory(Empty(6, size));
+        Par3Fft.Encode(layout, count, indices, new Memory(data), expected, size, Options());
+        for (int i = 0; i < 6; i++)
+        {
+            CollectionAssert.AreEqual(expected.Blocks[i], sink.Inner.Blocks[i], $"recovery block {i}");
+        }
+    }
+
+    [TestMethod]
+    public void Passes_AReadErrorInTheBackgroundKeepsItsType()
+    {
+        var source = new PassSource(Blocks(20, 4096, 71), offset =>
+        {
+            if (offset > 0)
+            {
+                throw new IOException("disk gone");
+            }
+        });
+        var e = Assert.ThrowsExactly<IOException>(() => Par3Fft.Encode(Par3Fft.Plan(20, 6, 1), 20, [0, 1, 2, 3, 4, 5], source, new Memory(Empty(6, 4096)), 4096,
+            new LinearCombineOptions { MemoryBudget = 57 * 1024, Threads = 2 }));
+        Assert.AreEqual("disk gone", e.Message);
+    }
+
+    /// <summary>When a pass fails while the next one is being read, the read must end before its buffers are freed.</summary>
+    [TestMethod]
+    public void Passes_AFailureWaitsForTheBackgroundRead()
+    {
+        var source = new PassSource(Blocks(20, 4096, 72), offset =>
+        {
+            if (offset > 0)
+            {
+                Thread.Sleep(20);
+            }
+        });
+        var sink = new FailingSink();
+        Assert.ThrowsExactly<InvalidOperationException>(() => Par3Fft.Encode(Par3Fft.Plan(20, 6, 1), 20, [0, 1, 2, 3, 4, 5], source, sink, 4096,
+            new LinearCombineOptions { MemoryBudget = 57 * 1024, Threads = 2 }));
+        Assert.AreEqual(0, source.Active, "a background read was still writing into the freed buffers");
+    }
+
+    private sealed class PassSource(byte[][] blocks, Action<long> beforeRead) : IRegionSource
+    {
+        private int _active;
+
+        public int Active => Volatile.Read(ref _active);
+
+        public volatile bool NextPassStarted;
+
+        public void Read(int index, long offset, Span<byte> destination)
+        {
+            Interlocked.Increment(ref _active);
+            try
+            {
+                NextPassStarted |= offset > 0;
+                beforeRead(offset);
+                new Memory(blocks).Read(index, offset, destination);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _active);
+            }
+        }
+    }
+
+    /// <summary>Pass 1's first write waits (up to 10 s) until pass 2 is being read.</summary>
+    private sealed class WaitingSink(Memory inner, PassSource source) : IRegionSink
+    {
+        public Memory Inner => inner;
+
+        public bool SawNextPassRead { get; private set; }
+
+        public void Write(int index, long offset, ReadOnlySpan<byte> data)
+        {
+            if (offset == 0 && !SawNextPassRead)
+            {
+                SawNextPassRead = SpinWait.SpinUntil(() => source.NextPassStarted, TimeSpan.FromSeconds(10));
+            }
+
+            inner.Write(index, offset, data);
+        }
+    }
+
+    private sealed class FailingSink : IRegionSink
+    {
+        public void Write(int index, long offset, ReadOnlySpan<byte> data) => throw new InvalidOperationException("full");
+    }
+
+    private sealed class DetailRecorder : IDetailedProgress
+    {
+        private readonly List<string> _details = [];
+
+        public IReadOnlyList<string> Details
+        {
+            get
+            {
+                lock (_details)
+                {
+                    return [.. _details];
+                }
+            }
+        }
+
+        public void Report(double value)
+        {
+        }
+
+        public void Report(double value, string? detail)
+        {
+            lock (_details)
+            {
+                if (detail != null)
+                {
+                    _details.Add(detail);
+                }
+            }
         }
     }
 

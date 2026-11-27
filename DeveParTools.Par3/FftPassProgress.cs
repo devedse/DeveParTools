@@ -13,6 +13,8 @@ namespace DeveParTools.Par3;
 /// the first pass (they depend on the disk, the processor and the number of blocks), then the times the earlier passes
 /// really took, so the bar moves at an even pace. Example: pass 1 took 2 s to read, 1.5 s to compute and 0.5 s to
 /// write, so from pass 2 on reading is 50% of a pass, computing 37.5% and writing 12.5%.</para>
+/// <para>A pass's input is read in the background while the pass before it is computed and written (see
+/// <c>Par3Fft.RunPasses</c>), so the reading phase is only the wait for what is left of that read, often nothing.</para>
 /// <para>Reports come from several threads (the computing is parallel); the value never goes back.</para>
 /// </remarks>
 internal sealed class FftPassProgress(IProgress<double>? progress, int passes, string computing, string writing)

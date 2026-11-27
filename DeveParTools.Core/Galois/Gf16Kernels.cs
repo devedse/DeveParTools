@@ -177,6 +177,19 @@ public static unsafe class Gf16Kernels
         }
     }
 
+    /// <summary>The table of <paramref name="c"/> in <paramref name="level"/>'s layout (for a caller that uses one table for many calls).</summary>
+    internal static void BuildTableFast(IGf16Multiplier field, SimdLevel level, ushort c, byte* dst)
+    {
+        fixed (byte* basis = Basis(field, level))
+        {
+            TableFromBasis(basis, TableStride(level), c, dst);
+        }
+    }
+
+    /// <summary><c>dst (^)= c·src</c> with a table of c built by <see cref="BuildTableFast"/> (normal layout).</summary>
+    internal static void MulAddWithTable(SimdLevel level, byte* table, byte* src, byte* dst, nint length, bool overwrite)
+        => MulAddMultiCore(level, dst, &src, table, TableStride(level), 1, length, overwrite);
+
     private static byte[] BuildBasis(IGf16Multiplier field, SimdLevel level)
     {
         int stride = TableStride(level);

@@ -145,7 +145,7 @@ public static unsafe class Par3Fft
 
     /// <summary>
     /// Computes the requested recovery blocks (global indices) and hands them to <paramref name="sink"/>, processing the
-    /// block in slices so that (k + 2m) slices of every cohort fit the memory budget.
+    /// block in slices (passes) so that the buffers of a cohort fit the memory budget (see <see cref="RunPasses"/>).
     /// </summary>
     public static void Encode(Layout layout, ulong blockCount, IReadOnlyList<ulong> recoveryIndices, IRegionSource blocks, IRegionSink sink, long blockSize, LinearCombineOptions options)
     {
@@ -167,11 +167,11 @@ public static unsafe class Par3Fft
         int k2 = layout.LeopardOriginals;
         int m = layout.M;
         int workCount = LeopardCodec.EncodeWorkCount(k2, m);
-        long slice = Math.Max(64, options.MemoryBudget / Math.Max(1, k2 + workCount)) / 64 * 64;
-        slice = Math.Min(slice, (blockSize + 63) / 64 * 64);
+        long slice = SliceLength(options.MemoryBudget, Present(layout, blockCount, 0), workCount, blockSize);
         long slices = (blockSize + slice - 1) / slice;
         int cohortsWithWork = Enumerable.Range(0, c).Count(cohort => recoveryIndices.Any(r => (int)(r % (ulong)c) == cohort));
         var progress = new FftPassProgress(options.Progress, (int)(cohortsWithWork * slices), "computing the recovery data", "writing the recovery data");
+        bool parallelWrites = sink is IConcurrentRegionSink;
         for (int cohort = 0; cohort < c; cohort++)
         {
             var wanted = recoveryIndices.Where(r => (int)(r % (ulong)c) == cohort).ToList();
@@ -180,57 +180,54 @@ public static unsafe class Par3Fft
                 continue;
             }
 
-            // Input blocks of this cohort that exist (the rest of the k2 positions are zero padding).
-            int present = (int)Math.Min((ulong)k2, (blockCount - (ulong)cohort + (ulong)c - 1) / (ulong)c);
-
-            var buffers = Alloc(k2 + workCount, slice);
+            // Input blocks of this cohort that exist; the rest of the k2 positions are zero padding.
+            int present = Present(layout, blockCount, cohort);
+            var work = Alloc(workCount, slice);
             try
             {
-                for (long offset = 0; offset < blockSize; offset += slice)
-                {
-                    options.CancellationToken.ThrowIfCancellationRequested();
-                    progress.StartPass();
-                    long len = Math.Min(slice, blockSize - offset);
-                    long lenAligned = (len + 63) / 64 * 64;
-                    var originals = new nint[k2];
-                    for (int j = 0; j < k2; j++)
+                RunPasses(present, slice, blockSize, progress, options.CancellationToken,
+                    (i, offset, destination) => blocks.Read((int)((ulong)i * (ulong)c + (ulong)cohort), offset, destination),
+                    (offset, len, lenAligned, inputs, zero) =>
                     {
-                        ulong block = (ulong)j * (ulong)c + (ulong)cohort;
-                        originals[j] = buffers[j];
-                        var span = new Span<byte>((byte*)buffers[j], (int)lenAligned);
-                        span.Clear();
-                        if (block < blockCount)
+                        var originals = new nint[k2];
+                        for (int j = 0; j < k2; j++)
                         {
-                            blocks.Read((int)block, offset, span[..(int)len]);
-                            if (j % 256 == 255 || j + 1 == present)
+                            originals[j] = j < present ? inputs[j] : zero;
+                        }
+
+                        progress.Begin(FftPassProgress.Phase.Computing);
+                        LeopardCodec.Encode(layout.Field, originals, m, work, lenAligned, options.Threads, progress.Computing);
+                        progress.Begin(FftPassProgress.Phase.Writing);
+                        int written = 0;
+                        void Write(int i)
+                        {
+                            int local = (int)(wanted[i] / (ulong)c);
+                            sink.Write(position[wanted[i]], offset, new ReadOnlySpan<byte>((byte*)work[local], (int)len));
+                            int n = Interlocked.Increment(ref written);
+                            if (n % 64 == 0 || n == wanted.Count)
                             {
-                                options.CancellationToken.ThrowIfCancellationRequested();
-                                progress.Reading(j + 1, present);
+                                progress.Writing(n, wanted.Count);
                             }
                         }
-                    }
 
-                    progress.Begin(FftPassProgress.Phase.Computing);
-                    var work = buffers.AsSpan(k2, workCount).ToArray();
-                    LeopardCodec.Encode(layout.Field, originals, m, work, lenAligned, options.Threads, progress.Computing);
-                    progress.Begin(FftPassProgress.Phase.Writing);
-                    for (int i = 0; i < wanted.Count; i++)
-                    {
-                        int local = (int)(wanted[i] / (ulong)c);
-                        sink.Write(position[wanted[i]], offset, new ReadOnlySpan<byte>((byte*)work[local], (int)len));
-                        if (i % 64 == 63 || i + 1 == wanted.Count)
+                        if (parallelWrites)
                         {
-                            options.CancellationToken.ThrowIfCancellationRequested();
-                            progress.Writing(i + 1, wanted.Count);
+                            // The recovery files hash what they get: in parallel, that is no longer one core's work.
+                            Parallel.For(0, wanted.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, options.Threads), CancellationToken = options.CancellationToken }, Write);
                         }
-                    }
-
-                    progress.EndPass();
-                }
+                        else
+                        {
+                            for (int i = 0; i < wanted.Count; i++)
+                            {
+                                options.CancellationToken.ThrowIfCancellationRequested();
+                                Write(i);
+                            }
+                        }
+                    });
             }
             finally
             {
-                Free(buffers);
+                Free(work);
             }
         }
     }
@@ -255,8 +252,9 @@ public static unsafe class Par3Fft
         int k2 = layout.LeopardOriginals;
         int m = layout.M;
         int workCount = LeopardCodec.DecodeWorkCount(k2, m);
-        long slice = Math.Max(64, options.MemoryBudget / Math.Max(1, k2 + m + workCount)) / 64 * 64;
-        slice = Math.Min(slice, (blockSize + 63) / 64 * 64);
+
+        // A cohort reads its available blocks and as many recovery blocks as it misses: never more than its blocks.
+        long slice = SliceLength(options.MemoryBudget, Present(layout, blockCount, 0), workCount, blockSize);
         long slices = (blockSize + slice - 1) / slice;
         int cohortsWithWork = Enumerable.Range(0, c).Count(cohort => MissingInCohort(layout, blockCount, available, cohort).Count > 0);
         var progress = new FftPassProgress(options.Progress, (int)(cohortsWithWork * slices), "computing the missing blocks", "writing the rebuilt blocks");
@@ -278,75 +276,173 @@ public static unsafe class Par3Fft
 
             // Any recovery blocks will do, as many as there are missing blocks: reading more only costs time. (A file of
             // 201 blocks missing from a set with 5,316 recovery blocks: reading them all doubled the time of the repair.)
-            recLocal = recLocal.OrderBy(r => r.Key).Take(missingLocal.Count).ToDictionary(r => r.Key, r => r.Value);
+            var usedRecovery = recLocal.OrderBy(r => r.Key).Take(missingLocal.Count).ToList();
 
-            var buffers = Alloc(k2 + m + workCount, slice);
+            // What a pass reads: the cohort's available blocks (local positions), then the recovery blocks used.
+            int present = Present(layout, blockCount, cohort);
+            var knownLocal = Enumerable.Range(0, present).Where(j => available[(ulong)j * (ulong)c + (ulong)cohort]).ToList();
+            int inputCount = knownLocal.Count + usedRecovery.Count;
+            var work = Alloc(workCount, slice);
             try
             {
-                for (long offset = 0; offset < blockSize; offset += slice)
-                {
-                    options.CancellationToken.ThrowIfCancellationRequested();
-                    progress.StartPass();
-                    long len = Math.Min(slice, blockSize - offset);
-                    long lenAligned = (len + 63) / 64 * 64;
-                    var originals = new nint[k2];
-                    int toRead = k2 + recLocal.Count, read = 0;
-                    for (int j = 0; j < k2; j++)
+                RunPasses(inputCount, slice, blockSize, progress, options.CancellationToken,
+                    (i, offset, destination) =>
                     {
-                        ulong block = (ulong)j * (ulong)c + (ulong)cohort;
-                        var span = new Span<byte>((byte*)buffers[j], (int)lenAligned);
-                        span.Clear();
-                        if (block >= blockCount)
+                        if (i < knownLocal.Count)
                         {
-                            originals[j] = buffers[j]; // dummy zero block (known)
+                            blocks.Read((int)((ulong)knownLocal[i] * (ulong)c + (ulong)cohort), offset, destination);
                         }
-                        else if (available[block])
+                        else
                         {
-                            blocks.Read((int)block, offset, span[..(int)len]);
-                            originals[j] = buffers[j];
+                            recoveryReader.Read(usedRecovery[i - knownLocal.Count].Value, offset, destination);
+                        }
+                    },
+                    (offset, len, lenAligned, inputs, zero) =>
+                    {
+                        // Missing originals and recovery blocks that are not used stay 0; positions past the cohort's
+                        // blocks are known zero blocks.
+                        var originals = new nint[k2];
+                        for (int j = present; j < k2; j++)
+                        {
+                            originals[j] = zero;
                         }
 
-                        if (++read % 256 == 0)
+                        for (int i = 0; i < knownLocal.Count; i++)
+                        {
+                            originals[knownLocal[i]] = inputs[i];
+                        }
+
+                        var rec = new nint[m];
+                        for (int i = 0; i < usedRecovery.Count; i++)
+                        {
+                            rec[usedRecovery[i].Key] = inputs[knownLocal.Count + i];
+                        }
+
+                        progress.Begin(FftPassProgress.Phase.Computing);
+                        LeopardCodec.Decode(layout.Field, originals, rec, work, lenAligned, options.Threads, progress.Computing);
+                        progress.Begin(FftPassProgress.Phase.Writing);
+                        for (int i = 0; i < missingLocal.Count; i++)
                         {
                             options.CancellationToken.ThrowIfCancellationRequested();
-                            progress.Reading(read, toRead);
+                            ulong block = (ulong)missingLocal[i] * (ulong)c + (ulong)cohort;
+                            sink.Write((int)block, offset, new ReadOnlySpan<byte>((byte*)work[missingLocal[i]], (int)len));
+                            if (i % 64 == 63 || i + 1 == missingLocal.Count)
+                            {
+                                progress.Writing(i + 1, missingLocal.Count);
+                            }
                         }
-                    }
-
-                    var rec = new nint[m];
-                    foreach (var (local, reader) in recLocal)
-                    {
-                        var span = new Span<byte>((byte*)buffers[k2 + local], (int)lenAligned);
-                        span.Clear();
-                        recoveryReader.Read(reader, offset, span[..(int)len]);
-                        rec[local] = buffers[k2 + local];
-                        if (++read % 256 == 0 || read == toRead)
-                        {
-                            progress.Reading(read, toRead);
-                        }
-                    }
-
-                    progress.Begin(FftPassProgress.Phase.Computing);
-                    var work = buffers.AsSpan(k2 + m, workCount).ToArray();
-                    LeopardCodec.Decode(layout.Field, originals, rec, work, lenAligned, options.Threads, progress.Computing);
-                    progress.Begin(FftPassProgress.Phase.Writing);
-                    for (int i = 0; i < missingLocal.Count; i++)
-                    {
-                        ulong block = (ulong)missingLocal[i] * (ulong)c + (ulong)cohort;
-                        sink.Write((int)block, offset, new ReadOnlySpan<byte>((byte*)work[missingLocal[i]], (int)len));
-                        if (i % 64 == 63 || i + 1 == missingLocal.Count)
-                        {
-                            progress.Writing(i + 1, missingLocal.Count);
-                        }
-                    }
-
-                    progress.EndPass();
-                }
+                    });
             }
             finally
             {
-                Free(buffers);
+                Free(work);
             }
+        }
+    }
+
+    /// <summary>The input blocks cohort <paramref name="cohort"/> really has (at most k2; the rest are zero padding).</summary>
+    private static int Present(Layout layout, ulong blockCount, int cohort)
+    {
+        ulong c = (ulong)layout.Cohorts;
+        return (int)Math.Min((ulong)layout.LeopardOriginals, (blockCount - (ulong)cohort + c - 1) / c);
+    }
+
+    /// <summary>
+    /// The slice of every block a pass works on: the work buffers, two sets of input buffers (one being computed, one
+    /// being read) and one zero buffer must fit the memory budget. A multiple of 64 bytes, at most the block.
+    /// </summary>
+    internal static long SliceLength(long memoryBudget, int inputs, int workCount, long blockSize)
+    {
+        long slice = Math.Max(64, memoryBudget / Math.Max(1, 2L * inputs + workCount + 1)) / 64 * 64;
+        return Math.Min(slice, (blockSize + 63) / 64 * 64);
+    }
+
+    /// <summary>
+    /// Runs the passes of an FFT encode or repair: pass p reads <paramref name="inputCount"/> input slices (bytes
+    /// [offset, offset + slice) of every input block), then <paramref name="compute"/> computes and writes the pass.
+    /// </summary>
+    /// <remarks>
+    /// The next pass's slices are read in the background, into a second set of buffers, while the current pass is
+    /// computed and written: the disk and the processor work at the same time instead of taking turns. (Repairing
+    /// 201 blocks from a set of 5,316 blocks of 2.69 MiB took 33 passes, each reading a 96 KB slice of every block
+    /// and then computing; the processor was idle while each pass read.) The progress of the reading phase is what is
+    /// left of the background read once the pass before is done, often nothing.
+    /// </remarks>
+    /// <param name="read">Reads input i's bytes [offset, offset + destination.Length); past its end, zeros.</param>
+    /// <param name="compute">Computes and writes one pass: (offset, length, length rounded up to 64 bytes, the input
+    /// slices, a zero slice for the padding positions).</param>
+    private static void RunPasses(int inputCount, long slice, long blockSize, FftPassProgress progress, CancellationToken token,
+        Action<int, long, Span<byte>> read, Action<long, long, long, nint[], nint> compute)
+    {
+        nint[][] sets = [Alloc(inputCount, slice), Alloc(inputCount, slice)];
+        nint zero = (nint)NativeMemory.AlignedAlloc((nuint)slice, 64);
+        new Span<byte>((void*)zero, (int)slice).Clear();
+        int readCount = 0;
+        Task? reader = null;
+        try
+        {
+            void ReadPass(long offset, nint[] set)
+            {
+                long len = Math.Min(slice, blockSize - offset);
+                long lenAligned = (len + 63) / 64 * 64;
+                for (int i = 0; i < inputCount; i++)
+                {
+                    token.ThrowIfCancellationRequested();
+                    var span = new Span<byte>((byte*)set[i], (int)lenAligned);
+                    read(i, offset, span[..(int)len]);
+                    span[(int)len..].Clear();
+                    Volatile.Write(ref readCount, i + 1);
+                }
+            }
+
+            void StartRead(long offset, nint[] set)
+            {
+                Volatile.Write(ref readCount, 0);
+                reader = Task.Run(() => ReadPass(offset, set), CancellationToken.None);
+            }
+
+            // Waits for the read of the pass that starts now, showing how far it got.
+            void FinishRead()
+            {
+                while (Task.WaitAny([reader!], 50, token) < 0)
+                {
+                    progress.Reading(Volatile.Read(ref readCount), inputCount);
+                }
+
+                var done = reader!;
+                reader = null;
+                done.GetAwaiter().GetResult();
+                progress.Reading(inputCount, inputCount);
+            }
+
+            StartRead(0, sets[0]);
+            int pass = 0;
+            for (long offset = 0; offset < blockSize; offset += slice, pass++)
+            {
+                progress.StartPass();
+                FinishRead();
+                if (offset + slice < blockSize)
+                {
+                    StartRead(offset + slice, sets[(pass + 1) & 1]);
+                }
+
+                long len = Math.Min(slice, blockSize - offset);
+                compute(offset, len, (len + 63) / 64 * 64, sets[pass & 1], zero);
+                progress.EndPass();
+            }
+        }
+        finally
+        {
+            if (reader != null)
+            {
+                // The read writes into the buffers: it must be done before they are freed. Its own exception (if any)
+                // is superseded by the one propagating now.
+                Task.WaitAny(reader);
+            }
+
+            Free(sets[0]);
+            Free(sets[1]);
+            NativeMemory.AlignedFree((void*)zero);
         }
     }
 
