@@ -593,6 +593,25 @@ public sealed class CreateTests
         Assert.IsTrue(Par3Files.Verify(dir["set.par3"]).AllFilesComplete);
     }
 
+    /// <summary>
+    /// Verifying reads files in windows of whole blocks (at least 4 MiB); a block larger than the window is checked on
+    /// its own, in pieces.
+    /// </summary>
+    [TestMethod]
+    public void BlocksLargerThanTheVerifyWindow_AreCheckedOneByOne()
+    {
+        using var dir = new TempDir();
+        const ulong blockSize = (4 << 20) + 64;
+        dir.Write("a.bin", TestData.Random(1, (int)(2 * blockSize) + 5000));
+        Create(Options(dir, blockSize: blockSize, recovery: 1));
+        var small = new OperationContext { MemoryBudget = 1 << 20, Threads = 2 }; // window: the 4 MiB minimum
+        Assert.IsTrue(Par3Files.Verify(dir["set.par3"], small).AllFilesComplete);
+        TestData.Corrupt(dir["a.bin"], (int)blockSize + 10, 5);
+        var damaged = Par3Files.Verify(dir["set.par3"], small);
+        Assert.IsFalse(damaged.AllFilesComplete);
+        Assert.AreEqual(1, damaged.MissingBlocks);
+    }
+
     [TestMethod]
     public void ManyBlocks_ExternalDataPacketsHoldAtMost1024Checksums()
     {

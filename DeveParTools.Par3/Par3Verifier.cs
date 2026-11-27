@@ -90,7 +90,7 @@ public static class Par3Verifier
 
         Parallel.For(0, par3Files.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, context.Threads), CancellationToken = token }, i =>
         {
-            reads[i] = Par3PacketReader.ReadFile(par3Files[i], token, position => Reached(i, position));
+            reads[i] = Par3PacketReader.ReadFile(par3Files[i], token, position => Reached(i, position), context.Threads);
             Reached(i, File.Exists(par3Files[i]) ? new FileInfo(par3Files[i]).Length : 0);
         });
         var set = Par3InputSet.Assemble(reads) ?? throw new InvalidDataException("No PAR3 Start and Root packets found; the input set cannot be used.");
@@ -165,6 +165,9 @@ public static class Par3Verifier
         var present = files.Where(fv => fv.TargetPath.Length > 0 && File.Exists(fv.TargetPath)).ToList();
         var checkedUpTo = new long[present.Count];
         var sync = new Lock();
+
+        // Each file is read in windows of whole blocks (see CheckInPlace); the files checked at once share the budget.
+        long window = Math.Clamp(context.MemoryBudget / Math.Max(1, Math.Min(context.Threads, present.Count)), 4L << 20, MaxWindow);
         Parallel.For(0, present.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, context.Threads), CancellationToken = token }, i =>
         {
             var fv = present[i];
@@ -175,7 +178,7 @@ public static class Par3Verifier
                 observer.Progress(Math.Min(1, (double)checkedUpTo.Sum() / totalBytes), name);
             }
 
-            bool complete = CheckInPlace(fv, set, blocks, tails, handles, map, sync, Reached);
+            bool complete = CheckInPlace(fv, set, blocks, tails, handles, map, sync, Reached, window, context.Threads);
             fv.Status = complete ? Par3FileStatus.Complete : Par3FileStatus.Damaged;
             Reached(new FileInfo(fv.TargetPath).Length);
         });
@@ -259,17 +262,57 @@ public static class Par3Verifier
 
     private static int CountTails(Par3InputSet set) => set.Files.Sum(f => f.Chunks.Count(c => c.TailLength(set.BlockSize) >= Par3Chunk.InlineLimit));
 
+    /// <summary>The most a file is read at once while it is checked.</summary>
+    private const long MaxWindow = 64L << 20;
+
     /// <summary>Reads a file in chunk order, checking every block and tail at its expected position.</summary>
+    /// <remarks>
+    /// Full blocks are read in windows of whole blocks (up to <paramref name="window"/> bytes, e.g. 23 blocks of
+    /// 2.69 MiB): the file's own hash gets the whole window at once, which lets BLAKE3 spread it over the cores, while
+    /// the blocks of the window get their checksums in parallel. Block by block, one core did all three checksums of
+    /// every byte, so a 7.3 GB file took 15 to 20 seconds, whatever the number of cores.
+    /// </remarks>
     /// <param name="reached">Called now and then with how far into the file the check has got (bytes), for progress.</param>
-    private static bool CheckInPlace(Par3FileVerification fv, Par3InputSet set, BlockAvailability?[] blocks, Dictionary<(Par3FileEntry, Par3Chunk), PieceSource> tails, FileHandleCache handles, BlockStateMap map, Lock sync, Action<long> reached)
+    private static bool CheckInPlace(Par3FileVerification fv, Par3InputSet set, BlockAvailability?[] blocks, Dictionary<(Par3FileEntry, Par3Chunk), PieceSource> tails, FileHandleCache handles, BlockStateMap map, Lock sync, Action<long> reached, long window, int threads)
     {
         var f = fv.File;
         long actualLen = new FileInfo(fv.TargetPath).Length;
         ulong bs = set.BlockSize;
         var hasher = new Par3FileHasher(f);
-        var buf = new byte[(int)Math.Min(bs, 1 << 24)];
+        byte[]? buf = null;
         bool allPieces = true;
         var unverified = new List<(ulong Index, long Position)>();
+
+        void Block(ulong idx, long pos, bool ok, ulong crc, Fingerprint fp)
+        {
+            if (ok && set.BlockChecksums[idx] == null)
+            {
+                // No External Data checksum (the specification allows that for blocks stored in Data packets):
+                // the block is only known to be good if the whole file hash matches.
+                unverified.Add((idx, pos));
+            }
+            else if (ok && set.BlockChecksums[idx] is { } expected && expected.Crc64 == crc && expected.Hash == fp)
+            {
+                lock (sync)
+                {
+                    blocks[idx] ??= new BlockAvailability([(0, bs, new PieceSource(fv.TargetPath, pos))]);
+                }
+
+                map.Set((int)idx, BlockState.Found);
+            }
+            else
+            {
+                allPieces = false;
+                lock (sync)
+                {
+                    if (blocks[idx] == null)
+                    {
+                        map.Set((int)idx, BlockState.Damaged);
+                    }
+                }
+            }
+        }
+
         ulong offset = 0;
         foreach (var c in f.Chunks)
         {
@@ -282,41 +325,20 @@ public static class Par3Verifier
             }
 
             ulong full = c.FullBlocks(bs);
-            for (ulong b = 0; b < full; b++)
+            if (bs <= (ulong)window)
             {
-                long pos = (long)(offset + b * bs);
-                if (b % 64 == 63)
+                CheckWindows(fv.TargetPath, c.FirstBlock, full, (long)offset, (long)bs, actualLen, (int)(window / (long)bs), handles, hasher, threads, Block, reached);
+            }
+            else
+            {
+                // Blocks larger than a window: one at a time, in pieces.
+                buf ??= new byte[(int)Math.Min(bs, 1 << 24)];
+                for (ulong b = 0; b < full; b++)
                 {
+                    long pos = (long)(offset + b * bs);
                     reached(pos);
-                }
-
-                bool ok = HashRange(fv.TargetPath, pos, (long)bs, handles, hasher, buf, out var crc, out var fp) && actualLen >= pos + (long)bs;
-                ulong idx = c.FirstBlock + b;
-                if (ok && set.BlockChecksums[idx] == null)
-                {
-                    // No External Data checksum (the specification allows that for blocks stored in Data packets):
-                    // the block is only known to be good if the whole file hash matches.
-                    unverified.Add((idx, pos));
-                }
-                else if (ok && set.BlockChecksums[idx] is { } expected && expected.Crc64 == crc && expected.Hash == fp)
-                {
-                    lock (sync)
-                    {
-                        blocks[idx] ??= new BlockAvailability([(0, bs, new PieceSource(fv.TargetPath, pos))]);
-                    }
-
-                    map.Set((int)idx, BlockState.Found);
-                }
-                else
-                {
-                    allPieces = false;
-                    lock (sync)
-                    {
-                        if (blocks[idx] == null)
-                        {
-                            map.Set((int)idx, BlockState.Damaged);
-                        }
-                    }
+                    bool ok = HashRange(fv.TargetPath, pos, (long)bs, handles, hasher, buf, out var crc, out var fp) && actualLen >= pos + (long)bs;
+                    Block(c.FirstBlock + b, pos, ok, crc, fp);
                 }
             }
 
@@ -365,6 +387,47 @@ public static class Par3Verifier
         }
 
         return complete;
+    }
+
+    /// <summary>
+    /// Checks <paramref name="count"/> full blocks from <paramref name="start"/> on, <paramref name="perWindow"/> at
+    /// a time (see <see cref="CheckInPlace"/>), and reports each to <paramref name="block"/>, in order.
+    /// </summary>
+    private static void CheckWindows(string path, ulong firstBlock, ulong count, long start, long bs, long actualLen, int perWindow, FileHandleCache handles,
+        Par3FileHasher hasher, int threads, Action<ulong, long, bool, ulong, Fingerprint> block, Action<long> reached)
+    {
+        if (count == 0)
+        {
+            return;
+        }
+
+        var data = GC.AllocateUninitializedArray<byte>((int)(Math.Min((ulong)perWindow, count) * (ulong)bs));
+        var crcs = new ulong[perWindow];
+        var hashes = new Fingerprint[perWindow];
+        var parallel = new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, threads) };
+        for (ulong first = 0; first < count; first += (ulong)perWindow)
+        {
+            int n = (int)Math.Min((ulong)perWindow, count - first);
+            long pos = start + (long)first * bs;
+            reached(pos);
+            var span = data.AsMemory(0, (int)(n * bs));
+            int got = handles.ReadPadded(path, pos, span.Span);
+            Parallel.Invoke(
+                parallel,
+                () => hasher.Protected(span.Span[..got]),
+                () => Parallel.For(0, n, parallel, j =>
+                {
+                    var b = span.Span.Slice((int)(j * bs), (int)bs);
+                    crcs[j] = Crc64Iso.Compute(b);
+                    hashes[j] = Fingerprint.Compute(b);
+                }));
+            for (int j = 0; j < n; j++)
+            {
+                long blockPos = pos + j * bs;
+                bool ok = got >= (j + 1) * bs && actualLen >= blockPos + bs;
+                block(firstBlock + first + (ulong)j, blockPos, ok, crcs[j], hashes[j]);
+            }
+        }
     }
 
     private static bool HashRange(string path, long pos, long length, FileHandleCache handles, Par3FileHasher fileHasher, byte[] buf, out ulong crc, out Fingerprint fp)

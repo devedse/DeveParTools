@@ -10,12 +10,23 @@ public sealed class PacketReaderTests
 {
     private static readonly InputSetId Set = new(42);
 
+    /// <summary>
+    /// Reads the file one packet after the other, and with 4 threads (headers first, then all packets checked at
+    /// once, back to the careful way when anything is off): both must find exactly the same.
+    /// </summary>
     private static Par3FileReadResult Read(params byte[][] parts)
     {
         using var dir = new TempDir();
         var path = dir.Write("x.par3", parts.SelectMany(p => p).ToArray());
-        return Par3PacketReader.ReadFile(path);
+        var oneByOne = Par3PacketReader.ReadFile(path);
+        var reached = new List<long>();
+        var parallel = Par3PacketReader.ReadFile(path, default, p => { lock (reached) { reached.Add(p); } }, threads: 4);
+        Assert.AreEqual(Summary(oneByOne), Summary(parallel));
+        return oneByOne;
     }
+
+    private static string Summary(Par3FileReadResult r)
+        => string.Join(", ", r.Packets.Select(p => $"{p.GetType().Name}@{p.SourceOffset}:{p.Checksum}")) + $" | damaged {r.DamagedPackets}";
 
     private static byte[] Comment(string text) => Par3PacketWriter.Text(Set, Par3PacketTypes.Comment, text);
 
@@ -217,5 +228,6 @@ public sealed class PacketReaderTests
         using var dir = new TempDir();
         var path = dir.Write("c.par3", Comment("x"));
         Assert.ThrowsExactly<OperationCanceledException>(() => Par3PacketReader.ReadFile(path, new CancellationToken(true)));
+        Assert.ThrowsExactly<OperationCanceledException>(() => Par3PacketReader.ReadFile(path, new CancellationToken(true), threads: 4));
     }
 }

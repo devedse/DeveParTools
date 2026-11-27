@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Text;
 using DeveParTools.Core.Hashing;
@@ -307,6 +308,10 @@ public sealed class Par3FileReadResult
 /// [packet A ok][packet B, damaged    ][junk][packet C ok]
 ///  ^ jump      ^ checksum fails → search from B+1 ... ^ found magic
 /// </code>
+/// <para>With several threads, the walk first follows the length fields from header to header without checking
+/// anything, then checks all packets at once (a set's recovery files are mostly large recovery packets: checking them
+/// one after the other made loading one core's work). If a header is not where the walk expects one, or a packet
+/// turns out damaged, the file is read again the careful way above.</para>
 /// </remarks>
 public static class Par3PacketReader
 {
@@ -328,7 +333,73 @@ public static class Par3PacketReader
     }
 
     /// <param name="reached">Called with how far into the file reading has got (about every 4 MiB, and at the end), for progress.</param>
-    public static Par3FileReadResult ReadFile(string path, CancellationToken cancellationToken = default, Action<long>? reached = null)
+    /// <param name="threads">Packets checked at once (see the remarks).</param>
+    public static Par3FileReadResult ReadFile(string path, CancellationToken cancellationToken = default, Action<long>? reached = null, int threads = 1)
+    {
+        if (threads > 1 && ReadInParallel(path, threads, cancellationToken, reached) is { } fast)
+        {
+            return fast;
+        }
+
+        return ReadOneByOne(path, cancellationToken, reached);
+    }
+
+    /// <summary>
+    /// The packets of a file whose headers follow one another with nothing in between, checked in parallel; null when
+    /// the file is not like that (or a packet is damaged), so it must be read the careful way.
+    /// </summary>
+    private static Par3FileReadResult? ReadInParallel(string path, int threads, CancellationToken cancellationToken, Action<long>? reached)
+    {
+        var headers = new List<(long Position, long Length, byte[] Header)>();
+        using (var handle = System.IO.File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+        {
+            long fileLen = RandomAccess.GetLength(handle);
+            for (long pos = 0; pos + Par3PacketTypes.HeaderSize <= fileLen;)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var header = new byte[Par3PacketTypes.HeaderSize];
+                FileHandleCache.ReadPadded(handle, pos, header);
+                ulong length = BinaryPrimitives.ReadUInt64LittleEndian(header.AsSpan(24));
+                if (!header.AsSpan(0, 8).SequenceEqual(Par3PacketTypes.Magic) || length < Par3PacketTypes.HeaderSize || length > (ulong)(fileLen - pos))
+                {
+                    return null;
+                }
+
+                headers.Add((pos, (long)length, header));
+                pos += (long)length;
+            }
+        }
+
+        var outcomes = new ReadOutcome[headers.Count];
+        var packets = new Par3Packet?[headers.Count];
+        long done = 0;
+        var progress = new Lock();
+        using var cache = new FileHandleCache();
+        Parallel.For(0, headers.Count, new ParallelOptions { MaxDegreeOfParallelism = threads, CancellationToken = cancellationToken }, i =>
+        {
+            var (pos, length, header) = headers[i];
+            outcomes[i] = TryRead(cache.Get(path), path, pos, length, header, out packets[i]);
+            if (reached != null)
+            {
+                lock (progress)
+                {
+                    done += length;
+                    reached(done);
+                }
+            }
+        });
+        if (outcomes.Contains(ReadOutcome.Damaged))
+        {
+            return null;
+        }
+
+        var result = new Par3FileReadResult { Path = path };
+        result.Packets.AddRange(packets.OfType<Par3Packet>());
+        result.DamagedPackets = outcomes.Count(o => o == ReadOutcome.Malformed);
+        return result;
+    }
+
+    private static Par3FileReadResult ReadOneByOne(string path, CancellationToken cancellationToken, Action<long>? reached)
     {
         var result = new Par3FileReadResult { Path = path };
         using var handle = System.IO.File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.SequentialScan);
@@ -407,20 +478,28 @@ public static class Par3PacketReader
             }
 
             body = new byte[fixedLen];
-            var buf = new byte[(int)Math.Min(bodyLen, 1 << 20)];
-            long off = pos + Par3PacketTypes.HeaderSize;
-            for (long left = bodyLen; left > 0;)
+            int bufLen = (int)Math.Min(bodyLen, 1 << 20);
+            var buf = ArrayPool<byte>.Shared.Rent(bufLen);
+            try
             {
-                int n = (int)Math.Min(left, buf.Length);
-                FileHandleCache.ReadPadded(handle, off, buf.AsSpan(0, n));
-                if (off == pos + Par3PacketTypes.HeaderSize)
+                long off = pos + Par3PacketTypes.HeaderSize;
+                for (long left = bodyLen; left > 0;)
                 {
-                    buf.AsSpan(0, fixedLen).CopyTo(body);
-                }
+                    int n = (int)Math.Min(left, bufLen);
+                    FileHandleCache.ReadPadded(handle, off, buf.AsSpan(0, n));
+                    if (off == pos + Par3PacketTypes.HeaderSize)
+                    {
+                        buf.AsSpan(0, fixedLen).CopyTo(body);
+                    }
 
-                hasher.Update(buf.AsSpan(0, n));
-                off += n;
-                left -= n;
+                    hasher.Update(buf.AsSpan(0, n));
+                    off += n;
+                    left -= n;
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buf);
             }
         }
         else
