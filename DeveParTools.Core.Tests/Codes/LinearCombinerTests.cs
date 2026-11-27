@@ -27,6 +27,12 @@ public sealed class LinearCombinerTests
         LinearCombiner.Combine(F8, new MatrixCoefficients<byte>(new GfMatrix<byte>(2, 0, F8)), 0, 2, new MemoryRegions([]), new MemoryRegions(outputs), 100,
             new LinearCombineOptions { MemoryBudget = 64 }); // several slices
         Assert.IsTrue(outputs.All(o => o.All(b => b == 0)));
+
+        // GF(2^16): the kernel's layout is converted back over whole blocks, padding included, so that must be zero too.
+        var f16 = new Gf16Field(GaloisField16.Par2);
+        var outputs16 = new[] { Filled(10, 0xAA) };
+        LinearCombiner.Combine(f16, new MatrixCoefficients<ushort>(new GfMatrix<ushort>(1, 0, f16)), 0, 1, new MemoryRegions([]), new MemoryRegions(outputs16), 10);
+        CollectionAssert.AreEqual(new byte[10], outputs16[0]);
     }
 
     [TestMethod]
@@ -57,6 +63,28 @@ public sealed class LinearCombinerTests
 
             CollectionAssert.AreEqual(expected, outData[j], $"output {j}");
         }
+    }
+
+    [TestMethod]
+    public void ZeroCoefficientBatches_AreSkipped_ByThePerOutputLoopToo()
+    {
+        // GF(2^8) as a wide field (no prepared kernel: the per-output loop). Output 0 has only zero coefficients,
+        // output 1 zeros in its second batch.
+        var wide = new GfWideField(1, [0x1D]);
+        var rnd = new Random(4);
+        int inputs = 4, length = 64;
+        var inData = Enumerable.Range(0, inputs).Select(_ => TestData.RandomBytes(rnd, length)).ToArray();
+        var m = new GfMatrix<UInt128>(2, inputs, wide);
+        m[1, 0] = 3;
+        m[1, 1] = 5;
+        var outData = Enumerable.Range(0, 2).Select(_ => Filled(length, 0xEE)).ToArray();
+        LinearCombiner.Combine(wide, new MatrixCoefficients<UInt128>(m), inputs, 2, new MemoryRegions(inData), new MemoryRegions(outData), length,
+            new LinearCombineOptions { SourcesPerBatch = 2 });
+        var expected = new byte[length];
+        Gf8Kernels.MulAdd(GaloisField8.Default, 3, inData[0], expected);
+        Gf8Kernels.MulAdd(GaloisField8.Default, 5, inData[1], expected);
+        CollectionAssert.AreEqual(new byte[length], outData[0], "only zero coefficients: zero");
+        CollectionAssert.AreEqual(expected, outData[1]);
     }
 
     [TestMethod]
@@ -128,21 +156,21 @@ public sealed class LinearCombinerTests
         foreach (int sym in new[] { 1, 2, 3, 16, 24 })
         {
             int slice = LinearCombiner.PlanSliceLength(sym, 100, 10, 1L << 30, options);
-            Assert.AreEqual(0, slice % 64, $"sym={sym}");
+            Assert.AreEqual(0, slice % 128, $"sym={sym}");
             Assert.AreEqual(0, slice % sym, $"sym={sym}");
             Assert.IsTrue(slice > 0 && slice <= (1 << 20) / (10 + 2 * 16), $"sym={sym}: fits the budget");
         }
 
-        // Small regions are done in one slice, rounded up to the alignment.
-        Assert.AreEqual(64, LinearCombiner.PlanSliceLength(2, 3, 3, 10, options));
-        Assert.AreEqual(192, LinearCombiner.PlanSliceLength(3, 3, 3, 10, options));
+        // Small regions are done in one slice, rounded up to the alignment (128 bytes, the largest kernel block).
+        Assert.AreEqual(128, LinearCombiner.PlanSliceLength(2, 3, 3, 10, options));
+        Assert.AreEqual(384, LinearCombiner.PlanSliceLength(3, 3, 3, 10, options));
 
         // A tiny budget still gives one aligned unit.
-        Assert.AreEqual(64, LinearCombiner.PlanSliceLength(1, 100, 100, 1L << 30, new LinearCombineOptions { MemoryBudget = 1 }));
+        Assert.AreEqual(128, LinearCombiner.PlanSliceLength(1, 100, 100, 1L << 30, new LinearCombineOptions { MemoryBudget = 1 }));
 
         // A huge budget is capped so the slice stays addressable as an int span.
         int capped = LinearCombiner.PlanSliceLength(1, 1, 1, long.MaxValue / 4, new LinearCombineOptions { MemoryBudget = long.MaxValue });
-        Assert.AreEqual(int.MaxValue / 2 / 64 * 64, capped);
+        Assert.AreEqual(int.MaxValue / 2 / 128 * 128, capped);
     }
 
     [TestMethod]
@@ -186,7 +214,100 @@ public sealed class LinearCombinerTests
         CollectionAssert.AreEqual(padded[..20], outputs[1]);
     }
 
+    /// <summary>
+    /// Regression: the combiner asked its sources for the slice rounded up to the kernels' 128-byte alignment, and
+    /// PAR2 creation, which hashes what it reads, got wrong checksums for blocks that are not a multiple of 128 bytes.
+    /// Sources get exactly the region rounded up to whole symbols; the combiner pads the rest.
+    /// </summary>
+    [TestMethod]
+    public void Sources_AreAskedForWholeSymbolsOnly()
+    {
+        var f16 = new Gf16Field(GaloisField16.Par2);
+        foreach (var (length, expected) in new[] { (10L, 10), (11L, 12), (300L, 300) })
+        {
+            var source = new LengthRecordingSource(new MemoryRegions([Filled((int)length, 3), Filled((int)length, 5)]));
+            var m = new GfMatrix<ushort>(1, 2, f16);
+            m[0, 0] = 7;
+            m[0, 1] = 9;
+            var output = new byte[length];
+            LinearCombiner.Combine(f16, new MatrixCoefficients<ushort>(m), 2, 1, source, new MemoryRegions([output]), length);
+            CollectionAssert.AreEqual(new[] { expected }, source.Lengths.Distinct().ToArray(), $"region of {length} bytes");
+
+            // The inputs padded to whole symbols (the last half symbol of an odd length is a zero).
+            var a = new byte[expected];
+            var b = new byte[expected];
+            Filled((int)length, 3).CopyTo(a, 0);
+            Filled((int)length, 5).CopyTo(b, 0);
+            var reference = new byte[expected];
+            Gf16Kernels.MulAdd(GaloisField16.Par2, 7, a, reference);
+            Gf16Kernels.MulAdd(GaloisField16.Par2, 9, b, reference);
+            CollectionAssert.AreEqual(reference[..(int)length], output, $"region of {length} bytes");
+        }
+    }
+
+    [TestMethod]
+    public void SequentialAndConcurrentSinks_GetTheSameOutputs()
+    {
+        // MemoryRegions accepts concurrent writes (the outputs of a pass are written in parallel); a plain sink is
+        // written one output after the other.
+        var f16 = new Gf16Field(GaloisField16.Par2);
+        var rnd = new Random(8);
+        var inputs = Enumerable.Range(0, 5).Select(_ => TestData.RandomBytes(rnd, 1000)).ToArray();
+        var m = new GfMatrix<ushort>(3, 5, f16);
+        for (int i = 0; i < m.Data.Length; i++)
+        {
+            m.Data[i] = (ushort)rnd.Next(65536);
+        }
+
+        var concurrent = Enumerable.Range(0, 3).Select(_ => new byte[1000]).ToArray();
+        var sequential = Enumerable.Range(0, 3).Select(_ => new byte[1000]).ToArray();
+        var options = new LinearCombineOptions { MemoryBudget = 2048, SourcesPerBatch = 2 }; // several passes and batches
+        LinearCombiner.Combine(f16, new MatrixCoefficients<ushort>(m), 5, 3, new MemoryRegions(inputs), new MemoryRegions(concurrent), 1000, options);
+        LinearCombiner.Combine(f16, new MatrixCoefficients<ushort>(m), 5, 3, new MemoryRegions(inputs), new SequentialSink(new MemoryRegions(sequential)), 1000, options);
+        for (int j = 0; j < 3; j++)
+        {
+            CollectionAssert.AreEqual(concurrent[j], sequential[j], $"output {j}");
+        }
+    }
+
+    [TestMethod]
+    public void InputStride_IsAnOddNumberOfPages()
+    {
+        Assert.AreEqual(4096, LinearCombiner.InputStride(1));
+        Assert.AreEqual(4096, LinearCombiner.InputStride(4096));
+        Assert.AreEqual(3 * 4096, LinearCombiner.InputStride(4097));
+        Assert.AreEqual(3 * 4096, LinearCombiner.InputStride(8192));
+        Assert.AreEqual(65 * 4096, LinearCombiner.InputStride(256 * 1024), "256 KiB slices: 65 pages apart, not 64");
+    }
+
     private static byte[] Filled(int length, byte value) => Enumerable.Repeat(value, length).ToArray();
+
+    private sealed class LengthRecordingSource(IRegionSource inner) : IRegionSource
+    {
+        public List<int> Lengths { get; } = [];
+
+        public void Read(int index, long offset, Span<byte> destination)
+        {
+            lock (Lengths)
+            {
+                Lengths.Add(destination.Length);
+            }
+
+            inner.Read(index, offset, destination);
+        }
+    }
+
+    private sealed class SequentialSink(IRegionSink inner) : IRegionSink
+    {
+        private int _writing;
+
+        public void Write(int index, long offset, ReadOnlySpan<byte> source)
+        {
+            Assert.AreEqual(1, Interlocked.Increment(ref _writing), "a sequential sink is written by one thread at a time");
+            inner.Write(index, offset, source);
+            Interlocked.Decrement(ref _writing);
+        }
+    }
 
     private sealed class RecordingSink : IRegionSink
     {

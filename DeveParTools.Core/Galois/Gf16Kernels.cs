@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
@@ -18,6 +19,10 @@ public sealed unsafe class Gf16MulTables : IDisposable
     public SimdLevel Level { get; }
     public IGf16Multiplier Field { get; }
 
+    /// <summary>The tables of the 64 coefficients u·16^m (see <see cref="Gf16Kernels.Basis"/>); kept alive for <see cref="_basisPtr"/>.</summary>
+    private readonly byte[] _basis;
+    private readonly byte* _basisPtr;
+
     private Gf16MulTables(IGf16Multiplier field, int count, SimdLevel level)
     {
         Field = field;
@@ -25,26 +30,32 @@ public sealed unsafe class Gf16MulTables : IDisposable
         Level = level;
         Stride = Gf16Kernels.TableStride(level);
         Ptr = (byte*)NativeMemory.AlignedAlloc((nuint)Math.Max(1, count * Stride), 64);
+        _basis = Gf16Kernels.Basis(field, level);
+        _basisPtr = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_basis));
     }
 
     public static Gf16MulTables Create(IGf16Multiplier field, ReadOnlySpan<ushort> coefficients, SimdLevel? level = null)
     {
-        var lvl = level ?? Gf16Kernels.Level;
-        var t = new Gf16MulTables(field, coefficients.Length, lvl);
-        for (int i = 0; i < coefficients.Length; i++)
-        {
-            Gf16Kernels.BuildTable(field, coefficients[i], lvl, t.Ptr + (nint)i * t.Stride);
-        }
-
+        var t = new Gf16MulTables(field, coefficients.Length, level ?? Gf16Kernels.Level);
+        t.Set(0, coefficients);
         return t;
     }
 
     /// <summary>Replace the coefficient at <paramref name="index"/>.</summary>
-    public void Set(int index, ushort coefficient)
+    public void Set(int index, ushort coefficient) => Set(index, [coefficient]);
+
+    /// <summary>
+    /// Replace the coefficients from <paramref name="first"/> on with <paramref name="coefficients"/>. Cheap (about
+    /// 20 CPU cycles per coefficient with AVX2): a table is the XOR of four rows of the field's basis tables.
+    /// </summary>
+    public void Set(int first, ReadOnlySpan<ushort> coefficients)
     {
-        ArgumentOutOfRangeException.ThrowIfNegative(index);
-        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, Count);
-        Gf16Kernels.BuildTable(Field, coefficient, Level, Ptr + (nint)index * Stride);
+        ArgumentOutOfRangeException.ThrowIfNegative(first);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(coefficients.Length, Count - first, nameof(coefficients));
+        for (int k = 0; k < coefficients.Length; k++)
+        {
+            Gf16Kernels.TableFromBasis(_basisPtr, Stride, coefficients[k], Ptr + (nint)(first + k) * Stride);
+        }
     }
 
     public void Dispose()
@@ -134,6 +145,53 @@ public static unsafe class Gf16Kernels
         return (byte)r;
     }
 
+    private static readonly ConditionalWeakTable<IGf16Multiplier, byte[]?[]> Bases = new();
+
+    /// <summary>
+    /// The tables (in <paramref name="level"/>'s layout) of the 64 coefficients u·16^m, u = 0..15, m = 0..3, row
+    /// 16·m + u, in pinned memory. Built once per field and level (64 tables the slow way), they make every other
+    /// table cheap: see <see cref="Gf16MulTables.Set(int, ReadOnlySpan{ushort})"/>.
+    /// </summary>
+    internal static byte[] Basis(IGf16Multiplier field, SimdLevel level)
+    {
+        var perLevel = Bases.GetValue(field, static _ => new byte[]?[Enum.GetValues<SimdLevel>().Length]);
+        return perLevel[(int)level] ??= BuildBasis(field, level);
+    }
+
+    /// <summary>
+    /// The table of <paramref name="c"/> from the basis: multiplying by c is linear in c, and so is every entry of
+    /// every table layout, so table(c) is the XOR of the tables of c's four nibbles, each in its place (u·16^m).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void TableFromBasis(byte* basis, int stride, int c, byte* dst)
+    {
+        byte* r0 = basis + (c & 15) * stride;
+        byte* r1 = basis + (16 + ((c >> 4) & 15)) * stride;
+        byte* r2 = basis + (32 + ((c >> 8) & 15)) * stride;
+        byte* r3 = basis + (48 + ((c >> 12) & 15)) * stride;
+        for (int i = 0; i < stride; i += Vector<byte>.Count)
+        {
+            var v = Unsafe.ReadUnaligned<Vector<byte>>(r0 + i) ^ Unsafe.ReadUnaligned<Vector<byte>>(r1 + i)
+                  ^ Unsafe.ReadUnaligned<Vector<byte>>(r2 + i) ^ Unsafe.ReadUnaligned<Vector<byte>>(r3 + i);
+            Unsafe.WriteUnaligned(dst + i, v);
+        }
+    }
+
+    private static byte[] BuildBasis(IGf16Multiplier field, SimdLevel level)
+    {
+        int stride = TableStride(level);
+        var basis = GC.AllocateArray<byte>(64 * stride, pinned: true);
+        fixed (byte* p = basis)
+        {
+            for (int row = 0; row < 64; row++)
+            {
+                BuildTable(field, (ushort)((row & 15) << (4 * (row >> 4))), level, p + row * stride);
+            }
+        }
+
+        return basis;
+    }
+
     internal static void BuildTable(IGf16Multiplier field, ushort c, SimdLevel level, byte* dst)
     {
         switch (level)
@@ -221,7 +279,11 @@ public static unsafe class Gf16Kernels
 
         var level = _level;
         byte* table = stackalloc byte[1024];
-        BuildTable(field, c, level, table);
+        fixed (byte* basis = Basis(field, level))
+        {
+            TableFromBasis(basis, TableStride(level), c, table);
+        }
+
         fixed (byte* s = src)
         fixed (byte* d = dst)
         {
@@ -252,6 +314,436 @@ public static unsafe class Gf16Kernels
         }
 
         MulAddMultiCore(tables.Level, dst, srcs, tables.Ptr + (nint)first * tables.Stride, tables.Stride, count, length, overwrite);
+    }
+
+    /// <summary>
+    /// <c>dst (^)= Σ coefficients[i]·srcs[i]</c> with the sources and the destination in the prepared layout of
+    /// <paramref name="level"/>'s kernel (see <see cref="Prepare"/>), <paramref name="length"/> a multiple of
+    /// <see cref="PreparedBlock"/>. One source at a time: its tables (the XOR of four rows of the basis, see
+    /// <see cref="TableFromBasis"/>) go straight into registers, and the destination, a chunk that stays in the L1
+    /// cache, is updated once per source. That beats a list of tables in memory, from which a multi-source kernel
+    /// loads 8 vectors per source for every 64 bytes; ParPar's "shuffle" kernels work this way too.
+    /// </summary>
+    public static void MulAddPrepared(IGf16Multiplier field, SimdLevel level, ReadOnlySpan<ushort> coefficients, byte** srcs, byte* dst, nint length, bool overwrite = false)
+    {
+        fixed (byte* basis = Basis(field, level))
+        {
+            MulAddPrepared(basis, level, coefficients, srcs, dst, length, overwrite);
+        }
+    }
+
+    internal static void MulAddPrepared(byte* basis, SimdLevel level, ReadOnlySpan<ushort> coefficients, byte** srcs, byte* dst, nint length, bool overwrite)
+    {
+        CheckPrepared(level, length);
+        if (coefficients.Length == 0)
+        {
+            if (overwrite)
+            {
+                new Span<byte>(dst, checked((int)length)).Clear();
+            }
+
+            return;
+        }
+
+        int stride = TableStride(level);
+        if (level == SimdLevel.Scalar)
+        {
+            // The scalar kernel's layout is the normal one; it adds up to 16 sources per pass over the destination.
+            byte* tables = stackalloc byte[16 * 1024];
+            for (int g = 0; g < coefficients.Length; g += 16)
+            {
+                int n = Math.Min(16, coefficients.Length - g);
+                for (int k = 0; k < n; k++)
+                {
+                    TableFromBasis(basis, stride, coefficients[g + k], tables + k * stride);
+                }
+
+                ScalarTail(level, dst, srcs + g, tables, stride, n, 0, length, overwrite && g == 0);
+            }
+
+            return;
+        }
+
+        for (int i = 0; i < coefficients.Length; i++)
+        {
+            int c = coefficients[i];
+            byte* r0 = basis + (c & 15) * stride;
+            byte* r1 = basis + (16 + ((c >> 4) & 15)) * stride;
+            byte* r2 = basis + (32 + ((c >> 8) & 15)) * stride;
+            byte* r3 = basis + (48 + ((c >> 12) & 15)) * stride;
+            byte* src = srcs[i];
+            bool set = overwrite && i == 0;
+            switch (level)
+            {
+                case SimdLevel.Avx2:
+                    Avx2Single(r0, r1, r2, r3, src, dst, length, set);
+                    break;
+                case SimdLevel.Avx512:
+                    Avx512Single(r0, r1, r2, r3, src, dst, length, set);
+                    break;
+                case SimdLevel.Ssse3:
+                    Ssse3Single(r0, r1, r2, r3, src, dst, length, set);
+                    break;
+                case SimdLevel.Neon:
+                    NeonSingle(r0, r1, r2, r3, src, dst, length, set);
+                    break;
+                case SimdLevel.Gfni128:
+                    Gfni128Single(r0, r1, r2, r3, src, dst, length, set);
+                    break;
+                case SimdLevel.Gfni256:
+                    Gfni256Single(r0, r1, r2, r3, src, dst, length, set);
+                    break;
+                default: // Gfni512 (CheckPrepared has rejected unknown levels)
+                    Gfni512Single(r0, r1, r2, r3, src, dst, length, set);
+                    break;
+            }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<byte> Row128(byte* r0, byte* r1, byte* r2, byte* r3, int offset)
+        => Vector128.Load(r0 + offset) ^ Vector128.Load(r1 + offset) ^ Vector128.Load(r2 + offset) ^ Vector128.Load(r3 + offset);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<byte> Row256(byte* r0, byte* r1, byte* r2, byte* r3, int offset)
+        => Vector256.Load(r0 + offset) ^ Vector256.Load(r1 + offset) ^ Vector256.Load(r2 + offset) ^ Vector256.Load(r3 + offset);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector512<byte> Row512(byte* r0, byte* r1, byte* r2, byte* r3, int offset)
+        => Vector512.Load(r0 + offset) ^ Vector512.Load(r1 + offset) ^ Vector512.Load(r2 + offset) ^ Vector512.Load(r3 + offset);
+
+    private static void Avx2Single(byte* r0, byte* r1, byte* r2, byte* r3, byte* src, byte* dst, nint length, bool overwrite)
+    {
+        // The nibble tables (see BuildTable): nibble n's low bytes at 64·n, its high bytes at 64·n + 32.
+        var l0 = Row256(r0, r1, r2, r3, 0);
+        var h0 = Row256(r0, r1, r2, r3, 32);
+        var l1 = Row256(r0, r1, r2, r3, 64);
+        var h1 = Row256(r0, r1, r2, r3, 96);
+        var l2 = Row256(r0, r1, r2, r3, 128);
+        var h2 = Row256(r0, r1, r2, r3, 160);
+        var l3 = Row256(r0, r1, r2, r3, 192);
+        var h3 = Row256(r0, r1, r2, r3, 224);
+        var m0f = Vector256.Create((byte)0x0F);
+        for (nint pos = 0; pos < length; pos += 64)
+        {
+            var lo = Avx.LoadVector256(src + pos);
+            var hi = Avx.LoadVector256(src + pos + 32);
+            var n0 = lo & m0f;
+            var n1 = Avx2.ShiftRightLogical(lo.AsUInt16(), 4).AsByte() & m0f;
+            var n2 = hi & m0f;
+            var n3 = Avx2.ShiftRightLogical(hi.AsUInt16(), 4).AsByte() & m0f;
+            var pl = Avx2.Shuffle(l0, n0) ^ Avx2.Shuffle(l1, n1) ^ Avx2.Shuffle(l2, n2) ^ Avx2.Shuffle(l3, n3);
+            var ph = Avx2.Shuffle(h0, n0) ^ Avx2.Shuffle(h1, n1) ^ Avx2.Shuffle(h2, n2) ^ Avx2.Shuffle(h3, n3);
+            if (!overwrite)
+            {
+                pl ^= Avx.LoadVector256(dst + pos);
+                ph ^= Avx.LoadVector256(dst + pos + 32);
+            }
+
+            Avx.Store(dst + pos, pl);
+            Avx.Store(dst + pos + 32, ph);
+        }
+    }
+
+    private static void Avx512Single(byte* r0, byte* r1, byte* r2, byte* r3, byte* src, byte* dst, nint length, bool overwrite)
+    {
+        var l0 = Row512(r0, r1, r2, r3, 0);
+        var h0 = Row512(r0, r1, r2, r3, 64);
+        var l1 = Row512(r0, r1, r2, r3, 128);
+        var h1 = Row512(r0, r1, r2, r3, 192);
+        var l2 = Row512(r0, r1, r2, r3, 256);
+        var h2 = Row512(r0, r1, r2, r3, 320);
+        var l3 = Row512(r0, r1, r2, r3, 384);
+        var h3 = Row512(r0, r1, r2, r3, 448);
+        var m0f = Vector512.Create((byte)0x0F);
+        for (nint pos = 0; pos < length; pos += 128)
+        {
+            var lo = Vector512.Load(src + pos);
+            var hi = Vector512.Load(src + pos + 64);
+            var n0 = lo & m0f;
+            var n1 = Avx512BW.ShiftRightLogical(lo.AsUInt16(), 4).AsByte() & m0f;
+            var n2 = hi & m0f;
+            var n3 = Avx512BW.ShiftRightLogical(hi.AsUInt16(), 4).AsByte() & m0f;
+            var pl = Avx512BW.Shuffle(l0, n0) ^ Avx512BW.Shuffle(l1, n1) ^ Avx512BW.Shuffle(l2, n2) ^ Avx512BW.Shuffle(l3, n3);
+            var ph = Avx512BW.Shuffle(h0, n0) ^ Avx512BW.Shuffle(h1, n1) ^ Avx512BW.Shuffle(h2, n2) ^ Avx512BW.Shuffle(h3, n3);
+            if (!overwrite)
+            {
+                pl ^= Vector512.Load(dst + pos);
+                ph ^= Vector512.Load(dst + pos + 64);
+            }
+
+            pl.Store(dst + pos);
+            ph.Store(dst + pos + 64);
+        }
+    }
+
+    private static void Ssse3Single(byte* r0, byte* r1, byte* r2, byte* r3, byte* src, byte* dst, nint length, bool overwrite)
+    {
+        var l0 = Row128(r0, r1, r2, r3, 0);
+        var h0 = Row128(r0, r1, r2, r3, 16);
+        var l1 = Row128(r0, r1, r2, r3, 32);
+        var h1 = Row128(r0, r1, r2, r3, 48);
+        var l2 = Row128(r0, r1, r2, r3, 64);
+        var h2 = Row128(r0, r1, r2, r3, 80);
+        var l3 = Row128(r0, r1, r2, r3, 96);
+        var h3 = Row128(r0, r1, r2, r3, 112);
+        var m0f = Vector128.Create((byte)0x0F);
+        for (nint pos = 0; pos < length; pos += 32)
+        {
+            var lo = Sse2.LoadVector128(src + pos);
+            var hi = Sse2.LoadVector128(src + pos + 16);
+            var n0 = lo & m0f;
+            var n1 = Sse2.ShiftRightLogical(lo.AsUInt16(), 4).AsByte() & m0f;
+            var n2 = hi & m0f;
+            var n3 = Sse2.ShiftRightLogical(hi.AsUInt16(), 4).AsByte() & m0f;
+            var pl = Ssse3.Shuffle(l0, n0) ^ Ssse3.Shuffle(l1, n1) ^ Ssse3.Shuffle(l2, n2) ^ Ssse3.Shuffle(l3, n3);
+            var ph = Ssse3.Shuffle(h0, n0) ^ Ssse3.Shuffle(h1, n1) ^ Ssse3.Shuffle(h2, n2) ^ Ssse3.Shuffle(h3, n3);
+            if (!overwrite)
+            {
+                pl ^= Sse2.LoadVector128(dst + pos);
+                ph ^= Sse2.LoadVector128(dst + pos + 16);
+            }
+
+            Sse2.Store(dst + pos, pl);
+            Sse2.Store(dst + pos + 16, ph);
+        }
+    }
+
+    private static void NeonSingle(byte* r0, byte* r1, byte* r2, byte* r3, byte* src, byte* dst, nint length, bool overwrite)
+    {
+        var l0 = Row128(r0, r1, r2, r3, 0);
+        var h0 = Row128(r0, r1, r2, r3, 16);
+        var l1 = Row128(r0, r1, r2, r3, 32);
+        var h1 = Row128(r0, r1, r2, r3, 48);
+        var l2 = Row128(r0, r1, r2, r3, 64);
+        var h2 = Row128(r0, r1, r2, r3, 80);
+        var l3 = Row128(r0, r1, r2, r3, 96);
+        var h3 = Row128(r0, r1, r2, r3, 112);
+        var m0f = Vector128.Create((byte)0x0F);
+        for (nint pos = 0; pos < length; pos += 32)
+        {
+            var lo = AdvSimd.LoadVector128(src + pos);
+            var hi = AdvSimd.LoadVector128(src + pos + 16);
+            var n0 = lo & m0f;
+            var n1 = AdvSimd.ShiftRightLogical(lo, 4);
+            var n2 = hi & m0f;
+            var n3 = AdvSimd.ShiftRightLogical(hi, 4);
+            var pl = AdvSimd.Arm64.VectorTableLookup(l0, n0) ^ AdvSimd.Arm64.VectorTableLookup(l1, n1)
+                   ^ AdvSimd.Arm64.VectorTableLookup(l2, n2) ^ AdvSimd.Arm64.VectorTableLookup(l3, n3);
+            var ph = AdvSimd.Arm64.VectorTableLookup(h0, n0) ^ AdvSimd.Arm64.VectorTableLookup(h1, n1)
+                   ^ AdvSimd.Arm64.VectorTableLookup(h2, n2) ^ AdvSimd.Arm64.VectorTableLookup(h3, n3);
+            if (!overwrite)
+            {
+                pl ^= AdvSimd.LoadVector128(dst + pos);
+                ph ^= AdvSimd.LoadVector128(dst + pos + 16);
+            }
+
+            AdvSimd.Store(dst + pos, pl);
+            AdvSimd.Store(dst + pos + 16, ph);
+        }
+    }
+
+    private static void Gfni128Single(byte* r0, byte* r1, byte* r2, byte* r3, byte* src, byte* dst, nint length, bool overwrite)
+    {
+        // The affine matrices (see BuildTable): lo→lo, hi→lo, lo→hi, hi→hi.
+        var ll = Row128(r0, r1, r2, r3, 0);
+        var hl = Row128(r0, r1, r2, r3, 16);
+        var lh = Row128(r0, r1, r2, r3, 32);
+        var hh = Row128(r0, r1, r2, r3, 48);
+        for (nint pos = 0; pos < length; pos += 32)
+        {
+            var lo = Sse2.LoadVector128(src + pos);
+            var hi = Sse2.LoadVector128(src + pos + 16);
+            var pl = Gfni.GaloisFieldAffineTransform(lo, ll, 0) ^ Gfni.GaloisFieldAffineTransform(hi, hl, 0);
+            var ph = Gfni.GaloisFieldAffineTransform(lo, lh, 0) ^ Gfni.GaloisFieldAffineTransform(hi, hh, 0);
+            if (!overwrite)
+            {
+                pl ^= Sse2.LoadVector128(dst + pos);
+                ph ^= Sse2.LoadVector128(dst + pos + 16);
+            }
+
+            Sse2.Store(dst + pos, pl);
+            Sse2.Store(dst + pos + 16, ph);
+        }
+    }
+
+    private static void Gfni256Single(byte* r0, byte* r1, byte* r2, byte* r3, byte* src, byte* dst, nint length, bool overwrite)
+    {
+        var ll = Row256(r0, r1, r2, r3, 0);
+        var hl = Row256(r0, r1, r2, r3, 32);
+        var lh = Row256(r0, r1, r2, r3, 64);
+        var hh = Row256(r0, r1, r2, r3, 96);
+        for (nint pos = 0; pos < length; pos += 64)
+        {
+            var lo = Avx.LoadVector256(src + pos);
+            var hi = Avx.LoadVector256(src + pos + 32);
+            var pl = Gfni.V256.GaloisFieldAffineTransform(lo, ll, 0) ^ Gfni.V256.GaloisFieldAffineTransform(hi, hl, 0);
+            var ph = Gfni.V256.GaloisFieldAffineTransform(lo, lh, 0) ^ Gfni.V256.GaloisFieldAffineTransform(hi, hh, 0);
+            if (!overwrite)
+            {
+                pl ^= Avx.LoadVector256(dst + pos);
+                ph ^= Avx.LoadVector256(dst + pos + 32);
+            }
+
+            Avx.Store(dst + pos, pl);
+            Avx.Store(dst + pos + 32, ph);
+        }
+    }
+
+    private static void Gfni512Single(byte* r0, byte* r1, byte* r2, byte* r3, byte* src, byte* dst, nint length, bool overwrite)
+    {
+        var ll = Row512(r0, r1, r2, r3, 0);
+        var hl = Row512(r0, r1, r2, r3, 64);
+        var lh = Row512(r0, r1, r2, r3, 128);
+        var hh = Row512(r0, r1, r2, r3, 192);
+        for (nint pos = 0; pos < length; pos += 128)
+        {
+            var lo = Vector512.Load(src + pos);
+            var hi = Vector512.Load(src + pos + 64);
+            var pl = Gfni.V512.GaloisFieldAffineTransform(lo, ll, 0) ^ Gfni.V512.GaloisFieldAffineTransform(hi, hl, 0);
+            var ph = Gfni.V512.GaloisFieldAffineTransform(lo, lh, 0) ^ Gfni.V512.GaloisFieldAffineTransform(hi, hh, 0);
+            if (!overwrite)
+            {
+                pl ^= Vector512.Load(dst + pos);
+                ph ^= Vector512.Load(dst + pos + 64);
+            }
+
+            pl.Store(dst + pos);
+            ph.Store(dst + pos + 64);
+        }
+    }
+
+    /// <summary>
+    /// The block of the prepared layout of <paramref name="level"/>'s kernel: 2·W bytes for vectors of W bytes (2 for
+    /// the scalar kernel, whose layout is the normal one).
+    /// </summary>
+    public static int PreparedBlock(SimdLevel level) => level switch
+    {
+        SimdLevel.Scalar => 2,
+        SimdLevel.Ssse3 or SimdLevel.Neon or SimdLevel.Gfni128 => 32,
+        SimdLevel.Avx2 or SimdLevel.Gfni256 => 64,
+        SimdLevel.Avx512 or SimdLevel.Gfni512 => 128,
+        _ => throw new ArgumentOutOfRangeException(nameof(level)),
+    };
+
+    /// <summary>
+    /// Converts a region to the prepared layout of <paramref name="level"/>'s kernel, in place: each block of 2·W bytes
+    /// (W symbols, see <see cref="PreparedBlock"/>) becomes the W low bytes of its symbols, then the W high bytes,
+    /// split exactly as the kernel splits them. The kernel works on each byte position on its own, so it can
+    /// take data split once (an input that is multiplied into every output) instead of splitting it on every call.
+    /// </summary>
+    public static void Prepare(SimdLevel level, byte* region, nint length)
+    {
+        CheckPrepared(level, length);
+        switch (level)
+        {
+            case SimdLevel.Ssse3:
+            case SimdLevel.Gfni128:
+                for (nint p = 0; p < length; p += 32)
+                {
+                    var a = Sse2.LoadVector128(region + p).AsUInt16();
+                    var b = Sse2.LoadVector128(region + p + 16).AsUInt16();
+                    var mff = Vector128.Create((ushort)0x00FF);
+                    Sse2.Store(region + p, Sse2.PackUnsignedSaturate((a & mff).AsInt16(), (b & mff).AsInt16()));
+                    Sse2.Store(region + p + 16, Sse2.PackUnsignedSaturate(Sse2.ShiftRightLogical(a, 8).AsInt16(), Sse2.ShiftRightLogical(b, 8).AsInt16()));
+                }
+
+                break;
+            case SimdLevel.Neon:
+                for (nint p = 0; p < length; p += 32)
+                {
+                    var a = AdvSimd.LoadVector128(region + p);
+                    var b = AdvSimd.LoadVector128(region + p + 16);
+                    AdvSimd.Store(region + p, AdvSimd.Arm64.UnzipEven(a, b));
+                    AdvSimd.Store(region + p + 16, AdvSimd.Arm64.UnzipOdd(a, b));
+                }
+
+                break;
+            case SimdLevel.Avx2:
+            case SimdLevel.Gfni256:
+                for (nint p = 0; p < length; p += 64)
+                {
+                    var a = Avx.LoadVector256(region + p).AsUInt16();
+                    var b = Avx.LoadVector256(region + p + 32).AsUInt16();
+                    var mff = Vector256.Create((ushort)0x00FF);
+                    Avx.Store(region + p, Avx2.PackUnsignedSaturate((a & mff).AsInt16(), (b & mff).AsInt16()));
+                    Avx.Store(region + p + 32, Avx2.PackUnsignedSaturate(Avx2.ShiftRightLogical(a, 8).AsInt16(), Avx2.ShiftRightLogical(b, 8).AsInt16()));
+                }
+
+                break;
+            case SimdLevel.Avx512:
+            case SimdLevel.Gfni512:
+                for (nint p = 0; p < length; p += 128)
+                {
+                    var a = Vector512.Load(region + p).AsUInt16();
+                    var b = Vector512.Load(region + p + 64).AsUInt16();
+                    var mff = Vector512.Create((ushort)0x00FF);
+                    Avx512BW.PackUnsignedSaturate((a & mff).AsInt16(), (b & mff).AsInt16()).Store(region + p);
+                    Avx512BW.PackUnsignedSaturate(Avx512BW.ShiftRightLogical(a, 8).AsInt16(), Avx512BW.ShiftRightLogical(b, 8).AsInt16()).Store(region + p + 64);
+                }
+
+                break;
+        }
+    }
+
+    /// <summary>The inverse of <see cref="Prepare"/>: back to the normal layout (merged as the kernel merges its result).</summary>
+    public static void Finish(SimdLevel level, byte* region, nint length)
+    {
+        CheckPrepared(level, length);
+        switch (level)
+        {
+            case SimdLevel.Ssse3:
+            case SimdLevel.Gfni128:
+                for (nint p = 0; p < length; p += 32)
+                {
+                    var lo = Sse2.LoadVector128(region + p);
+                    var hi = Sse2.LoadVector128(region + p + 16);
+                    Sse2.Store(region + p, Sse2.UnpackLow(lo, hi));
+                    Sse2.Store(region + p + 16, Sse2.UnpackHigh(lo, hi));
+                }
+
+                break;
+            case SimdLevel.Neon:
+                for (nint p = 0; p < length; p += 32)
+                {
+                    var lo = AdvSimd.LoadVector128(region + p);
+                    var hi = AdvSimd.LoadVector128(region + p + 16);
+                    AdvSimd.Store(region + p, AdvSimd.Arm64.ZipLow(lo, hi));
+                    AdvSimd.Store(region + p + 16, AdvSimd.Arm64.ZipHigh(lo, hi));
+                }
+
+                break;
+            case SimdLevel.Avx2:
+            case SimdLevel.Gfni256:
+                for (nint p = 0; p < length; p += 64)
+                {
+                    var lo = Avx.LoadVector256(region + p);
+                    var hi = Avx.LoadVector256(region + p + 32);
+                    Avx.Store(region + p, Avx2.UnpackLow(lo, hi));
+                    Avx.Store(region + p + 32, Avx2.UnpackHigh(lo, hi));
+                }
+
+                break;
+            case SimdLevel.Avx512:
+            case SimdLevel.Gfni512:
+                for (nint p = 0; p < length; p += 128)
+                {
+                    var lo = Vector512.Load(region + p);
+                    var hi = Vector512.Load(region + p + 64);
+                    Avx512BW.UnpackLow(lo, hi).Store(region + p);
+                    Avx512BW.UnpackHigh(lo, hi).Store(region + p + 64);
+                }
+
+                break;
+        }
+    }
+
+    private static void CheckPrepared(SimdLevel level, nint length)
+    {
+        if (length % PreparedBlock(level) != 0)
+        {
+            throw new ArgumentException($"Length must be a multiple of {PreparedBlock(level)} bytes for the prepared layout of {level}.", nameof(length));
+        }
     }
 
     private static void MulAddMultiCore(SimdLevel level, byte* dst, byte** srcs, byte* tables, int stride, int count, nint length, bool overwrite)

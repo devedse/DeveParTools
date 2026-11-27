@@ -55,7 +55,35 @@ public interface IGaloisField<T> where T : IEquatable<T>
     unsafe void MulAddMulti(IRegionTables tables, int first, int count, byte** sources, byte* destination, nint length, bool overwrite);
 }
 
-public sealed class Gf8Field : IGaloisField<byte>
+/// <summary>
+/// One region kernel (SIMD level) of a field, fixed when it is created, with a data layout of its own: the
+/// combiner's tiled loop (see <see cref="Codes.LinearCombiner"/>) keeps its inputs and outputs in that layout while it
+/// works, so the kernel need not convert every input for every output. It builds its tables from the coefficients
+/// as it goes (a few dozen CPU cycles each), so there are no tables to keep in memory.
+/// </summary>
+public interface IPreparedKernel<T> where T : IEquatable<T>
+{
+    /// <summary>Lengths given to <see cref="Prepare"/>, <see cref="Finish"/> and <see cref="MulAddMulti"/> are multiples of this.</summary>
+    int Block { get; }
+
+    /// <summary>Converts a region to the kernel's layout, in place.</summary>
+    unsafe void Prepare(byte* region, nint length);
+
+    /// <summary>Converts a region back to the normal layout, in place.</summary>
+    unsafe void Finish(byte* region, nint length);
+
+    /// <summary><c>dst (^)= Σ coefficients[i]·sources[i]</c>, the sources and the destination in the kernel's layout.</summary>
+    unsafe void MulAddMulti(ReadOnlySpan<T> coefficients, byte** sources, byte* destination, nint length, bool overwrite);
+}
+
+/// <summary>A field with <see cref="IPreparedKernel{T}"/>s: GF(2^8) and GF(2^16), whose tables are small.</summary>
+public interface IPreparedRegionField<T> : IGaloisField<T> where T : IEquatable<T>
+{
+    /// <summary>The current kernel (<see cref="Gf16Kernels.Level"/>, <see cref="Gf8Kernels.Level"/>).</summary>
+    IPreparedKernel<T> PreparedKernel();
+}
+
+public sealed class Gf8Field : IPreparedRegionField<byte>
 {
     public Gf8Field(GaloisField8 field)
     {
@@ -93,8 +121,34 @@ public sealed class Gf8Field : IGaloisField<byte>
 
     public IRegionTables CreateTables(ReadOnlySpan<byte> coefficients) => new Tables(Gf8MulTables.Create(Inner, coefficients));
 
+    public IPreparedKernel<byte> PreparedKernel() => new Kernel(Inner, Gf8Kernels.Level);
+
     public unsafe void MulAddMulti(IRegionTables tables, int first, int count, byte** sources, byte* destination, nint length, bool overwrite)
         => Gf8Kernels.MulAddMulti(((Tables)tables).Inner, first, count, sources, destination, length, overwrite);
+
+    /// <summary>GF(2^8) needs no layout of its own (a symbol is a byte, nothing to split): prepared = normal.</summary>
+    private sealed unsafe class Kernel(GaloisField8 field, SimdLevel level) : IPreparedKernel<byte>
+    {
+        private readonly byte[] _basis = Gf8Kernels.Basis(field, level);
+
+        public int Block => 1;
+
+        public void Prepare(byte* region, nint length)
+        {
+        }
+
+        public void Finish(byte* region, nint length)
+        {
+        }
+
+        public void MulAddMulti(ReadOnlySpan<byte> coefficients, byte** sources, byte* destination, nint length, bool overwrite)
+        {
+            fixed (byte* basis = _basis)
+            {
+                Gf8Kernels.MulAddCoefficients(field, level, basis, coefficients, sources, destination, length, overwrite);
+            }
+        }
+    }
 
     private sealed class Tables(Gf8MulTables inner) : IRegionTables
     {
@@ -106,7 +160,7 @@ public sealed class Gf8Field : IGaloisField<byte>
     }
 }
 
-public sealed class Gf16Field : IGaloisField<ushort>
+public sealed class Gf16Field : IPreparedRegionField<ushort>
 {
     public Gf16Field(GaloisField16 field)
     {
@@ -153,8 +207,30 @@ public sealed class Gf16Field : IGaloisField<ushort>
 
     public IRegionTables CreateTables(ReadOnlySpan<ushort> coefficients) => new Tables(Gf16MulTables.Create(Inner, coefficients));
 
+    public IPreparedKernel<ushort> PreparedKernel() => new Kernel(Inner, Gf16Kernels.Level);
+
     public unsafe void MulAddMulti(IRegionTables tables, int first, int count, byte** sources, byte* destination, nint length, bool overwrite)
         => Gf16Kernels.MulAddMulti(((Tables)tables).Inner, first, count, sources, destination, length, overwrite);
+
+    /// <summary>The kernel of one SIMD level with its prepared layout (see <see cref="Gf16Kernels.Prepare"/>).</summary>
+    private sealed unsafe class Kernel(GaloisField16 field, SimdLevel level) : IPreparedKernel<ushort>
+    {
+        private readonly byte[] _basis = Gf16Kernels.Basis(field, level);
+
+        public int Block => Gf16Kernels.PreparedBlock(level);
+
+        public void Prepare(byte* region, nint length) => Gf16Kernels.Prepare(level, region, length);
+
+        public void Finish(byte* region, nint length) => Gf16Kernels.Finish(level, region, length);
+
+        public void MulAddMulti(ReadOnlySpan<ushort> coefficients, byte** sources, byte* destination, nint length, bool overwrite)
+        {
+            fixed (byte* basis = _basis)
+            {
+                Gf16Kernels.MulAddPrepared(basis, level, coefficients, sources, destination, length, overwrite);
+            }
+        }
+    }
 
     private sealed class Tables(Gf16MulTables inner) : IRegionTables
     {

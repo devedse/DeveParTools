@@ -53,8 +53,7 @@ public static unsafe class ParBenchmark
 
         foreach (var level in SimdSupport.SupportedLevels)
         {
-            using var t16 = Gf16MulTables.Create(GaloisField16.Par2, [0x1234, 0x4321, 0x9999, 0x0101], level);
-            Add($"gf16.{level}", $"GF(2^16) multiply-add · {level}", 4L * size, () => MulAdd16(t16, src, dst));
+            Add($"gf16.{level}", $"GF(2^16) multiply-add · {level}", 4L * size, () => MulAdd16(level, src, dst));
         }
 
         foreach (var level in SimdSupport.SupportedLevels)
@@ -98,13 +97,23 @@ public static unsafe class ParBenchmark
         return results;
     }
 
-    private static void MulAdd16(Gf16MulTables tables, byte[] src, byte[] dst)
+    /// <summary>
+    /// The kernel PAR2 and PAR3 encoding use, as the combiner calls it: 8 KiB chunks of the output, one source at a
+    /// time (see <see cref="Gf16Kernels.MulAddPrepared(IGf16Multiplier, SimdLevel, ReadOnlySpan{ushort}, byte**, byte*, nint, bool)"/>).
+    /// </summary>
+    private static void MulAdd16(SimdLevel level, byte[] src, byte[] dst)
     {
+        const int chunk = 8192;
         fixed (byte* s = src)
         fixed (byte* d = dst)
         {
-            byte** sources = stackalloc byte*[4] { s, s, s, s };
-            Gf16Kernels.MulAddMulti(tables, 0, 4, sources, d, src.Length);
+            byte** sources = stackalloc byte*[4];
+            for (int offset = 0; offset < src.Length; offset += chunk)
+            {
+                int length = Math.Min(chunk, src.Length - offset);
+                sources[0] = sources[1] = sources[2] = sources[3] = s + offset;
+                Gf16Kernels.MulAddPrepared(GaloisField16.Par2, level, [0x1234, 0x4321, 0x9999, 0x0101], sources, d + offset, length);
+            }
         }
     }
 

@@ -702,8 +702,10 @@ public static class Par2Creator
     /// The encoder writes a slice in parts, in order (one part per pass when the memory budget needs several), so an MD5
     /// per slice that is fed each part has the hash when the last part arrives, and the recovery data never has to be
     /// read back. A part that arrives out of order drops that slice's MD5; <see cref="Complete"/> then reads it back.
+    /// Different slices may be written from different threads at once (all state is per slice), so the MD5s of a pass
+    /// are computed in parallel.
     /// </remarks>
-    internal sealed class RecoverySink(List<(FileStream Stream, long DataOffset, byte[] Header)> outputs, long sliceSize, BlockStateMap map) : IRegionSink
+    internal sealed class RecoverySink(List<(FileStream Stream, long DataOffset, byte[] Header)> outputs, long sliceSize, BlockStateMap map) : IConcurrentRegionSink
     {
         private readonly IncrementalHash?[] _md5 = new IncrementalHash?[outputs.Count];
         private readonly long[] _next = new long[outputs.Count];

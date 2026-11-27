@@ -276,6 +276,10 @@ public static unsafe class Par3Fft
                 throw new InvalidOperationException($"Cohort {cohort}: {missingLocal.Count} blocks missing but only {recLocal.Count} recovery blocks.");
             }
 
+            // Any recovery blocks will do, as many as there are missing blocks: reading more only costs time. (A file of
+            // 201 blocks missing from a set with 5,316 recovery blocks: reading them all doubled the time of the repair.)
+            recLocal = recLocal.OrderBy(r => r.Key).Take(missingLocal.Count).ToDictionary(r => r.Key, r => r.Value);
+
             var buffers = Alloc(k2 + m + workCount, slice);
             try
             {

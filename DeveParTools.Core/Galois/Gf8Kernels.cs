@@ -15,6 +15,10 @@ public sealed unsafe class Gf8MulTables : IDisposable
     public SimdLevel Level { get; }
     public IGf8Multiplier Field { get; }
 
+    /// <summary>The tables of the 32 coefficients u·16^m (see <see cref="Gf8Kernels.Basis"/>); kept alive for <see cref="_basisPtr"/>.</summary>
+    private readonly byte[] _basis;
+    private readonly byte* _basisPtr;
+
     private Gf8MulTables(IGf8Multiplier field, int count, SimdLevel level)
     {
         Field = field;
@@ -22,18 +26,26 @@ public sealed unsafe class Gf8MulTables : IDisposable
         Level = level;
         Stride = Gf8Kernels.TableStride(level);
         Ptr = (byte*)NativeMemory.AlignedAlloc((nuint)Math.Max(1, count * Stride), 64);
+        _basis = Gf8Kernels.Basis(field, level);
+        _basisPtr = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_basis));
     }
 
     public static Gf8MulTables Create(IGf8Multiplier field, ReadOnlySpan<byte> coefficients, SimdLevel? level = null)
     {
-        var lvl = level ?? Gf8Kernels.Level;
-        var t = new Gf8MulTables(field, coefficients.Length, lvl);
-        for (int i = 0; i < coefficients.Length; i++)
-        {
-            Gf8Kernels.BuildTable(field, coefficients[i], lvl, t.Ptr + (nint)i * t.Stride);
-        }
-
+        var t = new Gf8MulTables(field, coefficients.Length, level ?? Gf8Kernels.Level);
+        t.Set(0, coefficients);
         return t;
+    }
+
+    /// <summary>Replace the coefficients from <paramref name="first"/> on with <paramref name="coefficients"/> (cheap: see <see cref="Gf8Kernels.TableFromBasis"/>).</summary>
+    public void Set(int first, ReadOnlySpan<byte> coefficients)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(first);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(coefficients.Length, Count - first, nameof(coefficients));
+        for (int k = 0; k < coefficients.Length; k++)
+        {
+            Gf8Kernels.TableFromBasis(_basisPtr, Stride, coefficients[k], Ptr + (nint)(first + k) * Stride);
+        }
     }
 
     public void Dispose()
@@ -97,6 +109,45 @@ public static unsafe class Gf8Kernels
         }
 
         return m;
+    }
+
+    private static readonly ConditionalWeakTable<IGf8Multiplier, byte[]?[]> Bases = new();
+
+    /// <summary>
+    /// The tables (in <paramref name="level"/>'s layout) of the 32 coefficients u·16^m, u = 0..15, m = 0..1, row
+    /// 16·m + u, in pinned memory; built once per field and level. See <see cref="Gf16Kernels.Basis"/>.
+    /// </summary>
+    internal static byte[] Basis(IGf8Multiplier field, SimdLevel level)
+    {
+        var perLevel = Bases.GetValue(field, static _ => new byte[]?[Enum.GetValues<SimdLevel>().Length]);
+        return perLevel[(int)level] ??= BuildBasis(field, level);
+    }
+
+    /// <summary>The table of <paramref name="c"/>: the XOR of the tables of its two nibbles (multiplying is linear in c).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void TableFromBasis(byte* basis, int stride, int c, byte* dst)
+    {
+        byte* r0 = basis + (c & 15) * stride;
+        byte* r1 = basis + (16 + ((c >> 4) & 15)) * stride;
+        for (int i = 0; i < stride; i += 16)
+        {
+            (Vector128.Load(r0 + i) ^ Vector128.Load(r1 + i)).Store(dst + i);
+        }
+    }
+
+    private static byte[] BuildBasis(IGf8Multiplier field, SimdLevel level)
+    {
+        int stride = TableStride(level);
+        var basis = GC.AllocateArray<byte>(32 * stride, pinned: true);
+        fixed (byte* p = basis)
+        {
+            for (int row = 0; row < 32; row++)
+            {
+                BuildTable(field, (byte)((row & 15) << (4 * (row >> 4))), level, p + row * stride);
+            }
+        }
+
+        return basis;
     }
 
     internal static void BuildTable(IGf8Multiplier field, byte c, SimdLevel level, byte* dst)
@@ -164,7 +215,11 @@ public static unsafe class Gf8Kernels
 
         var level = _level;
         byte* table = stackalloc byte[256];
-        BuildTable(field, c, level, table);
+        fixed (byte* basis = Basis(field, level))
+        {
+            TableFromBasis(basis, TableStride(level), c, table);
+        }
+
         fixed (byte* s = src)
         fixed (byte* d = dst)
         {
@@ -186,6 +241,36 @@ public static unsafe class Gf8Kernels
         }
 
         MulAddMultiCore(tables.Level, tables.Field, dst, srcs, tables.Ptr + (nint)first * tables.Stride, tables.Stride, count, length, overwrite);
+    }
+
+    /// <summary>
+    /// <c>dst (^)= Σ coefficients[i]·srcs[i]</c>, the tables built on the way from the basis (cheap: see
+    /// <see cref="TableFromBasis"/>), 16 sources per kernel call.
+    /// </summary>
+    internal static void MulAddCoefficients(IGf8Multiplier field, SimdLevel level, byte* basis, ReadOnlySpan<byte> coefficients, byte** srcs, byte* dst, nint length, bool overwrite)
+    {
+        if (coefficients.Length == 0)
+        {
+            if (overwrite)
+            {
+                new Span<byte>(dst, checked((int)length)).Clear();
+            }
+
+            return;
+        }
+
+        int stride = TableStride(level);
+        byte* tables = stackalloc byte[16 * 256];
+        for (int g = 0; g < coefficients.Length; g += 16)
+        {
+            int n = Math.Min(16, coefficients.Length - g);
+            for (int k = 0; k < n; k++)
+            {
+                TableFromBasis(basis, stride, coefficients[g + k], tables + k * stride);
+            }
+
+            MulAddMultiCore(level, field, dst, srcs + g, tables, stride, n, length, overwrite && g == 0);
+        }
     }
 
     private static void MulAddMultiCore(SimdLevel level, IGf8Multiplier field, byte* dst, byte** srcs, byte* tables, int stride, int count, nint length, bool overwrite)

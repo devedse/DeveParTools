@@ -161,6 +161,48 @@ public sealed class FftTests
         }
     }
 
+    /// <summary>
+    /// Regression: repairing read every usable recovery block of a cohort, also far more than the missing blocks
+    /// needed (a file of 201 blocks missing from a set with 5,316 recovery blocks: twice the reading of PAR2's repair).
+    /// It now reads as many as there are missing blocks.
+    /// </summary>
+    [TestMethod]
+    public void Decode_ReadsOnlyAsManyRecoveryBlocksAsAreMissing()
+    {
+        const int count = 20, size = 256;
+        var data = Blocks(count, size, 40);
+        var layout = Par3Fft.Plan(count, 6, 1);
+        var indices = Enumerable.Range(0, 6).Select(i => (ulong)i).ToList();
+        var recovery = new Memory(Empty(6, size));
+        Par3Fft.Encode(layout, count, indices, new Memory(data), recovery, size, Options());
+
+        var available = Enumerable.Repeat(true, count).ToArray();
+        available[4] = available[17] = false;
+        var damaged = data.Select((b, i) => available[i] ? b : new byte[size]).ToArray();
+        var reader = new RecordingReader(recovery);
+        var output = new Memory(Empty(count, size));
+        Par3Fft.Decode(layout, count, available, indices.ToDictionary(r => r, r => (int)r), new Memory(damaged), reader, output, size, Options());
+
+        CollectionAssert.AreEqual(data[4], output.Blocks[4]);
+        CollectionAssert.AreEqual(data[17], output.Blocks[17]);
+        CollectionAssert.AreEquivalent(new[] { 0, 1 }, reader.Indices.ToArray(), "two blocks missing: two recovery blocks read, of the six");
+    }
+
+    private sealed class RecordingReader(IRegionSource inner) : IRegionSource
+    {
+        public HashSet<int> Indices { get; } = [];
+
+        public void Read(int index, long offset, Span<byte> destination)
+        {
+            lock (Indices)
+            {
+                Indices.Add(index);
+            }
+
+            inner.Read(index, offset, destination);
+        }
+    }
+
     [TestMethod]
     public void Encode_OnlyRequestedRecoveryIndices()
     {

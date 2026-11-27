@@ -283,6 +283,7 @@ The hard parts are documented in the source with worked examples:
 - BLAKE3's tree and SIMD transposition: `Blake3`, `Blake3Simd`.
 - CRC combining: `Crc64Iso.Combine`.
 - The rolling block search: `BlockScanner`.
+- Keeping the encoder's data in the CPU caches, and the kernels' own data layout: `LinearCombiner`, `Gf16Kernels.Prepare`.
 
 ## Performance
 
@@ -290,10 +291,14 @@ The hard parts are documented in the source with worked examples:
 
 | | GB/s |
 |---|---|
-| GF(2^16) multiply-add, AVX2 (PAR2/PAR3 inner loop) | 27.7 |
+| GF(2^16) multiply-add, AVX2 (PAR2/PAR3 inner loop) | 43 |
 | GF(2^8) multiply-add, AVX2 | 51.2 |
 | BLAKE3, 1 thread / 4 threads | 1.4 / 3.1 |
 | FFT Reed-Solomon encode, 1000+100 blocks, 4 threads | 2.7 |
+
+Creating PAR2 with 2,000 input and 2,000 recovery blocks of 256 KiB on the same machine: 7.8 s
+(par2cmdline-turbo: 7.3 s). How the encoder keeps the CPU busy instead of waiting for memory is described in
+`LinearCombiner`.
 
 ## Building and testing
 

@@ -1155,7 +1155,7 @@ public static class Par3Creator
     /// encoding. A slice that arrives out of order drops that block's hasher; such a block is read back at the end
     /// (<see cref="FinishChecksumFromDisk"/>). Different blocks may be written from different threads at once.
     /// </remarks>
-    internal sealed class RecoverySink((FileStream Stream, long DataOffset, byte[] Header)[] outputs, long blockSize, BlockStateMap map) : IRegionSink
+    internal sealed class RecoverySink((FileStream Stream, long DataOffset, byte[] Header)[] outputs, long blockSize, BlockStateMap map) : IConcurrentRegionSink
     {
         private readonly Blake3Hasher?[] _hashers = new Blake3Hasher?[outputs.Length];
         private readonly long[] _next = new long[outputs.Length];
