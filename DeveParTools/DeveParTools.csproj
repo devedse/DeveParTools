@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsAotCompatible>true</IsAotCompatible>
+    <Description>DeveParTools: one API for PAR1, PAR2 and PAR3 (create, verify, repair) with live block state for UIs.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\DeveParTools.Par1\DeveParTools.Par1.csproj" />
+    <ProjectReference Include="..\DeveParTools.Par2\DeveParTools.Par2.csproj" />
+    <ProjectReference Include="..\DeveParTools.Par3\DeveParTools.Par3.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="DeveParTools.Tests" />
+  </ItemGroup>
+</Project>
