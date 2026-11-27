@@ -258,6 +258,19 @@ Check(shell.Create.RebuildText.Contains(" of 2", StringComparison.Ordinal) && sh
     && shell.Create.RecoveryFiles[0].Blocks == "index", $"rebuild {shell.Create.RebuildText}, PAR files {shell.Create.ParFilesText}, efficiency {shell.Create.EfficiencyText}");
 shell.Create.FormatIndex = 2;
 Check(!shell.Create.HasBlockChoice && shell.Create.BlockCount == 2, "PAR1: one block per file, no block choice");
+
+// PAR3: up to 32,768 blocks unless more are allowed (with a warning about what that costs).
+shell.Create.FormatIndex = 0;
+Await(shell.Create.Planned);
+shell.Create.BlockSlider = 20;
+Check(shell.Create.ShowManyBlocksOption && shell.Create.BlockCount <= 32768 && !shell.Create.ManyBlocksWarning && Math.Abs(shell.Create.BlockSliderMaximum - 15) < 1e-9,
+    $"the block slider stops at 32,768 blocks: {shell.Create.BlockCount}");
+shell.Create.AllowManyBlocks = true;
+shell.Create.BlockSlider = 16;
+Check(shell.Create.BlockCount > 32768 && shell.Create.ManyBlocksWarning, $"allowing more blocks goes past it, with the warning: {shell.Create.BlockCount}");
+Save(window, output, "create-many-blocks");
+shell.Create.AllowManyBlocks = false;
+Check(shell.Create.BlockCount <= 32768, "turning it off goes back to at most 32,768");
 shell.Create.FormatIndex = 1;
 
 shell.Page = AppPage.Benchmark;
@@ -302,6 +315,16 @@ Save(window, output, "benchmark");
     LinuxFileAssociations.SetEntry(fresh, "Default Applications", "a/b", "y.desktop");
     Check(fresh.SequenceEqual(["[Default Applications]", "a/b=y.desktop"]) && LinuxFileAssociations.GetEntry(fresh, "Other", "a/b") == null, "mimeapps.list editing: add, replace, missing section");
 }
+// A small window: the pages scroll instead of squeezing their cards into each other.
+window.Width = 900;
+window.Height = 620;
+shell.Page = AppPage.Create;
+Save(window, output, "create-small");
+shell.Page = AppPage.Verify;
+Save(window, output, "verify-small");
+window.Width = 1440;
+window.Height = 900;
+
 shell.Page = AppPage.Settings;
 Save(window, output, "settings");
 if (OperatingSystem.IsWindows())

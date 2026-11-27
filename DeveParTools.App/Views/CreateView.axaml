@@ -19,7 +19,11 @@
     </Style>
   </UserControl.Styles>
 
-  <Grid RowDefinitions="Auto,*,Auto" Margin="24,16,24,16" RowSpacing="14">
+  <!-- At least 980 × 720: smaller windows scroll instead of squeezing the cards into each other. -->
+  <ScrollViewer x:Name="PageScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+  <Grid RowDefinitions="Auto,*,Auto" Margin="24,16,24,16" RowSpacing="14"
+        Width="{Binding #PageScroll.Viewport.Width, Converter={x:Static c:AtLeastConverter.Instance}, ConverterParameter='980|48'}"
+        Height="{Binding #PageScroll.Viewport.Height, Converter={x:Static c:AtLeastConverter.Instance}, ConverterParameter='720|32'}">
     <StackPanel Grid.Row="0" Spacing="2">
       <TextBlock Classes="Title" Text="Create a recovery set" />
       <TextBlock Classes="Subtitle" Text="Choose what to protect and how much recovery data to make. Every number below is what will really be written." />
@@ -33,9 +37,9 @@
             <Grid ColumnDefinitions="*,Auto">
               <TextBlock Classes="Section" Margin="0" Text="Files and folders" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
-                <Button Content="Add files…" Command="{Binding AddFilesCommand}" />
-                <Button Content="Add folder…" Command="{Binding AddFolderCommand}" />
-                <Button Content="Clear" Command="{Binding ClearInputsCommand}" />
+                <Button ToolTip.Tip="Pick one or more files to protect." Content="Add files…" Command="{Binding AddFilesCommand}" />
+                <Button ToolTip.Tip="Pick a folder to protect: all its files (and its subfolders&#x27; files, see Advanced options)." Content="Add folder…" Command="{Binding AddFolderCommand}" />
+                <Button ToolTip.Tip="Remove everything from the list (the files themselves are not touched)." Content="Clear" Command="{Binding ClearInputsCommand}" />
               </StackPanel>
             </Grid>
             <!-- Column headers -->
@@ -53,7 +57,7 @@
                     <TextBlock Grid.Column="1" Text="{Binding Files}" HorizontalAlignment="Right" VerticalAlignment="Center" />
                     <TextBlock Grid.Column="2" Text="{Binding Size}" HorizontalAlignment="Right" VerticalAlignment="Center" />
                     <TextBlock Grid.Column="3" Text="{Binding Blocks}" HorizontalAlignment="Right" VerticalAlignment="Center" />
-                    <Button Grid.Column="4" Content="Remove" Padding="8,2" HorizontalAlignment="Right"
+                    <Button ToolTip.Tip="Take this file or folder out of the list (the file itself is not touched)." Grid.Column="4" Content="Remove" Padding="8,2" HorizontalAlignment="Right"
                             Command="{Binding $parent[UserControl].((vm:CreateViewModel)DataContext).RemoveInputCommand}" CommandParameter="{Binding}" />
                   </Grid>
                 </DataTemplate>
@@ -65,15 +69,15 @@
         <Border Grid.Row="1" Classes="Card">
           <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="10" RowSpacing="10">
             <TextBlock Text="Save as" VerticalAlignment="Center" />
-            <TextBox Grid.Column="1" Text="{Binding OutputPath}" PlaceholderText="{Binding OutputPlaceholder}" />
-            <Button Grid.Column="2" Content="Browse…" Command="{Binding BrowseOutputCommand}" />
+            <TextBox ToolTip.Tip="The index file of the new set. The recovery files get the same name with .volXX+YY added; they are written into the same folder." Grid.Column="1" Text="{Binding OutputPath}" PlaceholderText="{Binding OutputPlaceholder}" />
+            <Button ToolTip.Tip="Choose where to save the recovery set and its name." Grid.Column="2" Content="Browse…" Command="{Binding BrowseOutputCommand}" />
             <TextBlock Grid.Row="1" Text="Comment" VerticalAlignment="Center" />
-            <TextBox Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Text="{Binding Comment}" PlaceholderText="optional, stored in the set" />
+            <TextBox ToolTip.Tip="Optional text stored in the set (shown when it is verified), for example what the files are." Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Text="{Binding Comment}" PlaceholderText="optional, stored in the set" />
           </Grid>
         </Border>
         <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
-          <Button Classes="accent" Content="Create recovery set" Command="{Binding CreateCommand}" Padding="20,8" />
-          <Button Content="Cancel" Command="{Binding CancelCommand}" />
+          <Button ToolTip.Tip="Write the recovery set with exactly the numbers shown on the right." Classes="accent" Content="Create recovery set" Command="{Binding CreateCommand}" Padding="20,8" />
+          <Button ToolTip.Tip="Stop creating. The files written so far are not a usable set." Content="Cancel" Command="{Binding CancelCommand}" />
         </StackPanel>
         <views:OperationProgressView Grid.Row="3" />
         <TextBlock Grid.Row="4" Text="{Binding StatusText}" TextWrapping="Wrap" IsVisible="{Binding StatusText, Converter={x:Static ObjectConverters.IsNotNull}}" />
@@ -106,7 +110,15 @@
                                IsEnabled="{Binding HasBlockChoice}" AutomationProperties.Name="Block size in bytes"
                                ToolTip.Tip="Block size in bytes. Type one to use exactly that (rounded up to a multiple of 4 for PAR2, 8 for PAR3)." />
 
-                <TextBlock Grid.Row="3" Grid.ColumnSpan="3" Classes="Caption" Text="PAR1 uses one block per file." IsVisible="{Binding IsPar1}" />
+                <StackPanel Grid.Row="3" Grid.ColumnSpan="3" Spacing="6">
+                  <TextBlock Classes="Caption" Text="PAR1 uses one block per file." IsVisible="{Binding IsPar1}" />
+                  <CheckBox Content="Allow more than 32,768 blocks" IsChecked="{Binding AllowManyBlocks}" IsVisible="{Binding ShowManyBlocksOption}"
+                            ToolTip.Tip="Up to 32,768 blocks the set keeps the full guarantee: any lost blocks can be rebuilt as long as there are as many recovery blocks. More blocks are possible with PAR3, with the drawbacks shown when you use them." />
+                  <Border IsVisible="{Binding ManyBlocksWarning}" Padding="10,8" CornerRadius="6" Background="{DynamicResource BlockRecoverableBrush}" Opacity="0.9">
+                    <TextBlock TextWrapping="Wrap" Foreground="Black"
+                               Text="More than 32,768 blocks: a small error costs less recovery data, but (1) the FFT code then splits the set into interleaved groups that each repair only their own blocks, so damage concentrated in one place may not be repairable even when there is enough recovery data in total; (2) every block adds a 24-byte checksum to the index and to every recovery file, so the PAR files grow; (3) verify and repair keep a table of all blocks and take longer." />
+                  </Border>
+                </StackPanel>
               </Grid>
             </Border>
 
@@ -171,7 +183,7 @@
                   </Grid>
                 </Border>
 
-                <Expander Header="{Binding RecoveryFilesHeader}" HorizontalAlignment="Stretch" Padding="12,8">
+                <Expander ToolTip.Tip="Every file that will be written, with what it holds and its exact size." Header="{Binding RecoveryFilesHeader}" HorizontalAlignment="Stretch" Padding="12,8">
                   <ItemsControl ItemsSource="{Binding RecoveryFiles}">
                     <ItemsControl.ItemTemplate>
                       <DataTemplate x:DataType="vm:RecoveryFileRow">
@@ -218,7 +230,7 @@
             </Border>
 
             <!-- Rarely needed -->
-            <Expander Header="Advanced options" HorizontalAlignment="Stretch" Padding="12,8">
+            <Expander ToolTip.Tip="Options most sets do not need: the first block number, the base folder, subfolders, and PAR3 code details." Header="Advanced options" HorizontalAlignment="Stretch" Padding="12,8">
               <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10">
                 <TextBlock Text="First recovery block" VerticalAlignment="Center" />
                 <NumericUpDown Grid.Column="1" Value="{Binding FirstRecoveryBlock}" Minimum="0" Maximum="65535" PlaceholderText="0" FormatString="N0"
@@ -226,7 +238,7 @@
                 <TextBlock Grid.Row="1" Text="Base folder" VerticalAlignment="Center" />
                 <Grid Grid.Row="1" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="8">
                   <TextBox Text="{Binding BaseDirectory}" PlaceholderText="the folder of the recovery set" ToolTip.Tip="File names are stored relative to this folder." />
-                  <Button Grid.Column="1" Content="Browse…" Command="{Binding BrowseBaseCommand}" />
+                  <Button ToolTip.Tip="Choose the base folder: file names are stored relative to it." Grid.Column="1" Content="Browse…" Command="{Binding BrowseBaseCommand}" />
                 </Grid>
                 <CheckBox Grid.Row="2" Grid.ColumnSpan="2" Content="Include subfolders" IsChecked="{Binding Recursive}"
                           ToolTip.Tip="For folders you added: also protect the files in their subfolders (and their subfolders, and so on)." />
@@ -258,7 +270,7 @@
       </Grid>
     </Grid>
 
-    <Expander Grid.Row="2" Header="Log" HorizontalAlignment="Stretch">
+    <Expander ToolTip.Tip="Everything that happened, with times: each step, warnings and errors." Grid.Row="2" Header="Log" HorizontalAlignment="Stretch">
       <ListBox ItemsSource="{Binding Log}" Height="150">
         <ListBox.ItemTemplate>
           <DataTemplate x:DataType="vm:LogLine">
@@ -268,4 +280,5 @@
       </ListBox>
     </Expander>
   </Grid>
+  </ScrollViewer>
 </UserControl>

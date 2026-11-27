@@ -33,7 +33,7 @@
   </UserControl.Styles>
 
   <!-- Open while working; afterwards only the header (total and time) shows, click it to see the steps again. -->
-  <Expander IsVisible="{Binding HasStages}" IsExpanded="{Binding IsBusy, Mode=OneWay}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="12,6">
+  <Expander ToolTip.Tip="Every step of the operation with its progress. Click to show or hide the steps." IsVisible="{Binding HasStages}" IsExpanded="{Binding IsBusy, Mode=OneWay}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" Padding="12,6">
     <Expander.Header>
       <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12" Margin="0,0,8,0">
         <TextBlock Text="{Binding Stage}" FontWeight="SemiBold" VerticalAlignment="Center" MinWidth="120" />

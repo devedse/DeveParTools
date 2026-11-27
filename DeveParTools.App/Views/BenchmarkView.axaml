@@ -9,11 +9,11 @@
       <TextBlock Classes="Subtitle" Text="{Binding Summary}" />
     </StackPanel>
     <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="10">
-      <Button Classes="accent" Content="Run benchmark" Command="{Binding RunCommand}" Padding="20,8" />
+      <Button ToolTip.Tip="Measures every kernel (Galois-field multiply-add for GF(2^8) and GF(2^16), BLAKE3, CRC, the FFT code) on this computer, one after the other." Classes="accent" Content="Run benchmark" Command="{Binding RunCommand}" Padding="20,8" />
       <TextBlock Text="Buffer (KiB)" VerticalAlignment="Center" Margin="14,0,0,0" />
-      <NumericUpDown Value="{Binding BufferKiB}" Minimum="4" Maximum="1048576" Increment="64" FormatString="N0" Width="140" />
+      <NumericUpDown ToolTip.Tip="Size of the data each measurement works on, in KiB. Small buffers stay in the CPU cache (peak speed); large ones also measure memory speed." Value="{Binding BufferKiB}" Minimum="4" Maximum="1048576" Increment="64" FormatString="N0" Width="140" />
       <TextBlock Text="Time per test (ms)" VerticalAlignment="Center" Margin="14,0,0,0" />
-      <NumericUpDown Value="{Binding TimeMs}" Minimum="3" Maximum="60000" Increment="50" FormatString="N0" Width="140" />
+      <NumericUpDown ToolTip.Tip="How long each measurement runs, in milliseconds; the first third warms up. Longer gives steadier numbers." Value="{Binding TimeMs}" Minimum="3" Maximum="60000" Increment="50" FormatString="N0" Width="140" />
     </StackPanel>
     <Border Grid.Row="2" Classes="Card">
       <ItemsControl ItemsSource="{Binding Results}">

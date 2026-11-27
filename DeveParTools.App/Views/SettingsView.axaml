@@ -9,31 +9,31 @@
       <Border Classes="Card">
         <Grid ColumnDefinitions="220,*" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="14" ColumnSpacing="14">
           <TextBlock Text="Threads" VerticalAlignment="Center" />
-          <NumericUpDown Grid.Column="1" Value="{Binding Threads}" Minimum="1" Maximum="{Binding MaxThreads}" Width="160" HorizontalAlignment="Left" />
+          <NumericUpDown ToolTip.Tip="How many processor threads the operations use (files are checked in parallel; encoding and hashing are spread over them)." Grid.Column="1" Value="{Binding Threads}" Minimum="1" Maximum="{Binding MaxThreads}" Width="160" HorizontalAlignment="Left" />
           <TextBlock Grid.Row="1" Text="Memory budget (MiB)" VerticalAlignment="Center" />
-          <NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding MemoryMiB}" Minimum="64" Maximum="1048576" Increment="256" Width="160" HorizontalAlignment="Left" />
+          <NumericUpDown ToolTip.Tip="How much memory encoding and repairing may use for their buffers. Less memory means more passes over the files (slower), more lets large sets go in one pass." Grid.Row="1" Grid.Column="1" Value="{Binding MemoryMiB}" Minimum="64" Maximum="1048576" Increment="256" Width="160" HorizontalAlignment="Left" />
           <TextBlock Grid.Row="2" Text="SIMD kernel" VerticalAlignment="Center" />
-          <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding Kernels}" SelectedItem="{Binding Kernel}" Width="160" />
+          <ComboBox ToolTip.Tip="The SIMD kernel for the Galois-field arithmetic. The fastest one your processor supports is chosen automatically; others are here to compare them on the Benchmark page." Grid.Row="2" Grid.Column="1" ItemsSource="{Binding Kernels}" SelectedItem="{Binding Kernel}" Width="160" />
           <TextBlock Grid.Row="3" Text="Theme" VerticalAlignment="Center" />
-          <ComboBox Grid.Row="3" Grid.Column="1" ItemsSource="{Binding Themes}" SelectedItem="{Binding Theme}" Width="160" />
+          <ComboBox ToolTip.Tip="Light, dark, or follow the system setting." Grid.Row="3" Grid.Column="1" ItemsSource="{Binding Themes}" SelectedItem="{Binding Theme}" Width="160" />
         </Grid>
       </Border>
       <Border Classes="Card" IsVisible="{Binding AssociationsSupported}">
         <StackPanel Spacing="8">
           <TextBlock Classes="Section" Text="File associations" />
-          <ToggleSwitch IsChecked="{Binding AssociateFiles}" IsEnabled="{Binding AssociationsEditable}"
+          <ToggleSwitch ToolTip.Tip="Double-click .par, .par2 and .par3 files (and PAR1 volumes) to verify them in DeveParTools." IsChecked="{Binding AssociateFiles}" IsEnabled="{Binding AssociationsEditable}"
                         OnContent="PAR files open with DeveParTools" OffContent="PAR files open with DeveParTools"
                         AutomationProperties.Name="Open PAR files with DeveParTools" />
           <TextBlock TextWrapping="Wrap" Opacity="0.8"
                      Text="Double-click .par, .par2 and .par3 files (and PAR1 volumes .p01, .p02 …) to verify them in DeveParTools. Only for your account; turning it off gives the files back to the program they had before." />
           <TextBlock Text="{Binding AssociationStatus}" TextWrapping="Wrap" IsVisible="{Binding AssociationStatus, Converter={x:Static ObjectConverters.IsNotNull}}" />
-          <Button Content="Choose in Windows…" Command="{Binding OpenDefaultAppsCommand}" IsVisible="{Binding CanOpenDefaultApps}" />
+          <Button ToolTip.Tip="Opens Windows&#x27; Default apps settings, where you can pick DeveParTools for the PAR file types yourself (Windows does not let apps do that)." Content="Choose in Windows…" Command="{Binding OpenDefaultAppsCommand}" IsVisible="{Binding CanOpenDefaultApps}" />
         </StackPanel>
       </Border>
       <Border Classes="Card" IsVisible="{Binding ExplorerMenuSupported}">
         <StackPanel Spacing="8">
           <TextBlock Classes="Section" Text="Windows Explorer" />
-          <ToggleSwitch IsChecked="{Binding ExplorerMenu}" IsEnabled="{Binding ExplorerMenuEditable}"
+          <ToggleSwitch ToolTip.Tip="Adds &#x27;Create recovery set with DeveParTools&#x27; to files and folders and &#x27;Verify with DeveParTools&#x27; to PAR files in the Explorer right-click menu." IsChecked="{Binding ExplorerMenu}" IsEnabled="{Binding ExplorerMenuEditable}"
                         OnContent="Context menu entries on" OffContent="Context menu entries off"
                         AutomationProperties.Name="Explorer context menu entries" />
           <TextBlock TextWrapping="Wrap" Opacity="0.8"

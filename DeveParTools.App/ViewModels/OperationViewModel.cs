@@ -38,6 +38,20 @@ public sealed partial class LegendItem : ObservableObject
         State = state;
         Name = BlockGrid.Display(state);
         BrushKey = BlockGrid.ResourceKey(state);
+        Description = state switch
+        {
+            BlockState.Found => "The block is where it belongs, and its checksum is right.",
+            BlockState.FoundMoved => "The block is in the right file, but at another position (bytes were inserted or removed before it). Repair puts it back in place.",
+            BlockState.FoundElsewhere => "The block was found in another file: a renamed copy, an extra file you added, or another file of the set. Repair copies it into place.",
+            BlockState.FoundStored => "Not in the file, but stored in the PAR files themselves (the set was made with Store data). Repair copies it back; no recovery blocks are needed.",
+            BlockState.Damaged => "The block's position exists, but its contents are wrong.",
+            BlockState.Missing => "The block was not found anywhere.",
+            BlockState.Recoverable => "Missing or damaged, but there are enough recovery blocks to rebuild it.",
+            BlockState.Repairing => "Being rebuilt right now.",
+            BlockState.Repaired => "Rebuilt from the recovery blocks and checked.",
+            BlockState.Unrecoverable => "Missing or damaged, and there are not enough recovery blocks to rebuild it.",
+            _ => "Read and processed.",
+        } + " Click to hide or show these blocks.";
         _changed = changed;
     }
 
@@ -48,6 +62,9 @@ public sealed partial class LegendItem : ObservableObject
     public string Name { get; }
 
     public string BrushKey { get; }
+
+    /// <summary>What the state means (the chip's tooltip).</summary>
+    public string Description { get; }
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasCount))]

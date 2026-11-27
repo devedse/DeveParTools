@@ -65,3 +65,23 @@ public sealed class LessThanConverter(double limit) : IValueConverter
 
     public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) => throw new NotSupportedException();
 }
+
+/// <summary>
+/// "The visible size, but at least a minimum": for page content inside a scroll viewer, so it fills the window and
+/// scrolls instead of squeezing when the window is small. Parameter "minimum|margin": 1000|48 turns a viewport of
+/// 1,400 into 1,352 (the content's margins taken off) and one of 800 into 1,000.
+/// </summary>
+public sealed class AtLeastConverter : IValueConverter
+{
+    public static readonly AtLeastConverter Instance = new();
+
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        var parts = (parameter as string ?? "0|0").Split('|');
+        double minimum = double.Parse(parts[0], CultureInfo.InvariantCulture);
+        double margin = parts.Length > 1 ? double.Parse(parts[1], CultureInfo.InvariantCulture) : 0;
+        return value is double size && size > 0 ? Math.Max(minimum, size - margin) : minimum;
+    }
+
+    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) => throw new NotSupportedException();
+}

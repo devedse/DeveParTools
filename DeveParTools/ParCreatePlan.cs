@@ -210,7 +210,7 @@ public static partial class ParClient
         {
             var sized = Copy(plan, PlanFileSizes(exact, plan.Format), plan.Warnings);
             return sized.Efficiency < 0.5 && sized.RecoveryBlocks > 0
-                ? Copy(sized, sized.OutputFiles, [.. plan.Warnings, $"Only {sized.Efficiency:P0} of what is written is recovery data for your files. The rest is overhead: "
+                ? Copy(sized, sized.OutputFiles, [.. plan.Warnings, $"Only {sized.Efficiency * 100:0.#}% of what is written is recovery data for your files. The rest is overhead: "
                     + "partly empty blocks, a checksum per block, and copies of the file list and checksums in every recovery file. Fewer, larger blocks lower it."])
                 : sized;
         }

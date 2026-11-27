@@ -6,7 +6,11 @@
              x:Class="DeveParTools.App.Views.VerifyView"
              x:DataType="vm:VerifyViewModel"
              c:FileDrop.Command="{Binding OpenDroppedCommand}">
-  <Grid RowDefinitions="Auto,Auto,Auto,Auto,*,Auto" Margin="24,16,24,16" RowSpacing="14">
+  <!-- At least 980 × 700: smaller windows scroll instead of squeezing the cards into each other. -->
+  <ScrollViewer x:Name="PageScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+  <Grid RowDefinitions="Auto,Auto,Auto,Auto,*,Auto" Margin="24,16,24,16" RowSpacing="14"
+        Width="{Binding #PageScroll.Viewport.Width, Converter={x:Static c:AtLeastConverter.Instance}, ConverterParameter='980|48'}"
+        Height="{Binding #PageScroll.Viewport.Height, Converter={x:Static c:AtLeastConverter.Instance}, ConverterParameter='700|32'}">
     <!-- Header -->
     <StackPanel Grid.Row="0" Spacing="2">
       <TextBlock Classes="Title" Text="Verify &amp; repair" />
@@ -16,26 +20,26 @@
     <!-- Input -->
     <Border Grid.Row="1" Classes="Card">
       <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto" RowSpacing="10" ColumnSpacing="10">
-        <TextBox Grid.Column="0" Text="{Binding ParFile}" PlaceholderText="Path to a .par2 / .par3 / .par file (or drop one here)" />
+        <TextBox ToolTip.Tip="The PAR file of the set to check: the index or any of its recovery files (or an archive with PAR3 data inside). You can also drop a file here." Grid.Column="0" Text="{Binding ParFile}" PlaceholderText="Path to a .par2 / .par3 / .par file (or drop one here)" />
         <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
-          <Button Content="Browse…" Command="{Binding BrowseCommand}" />
-          <Button Content="Verify" Command="{Binding VerifyCommand}" />
-          <Button Classes="accent" Content="Repair" Command="{Binding RepairCommand}" />
-          <Button Content="Cancel" Command="{Binding CancelCommand}" />
+          <Button ToolTip.Tip="Pick a .par, .par2, .par3 file or an archive with PAR3 data inside." Content="Browse…" Command="{Binding BrowseCommand}" />
+          <Button ToolTip.Tip="Check every protected file and every block. Nothing is changed." Content="Verify" Command="{Binding VerifyCommand}" />
+          <Button ToolTip.Tip="Rebuild the damaged and missing files from the good blocks and the recovery blocks. Damaged files are kept as name.1 backups unless you chose otherwise." Classes="accent" Content="Repair" Command="{Binding RepairCommand}" />
+          <Button ToolTip.Tip="Stop the running operation. Repair only replaces files once they are complete and checked, so stopping leaves your files as they were." Content="Cancel" Command="{Binding CancelCommand}" />
         </StackPanel>
         <WrapPanel Grid.Row="1" Grid.ColumnSpan="2" Orientation="Horizontal">
-          <CheckBox Content="Delete damaged originals (no backups)" IsChecked="{Binding PurgeBackups}" Margin="0,0,20,0" />
-          <CheckBox Content="Restore permissions (PAR3)" IsChecked="{Binding RestorePermissions}" Margin="0,0,20,0" />
-          <CheckBox Content="Restore links (PAR3)" IsChecked="{Binding RestoreLinks}" Margin="0,0,20,0" />
+          <CheckBox ToolTip.Tip="Repair normally keeps each damaged file as a backup (name.1). Tick this to delete them instead." Content="Delete damaged originals (no backups)" IsChecked="{Binding PurgeBackups}" Margin="0,0,20,0" />
+          <CheckBox ToolTip.Tip="PAR3 sets can store permissions and times: apply them to the repaired files." Content="Restore permissions (PAR3)" IsChecked="{Binding RestorePermissions}" Margin="0,0,20,0" />
+          <CheckBox ToolTip.Tip="PAR3 sets can store links: recreate them (only inside the folder of the set)." Content="Restore links (PAR3)" IsChecked="{Binding RestoreLinks}" Margin="0,0,20,0" />
           <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,0,20,0" IsVisible="{Binding CanOfferExtend}">
             <TextBlock VerticalAlignment="Center" Text="Add" />
-            <NumericUpDown Value="{Binding ExtendPercent}" Minimum="1" Maximum="200" Increment="1" FormatString="0" Width="120" IsEnabled="{Binding ExtendUsesPercent}" />
+            <NumericUpDown ToolTip.Tip="How much recovery data to add, as a percentage of the input. The set must be complete (repair it first)." Value="{Binding ExtendPercent}" Minimum="1" Maximum="200" Increment="1" FormatString="0" Width="120" IsEnabled="{Binding ExtendUsesPercent}" />
             <TextBlock VerticalAlignment="Center" Text="% recovery data" />
             <Button Content="Add" Command="{Binding ExtendCommand}" ToolTip.Tip="Writes new recovery files next to the set; the existing ones stay as they are." />
           </StackPanel>
           <Button Content="Remove recovery data from the archive" Command="{Binding RemoveInsideCommand}" IsVisible="{Binding CanOfferRemoveInside}" Margin="0,0,20,0"
                   ToolTip.Tip="Takes the PAR3 data out of the archive again, so it has its original bytes." />
-          <Button Content="Add extra files to search…" Command="{Binding AddExtraFilesCommand}" Margin="0,0,10,0" />
+          <Button ToolTip.Tip="Files that may hold some of the data under another name (a renamed copy, a partial download): they are searched for blocks too." Content="Add extra files to search…" Command="{Binding AddExtraFilesCommand}" Margin="0,0,10,0" />
           <ItemsControl ItemsSource="{Binding ExtraFiles}">
             <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
             <ItemsControl.ItemTemplate>
@@ -48,21 +52,21 @@
             </ItemsControl.ItemTemplate>
           </ItemsControl>
         </WrapPanel>
-        <Expander Grid.Row="2" Grid.ColumnSpan="2" Header="More options" HorizontalAlignment="Stretch" Padding="12,8">
+        <Expander ToolTip.Tip="The folder with the protected files (when they are not next to the PAR file) and the details of adding recovery data." Grid.Row="2" Grid.ColumnSpan="2" Header="More options" HorizontalAlignment="Stretch" Padding="12,8">
           <Grid ColumnDefinitions="Auto,*,Auto,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10">
             <TextBlock Text="Folder with the protected files" VerticalAlignment="Center" />
             <Grid Grid.Column="1" Grid.ColumnSpan="3" ColumnDefinitions="*,Auto" ColumnSpacing="8">
               <TextBox Text="{Binding BaseDirectory}" PlaceholderText="the PAR file's folder"
                        ToolTip.Tip="Where the protected files are, when they are not next to the PAR file. Used by verify, repair and adding recovery data." />
-              <Button Grid.Column="1" Content="Browse…" Command="{Binding BrowseBaseCommand}" />
+              <Button ToolTip.Tip="Choose the folder where the protected files are." Grid.Column="1" Content="Browse…" Command="{Binding BrowseBaseCommand}" />
             </Grid>
             <TextBlock Grid.Row="1" Grid.ColumnSpan="4" Classes="Section" Margin="0,6,0,0" Text="Adding recovery data" />
             <TextBlock Grid.Row="2" Text="Recovery blocks (exact)" VerticalAlignment="Center" />
-            <NumericUpDown Grid.Row="2" Grid.Column="1" Value="{Binding ExtendCount}" Minimum="1" Maximum="1000000" PlaceholderText="from the percentage" FormatString="N0" />
+            <NumericUpDown ToolTip.Tip="An exact number of new recovery blocks, instead of the percentage." Grid.Row="2" Grid.Column="1" Value="{Binding ExtendCount}" Minimum="1" Maximum="1000000" PlaceholderText="from the percentage" FormatString="N0" />
             <TextBlock Grid.Row="2" Grid.Column="2" Text="First block number" VerticalAlignment="Center" />
-            <NumericUpDown Grid.Row="2" Grid.Column="3" Value="{Binding ExtendFirst}" Minimum="0" PlaceholderText="after the existing ones" FormatString="N0" />
+            <NumericUpDown ToolTip.Tip="Number of the first new recovery block; default: right after the highest one the set has." Grid.Row="2" Grid.Column="3" Value="{Binding ExtendFirst}" Minimum="0" PlaceholderText="after the existing ones" FormatString="N0" />
             <TextBlock Grid.Row="3" Text="New recovery files" VerticalAlignment="Center" />
-            <NumericUpDown Grid.Row="3" Grid.Column="1" Value="{Binding ExtendVolumes}" Minimum="0" Maximum="100000" PlaceholderText="automatic" FormatString="N0" />
+            <NumericUpDown ToolTip.Tip="How many new recovery files to spread the new blocks over (empty: growing sizes 1, 2, 4, …)." Grid.Row="3" Grid.Column="1" Value="{Binding ExtendVolumes}" Minimum="0" Maximum="100000" PlaceholderText="automatic" FormatString="N0" />
             <TextBlock Grid.Row="3" Grid.Column="2" Text="File name" VerticalAlignment="Center" />
             <TextBox Grid.Row="3" Grid.Column="3" Text="{Binding ExtendOutput}" PlaceholderText="the set's own name"
                      ToolTip.Tip="Base name of the new recovery files, for example D:\backup\photos.par2 gives photos.vol40+20.par2." />
@@ -82,7 +86,7 @@
           </StackPanel>
         </Grid>
       </Border>
-      <Border Grid.Column="1" Classes="Card">
+      <Border Grid.Column="1" Classes="Card" ToolTip.Tip="Files that are complete, and files that are damaged or missing.">
         <StackPanel>
           <TextBlock Classes="Caption" Text="Files OK / damaged" />
           <StackPanel Orientation="Horizontal" Spacing="6">
@@ -92,14 +96,14 @@
           </StackPanel>
         </StackPanel>
       </Border>
-      <Border Grid.Column="2" Classes="Card">
+      <Border Grid.Column="2" Classes="Card" ToolTip.Tip="Blocks that must be rebuilt, against the recovery blocks the set has. Repair works when there are at least as many recovery blocks as missing blocks (for FFT sets: per group of blocks).">
         <StackPanel Spacing="6">
           <TextBlock Classes="Caption" Text="Missing blocks vs recovery blocks" />
           <ProgressBar Minimum="0" Maximum="100" Height="10" Value="{Binding NeedRatio, Converter={x:Static c:PercentConverter.Instance}}" />
           <TextBlock Text="{Binding NeedText}" />
         </StackPanel>
       </Border>
-      <Border Grid.Column="3" Classes="Card">
+      <Border Grid.Column="3" Classes="Card" ToolTip.Tip="What is running, or the result of the last operation.">
         <StackPanel Spacing="6">
           <TextBlock Classes="Caption" Text="{Binding Stage}" />
           <ProgressBar Minimum="0" Maximum="100" Height="10" Value="{Binding Progress}" IsIndeterminate="False" />
@@ -150,7 +154,7 @@
             <ItemsControl.ItemTemplate>
               <DataTemplate x:DataType="vm:LegendItem">
                 <ToggleButton Classes="Legend" IsChecked="{Binding IsVisible}" Margin="0,0,6,6" Padding="10,3" IsVisible="{Binding HasCount}"
-                              ToolTip.Tip="Click to hide or show these blocks">
+                              ToolTip.Tip="{Binding Description}">
                   <StackPanel Orientation="Horizontal" Spacing="6">
                     <Border Width="12" Height="12" CornerRadius="2" Background="{Binding BrushKey, Converter={x:Static c:ResourceBrushConverter.Instance}}" />
                     <TextBlock Text="{Binding Name}" />
@@ -171,7 +175,7 @@
     </Grid>
 
     <!-- Log -->
-    <Expander Grid.Row="5" Header="Log" HorizontalAlignment="Stretch">
+    <Expander ToolTip.Tip="Everything that happened, with times: each step, warnings and errors." Grid.Row="5" Header="Log" HorizontalAlignment="Stretch">
       <ListBox ItemsSource="{Binding Log}" Height="150">
         <ListBox.ItemTemplate>
           <DataTemplate x:DataType="vm:LogLine">
@@ -181,4 +185,5 @@
       </ListBox>
     </Expander>
   </Grid>
+  </ScrollViewer>
 </UserControl>

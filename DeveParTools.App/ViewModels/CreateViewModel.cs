@@ -218,8 +218,33 @@ public sealed partial class CreateViewModel : OperationViewModel
         set => SetBlockTarget((int)Math.Round(Math.Pow(2, value)));
     }
 
-    /// <summary>The slider's end: log2 of the most blocks the format allows for these files.</summary>
-    public double BlockSliderMaximum => Math.Log2(Math.Max(2, Plan?.MaxInputBlocks ?? 2));
+    /// <summary>
+    /// The block count up to which a set keeps the full repair guarantee: the FFT code handles up to 32,768 input blocks
+    /// in one group; above that it interleaves groups (cohorts) that each repair only their own blocks.
+    /// </summary>
+    public const int SafeBlockLimit = 32768;
+
+    /// <summary>Lets the block slider and count go past <see cref="SafeBlockLimit"/> (PAR3).</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(BlockSliderMaximum), nameof(ManyBlocksWarning))]
+    private bool _allowManyBlocks;
+
+    partial void OnAllowManyBlocksChanged(bool value)
+    {
+        if (!value && _blockTarget > SafeBlockLimit)
+        {
+            SetBlockTarget(SafeBlockLimit);
+        }
+    }
+
+    /// <summary>The option is offered when the files could be cut into more than 32,768 blocks (PAR3 only; PAR2's maximum is 32,768).</summary>
+    public bool ShowManyBlocksOption => IsPar3 && Plan is { MaxInputBlocks: > SafeBlockLimit };
+
+    /// <summary>Shown (in orange) while the set has more than 32,768 blocks.</summary>
+    public bool ManyBlocksWarning => IsPar3 && Plan is { InputBlocks: > SafeBlockLimit };
+
+    /// <summary>The slider's end: log2 of the most blocks allowed (32,768 unless more are allowed, and the format's maximum).</summary>
+    public double BlockSliderMaximum => Math.Log2(Math.Max(2, Math.Min(Plan?.MaxInputBlocks ?? 2, AllowManyBlocks ? long.MaxValue : SafeBlockLimit)));
 
     /// <summary>The real number of input blocks; typing a number makes it the target.</summary>
     public decimal? BlockCount
@@ -279,7 +304,7 @@ public sealed partial class CreateViewModel : OperationViewModel
 
     private void SetBlockTarget(int target)
     {
-        _blockTarget = Math.Max(1, target);
+        _blockTarget = Math.Clamp(target, 1, AllowManyBlocks || !IsPar3 ? int.MaxValue : SafeBlockLimit);
         _explicitBlockSize = null;
         Replan();
     }
@@ -451,7 +476,7 @@ public sealed partial class CreateViewModel : OperationViewModel
         {
             nameof(BlockSlider), nameof(BlockSliderMaximum), nameof(BlockCount), nameof(BlockSize), nameof(Redundancy), nameof(RecoveryCount),
             nameof(HasInputs), nameof(InputSummary), nameof(BlockSizeText), nameof(RedundancyText), nameof(BlockFillText), nameof(RecoveryDataText),
-            nameof(RebuildText), nameof(CodeText), nameof(CodeChoiceText), nameof(RecoveryCountMaximum),
+            nameof(RebuildText), nameof(CodeText), nameof(CodeChoiceText), nameof(RecoveryCountMaximum), nameof(ShowManyBlocksOption), nameof(ManyBlocksWarning),
         })
         {
             OnPropertyChanged(name);

@@ -99,6 +99,20 @@ trees, is much faster for large sets thanks to the FFT code, and can store permi
 first block number, the base folder, whether to include subfolders, and for PAR3 the maximum number of recovery
 blocks of an FFT set, the interleave and the Cauchy coefficients.
 
+**Progress.** Every operation lists all its steps before it starts: each with its own bar and percentage, its
+estimated share of the work, and a tooltip saying what it does (for example that the recovery files are created at
+full size when encoding starts and filled in during it). A total bar shows the percentage, the time left and the
+time spent. Verify lists the files as soon as they are being checked, with how much of each is checked and how many
+of its blocks are bad; files are checked in parallel. The block grid's zoom starts at "fit", which follows the window
+size.
+
+**Blocks.** The block slider stops at 32,768 blocks: up to there any lost blocks can be rebuilt as long as there are
+as many recovery blocks. For PAR3, "Allow more than 32,768 blocks" goes further and explains the cost: the FFT code
+then repairs per interleaved group, every block adds checksums to every PAR file, and verify and repair take longer.
+Creating a set over an earlier one with the same name asks first and removes the old files, so they are not mixed up.
+
+Every option and button has a tooltip.
+
 **More options** on the Verify page sets the folder that holds the protected files, and the details of adding
 recovery data: an exact count, the first block number, the number of files and their name. An archive with recovery
 data inside gets a **Remove recovery data** button, which restores its original bytes.
