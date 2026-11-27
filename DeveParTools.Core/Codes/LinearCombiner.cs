@@ -81,6 +81,10 @@ public static unsafe class LinearCombiner
         byte* outputs = (byte*)NativeMemory.AlignedAlloc((nuint)((long)outputCount * sliceLen), 64);
         byte* inA = (byte*)NativeMemory.AlignedAlloc((nuint)((long)batch * sliceLen), 64);
         byte* inB = (byte*)NativeMemory.AlignedAlloc((nuint)((long)batch * sliceLen), 64);
+
+        // The background read of the next input batch writes into inA/inB, so it must have finished before they are
+        // freed, also when combining fails or is cancelled while the read is still running.
+        Task? reader = null;
         try
         {
             var parallel = new ParallelOptions
@@ -96,7 +100,11 @@ public static unsafe class LinearCombiner
 
                 if (inputCount == 0)
                 {
-                    new Span<byte>(outputs, outputCount * sliceLen).Clear();
+                    // No inputs: every output is zero. (Cleared per output: outputCount · sliceLen can exceed int.)
+                    for (int j = 0; j < outputCount; j++)
+                    {
+                        new Span<byte>(outputs + (long)j * sliceLen, len).Clear();
+                    }
                 }
 
                 // Prime the first batch.
@@ -112,7 +120,7 @@ public static unsafe class LinearCombiner
                     byte* next = (b & 1) == 0 ? inB : inA;
 
                     // Read the next batch while this one is being combined.
-                    Task? reader = null;
+                    reader = null;
                     if (b + 1 < batches)
                     {
                         int nFirst = first + batch;
@@ -173,6 +181,13 @@ public static unsafe class LinearCombiner
         }
         finally
         {
+            if (reader != null)
+            {
+                // Waits without throwing: an exception from the read itself was already observed above, or is
+                // superseded by the one that is propagating now.
+                Task.WaitAny(reader);
+            }
+
             NativeMemory.AlignedFree(outputs);
             NativeMemory.AlignedFree(inA);
             NativeMemory.AlignedFree(inB);
@@ -229,18 +244,22 @@ public sealed class MemoryRegions : IRegionSource, IRegionSink
 
     public IReadOnlyList<byte[]> Regions { get; }
 
+    /// <summary>Copies what the region has at <paramref name="offset"/>; the rest (all of it past the end) is zero.</summary>
     public void Read(int index, long offset, Span<byte> destination)
     {
         var r = Regions[index];
-        int available = (int)Math.Clamp(r.Length - offset, 0, destination.Length);
-        r.AsSpan((int)offset, available).CopyTo(destination);
+        int start = (int)Math.Min(offset, r.Length);
+        int available = Math.Min(r.Length - start, destination.Length);
+        r.AsSpan(start, available).CopyTo(destination);
         destination[available..].Clear();
     }
 
+    /// <summary>Stores the part of <paramref name="source"/> that fits in the region; bytes past its end are dropped.</summary>
     public void Write(int index, long offset, ReadOnlySpan<byte> source)
     {
         var r = Regions[index];
-        int n = (int)Math.Min(source.Length, r.Length - offset);
-        source[..n].CopyTo(r.AsSpan((int)offset));
+        int start = (int)Math.Min(offset, r.Length);
+        int n = Math.Min(source.Length, r.Length - start);
+        source[..n].CopyTo(r.AsSpan(start));
     }
 }

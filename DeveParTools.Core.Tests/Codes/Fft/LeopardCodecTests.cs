@@ -1,6 +1,6 @@
 using DeveParTools.Core.Codes.Fft;
 
-namespace DeveParTools.Core.Tests.Codes;
+namespace DeveParTools.Core.Tests.Codes.Fft;
 
 [TestClass]
 public sealed unsafe class LeopardCodecTests

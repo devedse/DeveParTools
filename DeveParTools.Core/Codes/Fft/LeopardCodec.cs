@@ -1,4 +1,4 @@
-using System.Numerics;
+using System.Diagnostics;
 using System.Runtime.Intrinsics;
 using DeveParTools.Core.Galois;
 
@@ -109,7 +109,7 @@ public static unsafe class LeopardCodec
         Validate(field, k, recoveryCount);
         var orig = originals.ToArray();
         var w = work.ToArray();
-        RunParallel(field, bytes, threads, (ofs, len) => EncodeRange(field, orig, recoveryCount, w, ofs, len));
+        RunParallel(bytes, threads, (ofs, len) => EncodeRange(field, orig, recoveryCount, w, ofs, len));
     }
 
     /// <summary>
@@ -150,7 +150,7 @@ public static unsafe class LeopardCodec
         {
             // Every recovery block is a copy of the single original.
             nint src = rec.First(r => r != 0);
-            RunParallel(field, bytes, threads, (ofs, len) => Copy((byte*)w[0] + ofs, (byte*)src + ofs, len));
+            RunParallel(bytes, threads, (ofs, len) => Copy((byte*)w[0] + ofs, (byte*)src + ofs, len));
             return;
         }
 
@@ -158,7 +158,7 @@ public static unsafe class LeopardCodec
         {
             // The single recovery block is the XOR of all originals.
             int lost = Array.IndexOf(orig, (nint)0);
-            RunParallel(field, bytes, threads, (ofs, len) =>
+            RunParallel(bytes, threads, (ofs, len) =>
             {
                 Copy((byte*)w[lost] + ofs, (byte*)rec[0] + ofs, len);
                 for (int i = 0; i < k; i++)
@@ -175,7 +175,7 @@ public static unsafe class LeopardCodec
         int m = NextPow2(rc);
         int n = NextPow2(m + k);
         var errorLocations = ComputeErrorLocations(field, orig, rec, m);
-        RunParallel(field, bytes, threads, (ofs, len) => DecodeRange(field, orig, rec, w, m, n, errorLocations, ofs, len));
+        RunParallel(bytes, threads, (ofs, len) => DecodeRange(field, orig, rec, w, m, n, errorLocations, ofs, len));
     }
 
     /// <summary>
@@ -216,7 +216,7 @@ public static unsafe class LeopardCodec
         return err;
     }
 
-    private static void RunParallel(LeopardField field, long bytes, int threads, Action<long, long> body)
+    private static void RunParallel(long bytes, int threads, Action<long, long> body)
     {
         // Split into independent ranges: a multiple of 64 bytes (and of the symbol size).
         long chunks = Math.Max(1, Math.Min(Math.Max(1, threads), bytes / 4096));
@@ -234,7 +234,6 @@ public static unsafe class LeopardCodec
             long ofs = c * per;
             body(ofs, Math.Min(per, bytes - ofs));
         });
-        _ = field;
     }
 
     // ------------------------------------------------------------------ encode
@@ -316,6 +315,22 @@ public static unsafe class LeopardCodec
     }
 
     /// <summary>Decimation-in-time IFFT, two layers at a time (4-way butterflies).</summary>
+    /// <remarks>
+    /// <para><b>The "multiply by 0" shortcut.</b> A butterfly whose twiddle logarithm equals
+    /// <see cref="LeopardField.Modulus"/> multiplies by zero, so it reduces to a plain XOR. <c>FftSkew[j]</c> is Modulus
+    /// exactly when <c>j + 1</c> is a power of two (j = 0, 1, 3, 7, ...). Which of the twiddles can hit such an
+    /// index follows from where they are read, <c>FftSkew[skew + r + c·dist]</c> with <c>r = t·4·dist</c> and
+    /// <c>c = 1, 2, 3</c> for logM01, logM02 and logM23:</para>
+    /// <list type="bullet">
+    /// <item>with <c>skew = −1</c> (every FFT, and the IFFT of the decoder) the index plus one is
+    /// <c>dist·(4t + c)</c>: a power of two for c = 1 or 2 when t = 0, but never for c = 3, because 4t + 3 is odd
+    /// and larger than 1;</item>
+    /// <item>with the encoder's <c>skew = (g + 1)·m − 1</c> it is <c>(g + 1)·m + r + c·dist</c>, which lies strictly
+    /// between two multiples of m and so is never a power of two.</item>
+    /// </list>
+    /// <para>So logM01 and logM02 need the shortcut, logM23 never does. Example with dist = 1 in the decoder:
+    /// logM01 = FftSkew[0], logM02 = FftSkew[1] (both Modulus at r = 0), logM23 = FftSkew[2] (not Modulus).</para>
+    /// </remarks>
     private static void IfftDitCore(RegionOps ops, nint[] work, int baseIndex, int mTruncated, int m, int skew)
     {
         var f = ops.Field;
@@ -364,14 +379,9 @@ public static unsafe class LeopardCodec
             ops.IfftButterfly(work[i], work[i + dist], logM01);
         }
 
-        if (logM23 == mod)
-        {
-            ops.Xor(work[i + dist * 3], work[i + dist * 2]);
-        }
-        else
-        {
-            ops.IfftButterfly(work[i + dist * 2], work[i + dist * 3], logM23);
-        }
+        // logM23 is never Modulus (see the remarks on IfftDitCore), so it needs no XOR-only shortcut.
+        Debug.Assert(logM23 != mod, "logM23 can never be Modulus");
+        ops.IfftButterfly(work[i + dist * 2], work[i + dist * 3], logM23);
 
         if (logM02 == mod)
         {
@@ -445,14 +455,9 @@ public static unsafe class LeopardCodec
             ops.FftButterfly(work[i], work[i + dist], logM01);
         }
 
-        if (logM23 == mod)
-        {
-            ops.Xor(work[i + dist * 3], work[i + dist * 2]);
-        }
-        else
-        {
-            ops.FftButterfly(work[i + dist * 2], work[i + dist * 3], logM23);
-        }
+        // logM23 is never Modulus (see the remarks on IfftDitCore), so it needs no XOR-only shortcut.
+        Debug.Assert(logM23 != mod, "logM23 can never be Modulus");
+        ops.FftButterfly(work[i + dist * 2], work[i + dist * 3], logM23);
     }
 
     // ------------------------------------------------------------------ decode
@@ -593,6 +598,4 @@ public static unsafe class LeopardCodec
             }
         }
     }
-
-    internal static int Log2(int v) => BitOperations.Log2((uint)v);
 }

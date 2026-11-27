@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -156,12 +157,14 @@ internal static class Blake3Compression
     /// <summary>Reads a 64-byte block as 16 little-endian words.</summary>
     public static void LoadWords(ReadOnlySpan<byte> block, Span<uint> words)
     {
-        if (BitConverter.IsLittleEndian)
-        {
-            MemoryMarshal.Cast<byte, uint>(block[..Blake3.BlockLen]).CopyTo(words);
-            return;
-        }
+        if (!BitConverter.IsLittleEndian) { LoadWordsBigEndianHost(block, words); return; }
 
+        MemoryMarshal.Cast<byte, uint>(block[..Blake3.BlockLen]).CopyTo(words);
+    }
+
+    [ExcludeFromCodeCoverage(Justification = "Only runs on big-endian hosts; every supported test and CI machine (x64, arm64) is little-endian.")]
+    private static void LoadWordsBigEndianHost(ReadOnlySpan<byte> block, Span<uint> words)
+    {
         for (int i = 0; i < 16; i++)
         {
             words[i] = BinaryPrimitives.ReadUInt32LittleEndian(block.Slice(i * 4, 4));

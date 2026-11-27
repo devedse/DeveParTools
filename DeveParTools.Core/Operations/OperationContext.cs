@@ -65,16 +65,14 @@ public sealed class OperationContext
         return map;
     }
 
-    private static long DefaultMemoryBudget()
-    {
-        long total = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
-        if (total <= 0)
-        {
-            return 512L << 20;
-        }
+    private static long DefaultMemoryBudget() => MemoryBudgetFor(GC.GetGCMemoryInfo().TotalAvailableMemoryBytes);
 
-        return Math.Clamp(total / 4, 64L << 20, 8L << 30);
-    }
+    /// <summary>
+    /// A quarter of the memory available to the process, between 64 MiB and 8 GiB; 512 MiB when the runtime does not
+    /// know (reports 0). E.g. 16 GiB available → 4 GiB budget, 128 MiB available → 64 MiB.
+    /// </summary>
+    internal static long MemoryBudgetFor(long totalAvailableMemory)
+        => totalAvailableMemory <= 0 ? 512L << 20 : Math.Clamp(totalAvailableMemory / 4, 64L << 20, 8L << 30);
 
     public LinearCombineOptionsFactory Combine => new(this);
 
