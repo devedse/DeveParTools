@@ -13,6 +13,22 @@ using DeveParTools.Updates;
 
 // Headless checks of the desktop app: real PAR operations on temporary files, every page rendered in light and dark.
 // Screenshots go to the output folder (default artifacts/ui-tests).
+
+// Started by the Windows shell during the Explorer check below (this program stands in for deveparui there): by COM as
+// the drop target's server, or with the command line fallback. Write down what arrived and stop.
+if (OperatingSystem.IsWindows() && ExplorerDropTarget.IsServerStart(args))
+{
+    var dropped = ExplorerDropTarget.ReceiveDrop(TimeSpan.FromSeconds(60));
+    File.WriteAllLines(ExplorerShellTests.DropLog, dropped ?? ["(nothing was dropped)"]);
+    return;
+}
+
+if (OperatingSystem.IsWindows() && args is [AppArguments.CreateSwitch, ..])
+{
+    File.AppendAllLines(ExplorerShellTests.CommandLog, args.Skip(1));
+    return;
+}
+
 AppBuilder.Configure<App>().UseSkia().UseHeadless(new AvaloniaHeadlessPlatformOptions { UseHeadlessDrawing = false }).SetupWithoutStarting();
 // The view models await background work; their continuations must come back to this (the UI) thread.
 SynchronizationContext.SetSynchronizationContext(new AvaloniaSynchronizationContext());
@@ -266,6 +282,15 @@ Await(shell.Create.Planned);
 shell.Create.BlockSlider = 20;
 Check(shell.Create.ShowManyBlocksOption && shell.Create.BlockCount <= 32768 && !shell.Create.ManyBlocksWarning && Math.Abs(shell.Create.BlockSliderMaximum - 15) < 1e-9,
     $"the block slider stops at 32,768 blocks: {shell.Create.BlockCount}");
+for (int press = 0; press < 3; press++)
+{
+    var before = shell.Create.BlockCount!.Value;
+    shell.Create.BlockCount = before - 1; // the box's down arrow
+    Check(shell.Create.BlockCount < before, $"down in the block count box always gives fewer blocks: {before:N0} → {shell.Create.BlockCount:N0}");
+}
+
+shell.Create.BlockSlider = 15;
+Check(shell.Create.BlockCount <= 32768, "the slider's end is at most 32,768 real blocks: " + shell.Create.BlockCount);
 shell.Create.AllowManyBlocks = true;
 shell.Create.BlockSlider = 16;
 Check(shell.Create.BlockCount > 32768 && shell.Create.ManyBlocksWarning, $"allowing more blocks goes past it, with the warning: {shell.Create.BlockCount}");
@@ -339,8 +364,12 @@ if (OperatingSystem.IsWindows())
     settings.ExplorerMenu = true;
     using (var command = Microsoft.Win32.Registry.CurrentUser.OpenSubKey($@"{root}\SystemFileAssociations\.par2\shell\{ExplorerContextMenu.VerifyVerb}\command"))
     using (var create = Microsoft.Win32.Registry.CurrentUser.OpenSubKey($@"{root}\Directory\shell\{ExplorerContextMenu.CreateVerb}"))
+    using (var dropTarget = Microsoft.Win32.Registry.CurrentUser.OpenSubKey($@"{root}\*\shell\{ExplorerContextMenu.CreateVerb}\DropTarget"))
+    using (var server = Microsoft.Win32.Registry.CurrentUser.OpenSubKey($@"{root}\CLSID\{ExplorerContextMenu.DropTargetClsid}\LocalServer32"))
     {
         Check((string?)command?.GetValue(null) == $"\"{Exe}\" \"%1\"" && (string?)create?.GetValue("MUIVerb") == ExplorerContextMenu.CreateText && (string?)create?.GetValue("MultiSelectModel") == "Player", "turning it on writes the entries");
+        Check((string?)dropTarget?.GetValue("CLSID") == ExplorerContextMenu.DropTargetClsid && (string?)server?.GetValue(null) == $"\"{Exe}\"" && menu.HasDropTarget(),
+            "Create has a drop target served by the app, so a multi-selection starts it once");
     }
 
     Check(menu.RegisteredExecutable() == Exe && settings.ExplorerMenuStatus?.Contains(Exe, StringComparison.Ordinal) == true, "the switch shows which program the entries start");
@@ -350,11 +379,60 @@ if (OperatingSystem.IsWindows())
     settings.ExplorerMenu = false;
     using (var classes = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(root))
     {
-        Check(menu.RegisteredExecutable() == null && classes?.OpenSubKey(@"SystemFileAssociations\.par2") == null && classes?.OpenSubKey(@"*\shell") == null, "turning it off removes the entries and the keys they left empty");
+        Check(menu.RegisteredExecutable() == null && classes?.OpenSubKey(@"SystemFileAssociations\.par2") == null && classes?.OpenSubKey(@"*\shell") == null && classes?.OpenSubKey("CLSID") == null && !menu.HasDropTarget(),
+            "turning it off removes the entries, the drop target's class and the keys they left empty");
         Check(classes?.OpenSubKey(@"SystemFileAssociations\.par3\shell\SomeoneElse") != null, "another program's entry next to ours is kept");
     }
 
     Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(root);
+
+    // The drop target through its COM interfaces, as Explorer calls it.
+    var selection = new[] { Path.Combine(work, "notes.txt"), Path.Combine(work, "photos"), Path.Combine(work, "video.mp4") };
+    var viaCom = ExplorerShellTests.DropThroughCom(selection);
+    Check(viaCom != null && viaCom.SequenceEqual(selection), "the drop target receives every dropped path through COM: " + string.Join(", ", viaCom ?? []));
+
+    // The real shell: "Create recovery set" on three items starts the server once, with all three (CI only: it changes
+    // the user's real context menu entries for a moment).
+    if (Environment.GetEnvironmentVariable("CI") == "true")
+    {
+        File.Delete(ExplorerShellTests.DropLog);
+        File.Delete(ExplorerShellTests.CommandLog);
+        var real = new ExplorerContextMenu();
+        real.Install(Environment.ProcessPath!);
+
+        // COM ignores per-user classes when the caller is elevated, as CI runners are (Explorer never is).
+        bool elevated = new System.Security.Principal.WindowsPrincipal(System.Security.Principal.WindowsIdentity.GetCurrent()).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+        string machineClass = $@"Software\Classes\CLSID\{ExplorerContextMenu.DropTargetClsid}";
+        if (elevated)
+        {
+            using var server = Microsoft.Win32.Registry.LocalMachine.CreateSubKey(machineClass + @"\LocalServer32");
+            server.SetValue(null, $"\"{Environment.ProcessPath}\"");
+        }
+
+        try
+        {
+            ExplorerShellTests.InvokeCreateVerb(selection);
+            var until = DateTime.UtcNow.AddSeconds(60);
+            while (!File.Exists(ExplorerShellTests.DropLog) && !File.Exists(ExplorerShellTests.CommandLog) && DateTime.UtcNow < until)
+            {
+                Thread.Sleep(100);
+            }
+
+            Thread.Sleep(2000); // a command line fallback would start one process per item
+            var viaCommand = File.Exists(ExplorerShellTests.CommandLog) ? File.ReadAllLines(ExplorerShellTests.CommandLog) : [];
+            var viaShell = File.Exists(ExplorerShellTests.DropLog) ? File.ReadAllLines(ExplorerShellTests.DropLog) : [];
+            Check(viaCommand.Length == 0, "the shell used the drop target, not the command line: " + string.Join(", ", viaCommand));
+            Check(viaShell.SequenceEqual(selection), "the Windows shell drops the whole selection on one started app: " + string.Join(", ", viaShell));
+        }
+        finally
+        {
+            real.Uninstall();
+            if (elevated)
+            {
+                Microsoft.Win32.Registry.LocalMachine.DeleteSubKeyTree(machineClass, throwOnMissingSubKey: false);
+            }
+        }
+    }
 
     // File associations in a scratch key standing in for HKCU\Software.
     var softwareRoot = $@"Software\DeveParTools.Tests\{Guid.NewGuid():N}";

@@ -21,16 +21,20 @@ namespace DeveParTools.App.Services;
 ///                                                               Icon = C:\Tools\deveparui.exe
 ///                                                               MultiSelectModel = Player
 /// HKCU\Software\Classes\*\shell\DeveParTools.Create\command    (Default) = "C:\Tools\deveparui.exe" --create "%1"
+/// HKCU\Software\Classes\*\shell\DeveParTools.Create\DropTarget CLSID = {85D2203D-…}
 /// HKCU\Software\Classes\Directory\shell\DeveParTools.Create    (the same, for folders)
+/// HKCU\Software\Classes\CLSID\{85D2203D-…}\LocalServer32     (Default) = "C:\Tools\deveparui.exe"
 /// HKCU\Software\Classes\SystemFileAssociations\.par2\shell\DeveParTools.Verify
 ///                                                               MUIVerb = Verify with DeveParTools
 /// HKCU\Software\Classes\SystemFileAssociations\.par2\shell\DeveParTools.Verify\command
 ///                                                               (Default) = "C:\Tools\deveparui.exe" "%1"
 /// (and the same for .par and .par3)
 /// </code>
-/// <para>Explorer runs a static verb's command once per selected item: selecting 20 files starts 20 processes.
-/// <see cref="CreateRequestCollector"/> gathers those into one window. "MultiSelectModel = Player" keeps the entry
-/// visible for selections of more than 15 items, where Explorer hides it by default.</para>
+/// <para>Explorer runs a verb's command line once per selected item, one after the other, and does not respond until
+/// all have started: selecting 20 files starts 20 processes. So "Create" also has a DropTarget: Explorer then starts
+/// the app once as a COM server and drops all selected items on it (see <see cref="ExplorerDropTarget"/>). The command
+/// line stays as the fallback (it is what an older version registered; <see cref="CreateRequestCollector"/> gathers
+/// its processes into one window). "MultiSelectModel = Player" offers the entry for any number of items.</para>
 /// <para>The Verify entries go under SystemFileAssociations\.ext, which adds them whichever program owns the extension
 /// (MultiPar, for example) without changing the default program.</para>
 /// <para>Windows 11 lists static verbs under "Show more options"; its compact menu only shows entries of packaged
@@ -41,6 +45,9 @@ namespace DeveParTools.App.Services;
 public sealed partial class ExplorerContextMenu
 {
     public const string CreateVerb = "DeveParTools.Create";
+
+    /// <summary>The COM class of the "Create" drop target (<see cref="ExplorerDropTarget"/>).</summary>
+    public const string DropTargetClsid = "{85D2203D-9372-47FF-95A2-D667C430A89F}";
     public const string VerifyVerb = "DeveParTools.Verify";
     public const string CreateText = "Create recovery set with DeveParTools";
     public const string VerifyText = "Verify with DeveParTools";
@@ -119,19 +126,51 @@ public sealed partial class ExplorerContextMenu
             if (entry.MultiSelect)
             {
                 key.SetValue("MultiSelectModel", "Player");
+                using var dropTarget = key.CreateSubKey("DropTarget");
+                dropTarget.SetValue("CLSID", DropTargetClsid);
             }
 
             using var command = key.CreateSubKey("command");
             command.SetValue(null, entry.Command);
         }
 
+        // The drop target's server: this program (COM adds "-Embedding" when it starts it).
+        using (var server = Registry.CurrentUser.CreateSubKey($@"{ClassesRoot}\CLSID\{DropTargetClsid}"))
+        {
+            server.SetValue(null, "DeveParTools: Create recovery set from Explorer");
+            using var local = server.CreateSubKey("LocalServer32");
+            local.SetValue(null, $"\"{exePath}\"");
+        }
+
         NotifyExplorer();
     }
 
-    /// <summary>Removes every entry, and the parent keys that are left empty.</summary>
+    /// <summary>
+    /// Whether the installed entries are complete for this version: an older version registered "Create" without its
+    /// drop target, which <see cref="Install"/> adds.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    public bool HasDropTarget()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey($@"{ClassesRoot}\{Entries("x")[0].KeyPath}\DropTarget");
+        using var server = Registry.CurrentUser.OpenSubKey($@"{ClassesRoot}\CLSID\{DropTargetClsid}\LocalServer32");
+        return key?.GetValue("CLSID") is string clsid && clsid.Equals(DropTargetClsid, StringComparison.OrdinalIgnoreCase) && server != null;
+    }
+
+    /// <summary>Removes every entry and the drop target's class, and the parent keys that are left empty.</summary>
     [SupportedOSPlatform("windows")]
     public void Uninstall()
     {
+        Registry.CurrentUser.DeleteSubKeyTree($@"{ClassesRoot}\CLSID\{DropTargetClsid}", throwOnMissingSubKey: false);
+        using (var clsids = Registry.CurrentUser.OpenSubKey($@"{ClassesRoot}\CLSID"))
+        {
+            if (clsids is { SubKeyCount: 0, ValueCount: 0 })
+            {
+                clsids.Dispose();
+                Registry.CurrentUser.DeleteSubKey($@"{ClassesRoot}\CLSID", throwOnMissingSubKey: false);
+            }
+        }
+
         foreach (var entry in Entries("x"))
         {
             Registry.CurrentUser.DeleteSubKeyTree($@"{ClassesRoot}\{entry.KeyPath}", throwOnMissingSubKey: false);

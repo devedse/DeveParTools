@@ -78,10 +78,81 @@ public sealed class CreateTests
     [TestMethod]
     public void ChooseBlockSize_IsAMultipleOf8AndAtLeast64()
     {
-        Assert.AreEqual(64UL, Par3Creator.ChooseBlockSize(0, 2000));
-        Assert.AreEqual(64UL, Par3Creator.ChooseBlockSize(1000, 2000));
-        Assert.AreEqual(504UL, Par3Creator.ChooseBlockSize(1_000_000, 2000)); // ceil(500) rounded up to 8
-        Assert.AreEqual(1_000_000UL, Par3Creator.ChooseBlockSize(1_000_000, 0)); // target clamped to 1
+        Assert.AreEqual(64UL, Par3Creator.ChooseBlockSize([], 2000, true));
+        Assert.AreEqual(64UL, Par3Creator.ChooseBlockSize([1000], 2000, true));
+        Assert.AreEqual(504UL, Par3Creator.ChooseBlockSize([1_000_000], 2000, true)); // ceil(500) rounded up to 8: 1,985 blocks
+        Assert.AreEqual(1_000_000UL, Par3Creator.ChooseBlockSize([1_000_000], 0, true)); // target clamped to 1
+    }
+
+    [TestMethod]
+    public void ChooseBlockSize_TheRealCountNeverExceedsTheTarget()
+    {
+        // Like a TV season: a few large video files and many small subtitle files. Total ÷ target alone gives up to
+        // one block per file too many (each file's last block is partly filled).
+        var rnd = new Random(5);
+        var lengths = Enumerable.Range(0, 5).Select(_ => (long)rnd.Next(400_000_000, 600_000_000))
+            .Concat(Enumerable.Range(0, 18).Select(_ => (long)rnd.Next(20_000, 70_000))).ToList();
+        foreach (bool pack in new[] { true, false })
+        {
+            foreach (int target in new[] { 32768, 32767, 32700, 2000, 100, 23 })
+            {
+                ulong size = Par3Creator.ChooseBlockSize(lengths, target, pack);
+                ulong count = Par3Creator.CountBlocks(lengths, size, pack);
+                Assert.IsTrue(count <= (ulong)target, $"target {target}, pack {pack}: {count} blocks of {size}");
+                Assert.AreEqual(0UL, size % 8);
+                Assert.IsTrue(Par3Creator.CountBlocks(lengths, size - 8, pack) > (ulong)target, $"target {target}, pack {pack}: {size} is the smallest that fits");
+                Assert.IsTrue(count > (ulong)target * 99 / 100, $"target {target}, pack {pack}: close to the target ({count})");
+            }
+        }
+
+        // Pressing "down" in the block count box: one less always gives fewer real blocks.
+        ulong last = Par3Creator.CountBlocks(lengths, Par3Creator.ChooseBlockSize(lengths, 32768, true), true);
+        ulong lower = Par3Creator.CountBlocks(lengths, Par3Creator.ChooseBlockSize(lengths, (int)last - 1, true), true);
+        Assert.IsTrue(lower < last, $"{last} → {lower}");
+    }
+
+    [TestMethod]
+    public void ChooseBlockSize_BelowTheFewestBlocks()
+    {
+        // Without packing every file needs a block of its own: target 1 gives 3 blocks. The smallest size for that is
+        // 29,968, not 30,000: the largest file's last 32 bytes are below the 40-byte limit and go inside the packets.
+        Assert.AreEqual(29_968UL, Par3Creator.ChooseBlockSize([10_000, 20_000, 30_000], 1, false));
+        Assert.AreEqual(3UL, Par3Creator.CountBlocks([10_000, 20_000, 30_000], 29_968, false));
+        Assert.AreEqual(4UL, Par3Creator.CountBlocks([10_000, 20_000, 30_000], 29_960, false));
+
+        // With packing all three share one block (60,000 bytes).
+        ulong one = Par3Creator.ChooseBlockSize([10_000, 20_000, 30_000], 1, true);
+        Assert.AreEqual(60_000UL, one);
+        Assert.AreEqual(1UL, Par3Creator.CountBlocks([10_000, 20_000, 30_000], one, true));
+    }
+
+    [TestMethod]
+    public void FirstFitBlocks_MatchesLookingThroughEveryBlock()
+    {
+        var rnd = new Random(9);
+        const ulong size = 1000;
+        var tails = Enumerable.Range(0, 3000).Select(_ => (ulong)rnd.Next(40, 1001)).OrderByDescending(t => t).ToList();
+        var naive = new List<ulong>();
+        var packed = new FirstFitBlocks(size);
+        foreach (var tail in tails)
+        {
+            int slot = naive.FindIndex(used => size - used >= tail);
+            ulong offset = slot < 0 ? 0 : naive[slot];
+            if (slot < 0)
+            {
+                naive.Add(tail);
+                slot = naive.Count - 1;
+            }
+            else
+            {
+                naive[slot] += tail;
+            }
+
+            Assert.AreEqual((slot, offset), packed.Place(tail));
+        }
+
+        Assert.AreEqual(naive.Count, packed.Count);
+        Assert.IsTrue(packed.Count > 1000, "the tree grew several times");
     }
 
     [TestMethod]

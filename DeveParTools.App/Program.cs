@@ -20,8 +20,20 @@ internal static class Program
             return;
         }
 
+        bool fromDrop = OperatingSystem.IsWindows() && ExplorerDropTarget.IsServerStart(args);
+        if (fromDrop)
+        {
+            // Started by COM for Explorer's "Create recovery set": receive every selected item at once.
+            if (!OperatingSystem.IsWindows() || ExplorerDropTarget.ReceiveDrop(TimeSpan.FromSeconds(30)) is not { Count: > 0 } dropped)
+            {
+                return;
+            }
+
+            args = [AppArguments.CreateSwitch, .. dropped];
+        }
+
         Arguments = AppArguments.Parse(args);
-        if (Arguments.CreatePaths.Count > 0)
+        if (Arguments.CreatePaths.Count > 0 && !fromDrop)
         {
             Collector = CreateRequestCollector.StartOrForward(CreateRequestCollector.DefaultName, Arguments.CreatePaths, TimeSpan.FromSeconds(3));
             if (Collector == null)
@@ -103,8 +115,9 @@ internal static class Program
         {
             if (OperatingSystem.IsWindows())
             {
+                // Re-point entries whose program is gone, and add the drop target to entries an older version made.
                 var menu = new ExplorerContextMenu();
-                if (menu.RegisteredExecutable() is { } registered && !File.Exists(registered))
+                if (menu.RegisteredExecutable() is { } registered && (!File.Exists(registered) || (string.Equals(registered, self, StringComparison.OrdinalIgnoreCase) && !menu.HasDropTarget())))
                 {
                     menu.Install(self);
                 }

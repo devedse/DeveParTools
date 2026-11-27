@@ -231,7 +231,7 @@ public static class Par3Creator
         }
 
         long total = files.Sum(f => f.Length);
-        ulong blockSize = options.BlockSize ?? ChooseBlockSize(total, options.BlockCount);
+        ulong blockSize = options.BlockSize ?? ChooseBlockSize(files.Select(f => f.Length).ToList(), options.BlockCount, options.PackTails);
         if (blockSize == 0 || blockSize % 8 != 0)
         {
             throw new ArgumentException("Block size must be a positive multiple of 8.");
@@ -288,8 +288,9 @@ public static class Par3Creator
             }
         }
 
-        // Tails of 40+ bytes go into blocks (packed first-fit when enabled).
-        var openTailBlocks = new List<(ulong Index, ulong Used)>();
+        // Tails of 40+ bytes go into blocks (packed first-fit when enabled, exactly as CountBlocks counts them).
+        var packer = new FirstFitBlocks(blockSize);
+        var tailBlocks = new List<ulong>();
         foreach (var f in files.OrderByDescending(f => (ulong)f.Length % blockSize))
         {
             ulong tail = (ulong)f.Length % blockSize;
@@ -298,21 +299,18 @@ public static class Par3Creator
                 continue;
             }
 
-            int slot = options.PackTails ? openTailBlocks.FindIndex(t => blockSize - t.Used >= tail) : -1;
-            if (slot < 0)
+            var (slot, used) = options.PackTails ? packer.Place(tail) : (tailBlocks.Count, 0UL);
+            if (slot == tailBlocks.Count)
             {
-                ulong idx = (ulong)blockPieces.Count;
+                tailBlocks.Add((ulong)blockPieces.Count);
                 blockPieces.Add(new List<(ulong, ulong, PieceSource)>());
                 blockChecks.Add(null);
-                openTailBlocks.Add((idx, 0));
-                slot = openTailBlocks.Count - 1;
             }
 
-            var (tailIdx, used) = openTailBlocks[slot];
+            ulong tailIdx = tailBlocks[slot];
             f.TailBlock = tailIdx;
             f.TailOffset = used;
             blockPieces[(int)tailIdx].Add((used, tail, new PieceSource(f.FullPath, f.Length - (long)tail)));
-            openTailBlocks[slot] = (tailIdx, used + tail);
         }
 
         ulong blockCount = (ulong)blockPieces.Count;
@@ -551,33 +549,76 @@ public static class Par3Creator
             return full + (ulong)tails.Count;
         }
 
-        var open = new List<ulong>();
+        var packed = new FirstFitBlocks(blockSize);
         foreach (var tail in tails.OrderByDescending(t => t))
         {
-            int slot = open.FindIndex(used => blockSize - used >= tail);
-            if (slot < 0)
-            {
-                open.Add(tail);
-            }
-            else
-            {
-                open[slot] += tail;
-            }
+            packed.Place(tail);
         }
 
-        return full + (ulong)open.Count;
+        return full + (ulong)packed.Count;
     }
 
     /// <summary>The blocks one file of <paramref name="length"/> bytes needs: its full blocks, plus one for a tail of 40+ bytes.</summary>
     public static ulong FileBlocks(long length, ulong blockSize)
         => (ulong)length / blockSize + ((ulong)length % blockSize >= Par3Chunk.InlineLimit ? 1UL : 0UL);
 
-    public static ulong ChooseBlockSize(long total, int targetCount)
+    /// <summary>
+    /// The smallest block size (a multiple of 8, at least 64) for which the files make at most
+    /// <paramref name="targetCount"/> blocks, counted as <see cref="CountBlocks"/> does. When no size gets that low
+    /// (without tail packing every file with a tail needs a block of its own), the smallest size with the fewest blocks.
+    /// </summary>
+    /// <remarks>
+    /// <para>Total ÷ target is where to start, but there the count is usually a little above the target: every file
+    /// adds a partly filled last block (23 files, target 32,768 → up to 32,791 blocks). So the size grows from there
+    /// in doubling steps until the count fits, then bisection finds the smallest size that fits. The count only roughly
+    /// falls as the size grows (tails change with the size), so the result is a size that fits, close to the smallest.</para>
+    /// <para>The most it can take is one block for everything with packing (block size = total: all tails share it),
+    /// or one block per file without (block size = the largest file).</para>
+    /// </remarks>
+    public static ulong ChooseBlockSize(IReadOnlyList<long> lengths, int targetCount, bool packTails)
     {
-        targetCount = Math.Max(1, targetCount);
-        ulong size = (ulong)Math.Max(1, (total + targetCount - 1) / targetCount);
-        size = Math.Max(64, (size + 7) / 8 * 8);
-        return size;
+        ulong target = (ulong)Math.Max(1, targetCount);
+        long total = lengths.Sum();
+        static ulong Round(ulong size) => Math.Max(64, (size + 7) / 8 * 8);
+        ulong Count(ulong size) => CountBlocks(lengths, size, packTails);
+
+        // The size with the fewest blocks; a target below its count is raised to it.
+        ulong most = Round((ulong)Math.Max(1, packTails ? total : lengths.DefaultIfEmpty(0).Max()));
+        target = Math.Max(target, Count(most));
+        ulong lo = Round((ulong)Math.Max(1, (total + (long)target - 1) / (long)target));
+        if (lo >= most)
+        {
+            return most;
+        }
+
+        if (Count(lo) <= target)
+        {
+            return lo;
+        }
+
+        // Invariant: Count(lo) > target, Count(hi) <= target, lo < hi <= most.
+        ulong step = 8, hi = Math.Min(most, lo + step);
+        while (Count(hi) > target)
+        {
+            lo = hi;
+            step *= 2;
+            hi = Math.Min(most, lo + step);
+        }
+
+        while (hi - lo > 8)
+        {
+            ulong mid = (lo + (hi - lo) / 2) / 8 * 8;
+            if (Count(mid) <= target)
+            {
+                hi = mid;
+            }
+            else
+            {
+                lo = mid;
+            }
+        }
+
+        return hi;
     }
 
     private static int LeopardLog2(int m) => System.Numerics.BitOperations.Log2((uint)m);

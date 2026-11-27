@@ -220,6 +220,29 @@ public sealed class ParCreatePlanTests
     }
 
     [TestMethod]
+    public void FewHugeBlocks_EveryFileCanBeRebuiltAndThereIsAWarning()
+    {
+        // 23 files packed into 1 block (PAR3 tail packing), 1 recovery block: that block brings back all 23 files.
+        var files = Enumerable.Range(0, 23).Select(i => Write($"season/e{i:00}.srt", 3000 + i * 100)).ToList();
+        var plan = ParClient.Plan(new ParCreateRequest { Inputs = [Path.Combine(_dir, "season")], OutputPath = Path.Combine(_dir, "one.par3"), BlockCount = 1, RecoveryBlockCount = 1 });
+        Assert.AreEqual(1, plan.InputBlocks);
+        Assert.AreEqual(23, plan.Files.Count);
+        Assert.AreEqual((23, 23), plan.RebuildableFiles);
+
+        // A few blocks of a megabyte or more: one damaged byte costs a whole block.
+        var big = Write("big.bin", 3 << 20);
+        foreach (var output in new[] { "big.par2", "big.par3" })
+        {
+            var few = ParClient.Plan(new ParCreateRequest { Inputs = [big], OutputPath = Path.Combine(_dir, output), BlockCount = 3 });
+            Assert.AreEqual(3, few.InputBlocks, output);
+            StringAssert.Contains(string.Join(" | ", few.Warnings), "Only 3 block(s) of 1 MiB: any damage, even a single byte", output);
+        }
+
+        Assert.IsFalse(ParClient.Plan(new ParCreateRequest { Inputs = [big], OutputPath = Path.Combine(_dir, "big.par3") }).Warnings.Any(w => w.Contains("any damage", StringComparison.Ordinal)), "2,000 blocks by default: no warning");
+        AssertPlanMatchesCreate(new ParCreateRequest { Inputs = [Path.Combine(_dir, "season")], OutputPath = Path.Combine(_dir, "one-real.par3"), BlockCount = 1, RecoveryBlockCount = 1 });
+    }
+
+    [TestMethod]
     public void ScanInputs_ExpandsFolders_LikeCreatePerFormat()
     {
         Write("tree/a.bin", 10);
@@ -263,7 +286,7 @@ public sealed class ParCreatePlanTests
         StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par3"), BlockCount = 10, Par3Code = Par3Code.Fft, RecoveryBlockCount = 20 }), "FFT code needs");
         StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par3"), BlockSize = 8, Par3Code = Par3Code.Cauchy, RecoveryBlockCount = 1 }), "GF(2^32)");
         StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par3"), Par3Dedup = Par3Dedup.Blocks }), "Deduplication stores blocks");
-        StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par3"), Par3StoreData = true }), "copies all 585.94 KiB");
+        StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a], OutputPath = Path.Combine(_dir, "s.par3"), Par3StoreData = true }), "full second copy of your files (585.94 KiB)");
         Assert.AreEqual("100 bytes", ParClient.FormatBytes(100));
         Assert.AreEqual("1.5 KiB", ParClient.FormatBytes(1536));
         StringAssert.Contains(Only(new ParCreateRequest { Inputs = [a, other], OutputPath = Path.Combine(_dir, "s.par") }), "bare file names");

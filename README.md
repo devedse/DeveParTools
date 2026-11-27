@@ -141,7 +141,9 @@ page, where you can pick DeveParTools. On Linux it adds a desktop entry and MIME
 
 **Explorer context menu (Windows).** A switch in Settings adds two entries to the Explorer context menu:
 - "Create recovery set with DeveParTools" on files and folders. A multi-selection opens one Create window with all
-  the selected items.
+  the selected items, started once: the entry is a COM drop target, so Explorer hands over the whole selection in
+  one go. A plain command line would make Explorer start the program once per selected item, one after another,
+  and Explorer stays frozen until it has started them all.
 - "Verify with DeveParTools" on `.par`, `.par2` and `.par3` files. It doesn't change which program opens them by
   default.
 
@@ -194,7 +196,11 @@ Create options:
 
 PAR3-only create options:
 - `--code auto|cauchy|fft`
-- `--dedup`, `--no-tail-packing`, `--data/-D`
+- `--dedup`, `--no-tail-packing`
+- `--data/-D` (rarely needed): also stores a full copy of the files in the set (`.part…par3` files), so the set alone
+  can recreate them after the originals are gone, like a zip that can repair itself. Use it only when the PAR files
+  replace the originals (an archive you will not touch, files you send). Next to files you keep, it only adds a
+  second full copy.
 - `--unix-permissions`, `--fat-permissions`
 - `--reproducible`, `--interleave/-i`, `--max-recovery`
 

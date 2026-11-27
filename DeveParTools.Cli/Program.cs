@@ -70,7 +70,7 @@ namespace DeveParTools.Cli
             var code = new Option<string>("--code") { Description = "PAR3 code: auto, cauchy or fft.", DefaultValueFactory = _ => "auto" };
             var dedup = new Option<bool>("--dedup") { Description = "PAR3: store identical blocks once." };
             var noPack = new Option<bool>("--no-tail-packing") { Description = "PAR3: do not pack file tails together." };
-            var storeData = new Option<bool>("--data", "-D") { Description = "PAR3: also store the input data (archive mode)." };
+            var storeData = new Option<bool>("--data", "-D") { Description = "PAR3, rarely needed: also store a full copy of the files in the set (.part files), so it can recreate them without the originals. Only for archives and files you send; it doubles the size." };
             var unixPerms = new Option<bool>("--unix-permissions") { Description = "PAR3: store mtime and mode." };
             var fatPerms = new Option<bool>("--fat-permissions") { Description = "PAR3: store FAT times and attributes." };
             var reproducible = new Option<bool>("--reproducible") { Description = "PAR3: identical inputs give identical output." };

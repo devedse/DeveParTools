@@ -103,10 +103,20 @@ public sealed class ParCreatePlan
     /// How many whole files can be rebuilt when they are missing completely: at least (the largest files go first)
     /// and at most (the smallest go first). Files without blocks (empty, or stored in the PAR3 packets) always count.
     /// </summary>
+    /// <remarks>
+    /// Each file's blocks are counted as its own, so with PAR3 tail packing (files sharing a block) this is on the safe
+    /// side: a shared block is counted once per file. With at least as many recovery blocks as input blocks every file
+    /// can be rebuilt (23 files packed into 1 block, 1 recovery block: all 23).
+    /// </remarks>
     public (int Min, int Max) RebuildableFiles
     {
         get
         {
+            if (RecoveryBlocks >= InputBlocks)
+            {
+                return (Files.Count, Files.Count);
+            }
+
             int free = Files.Count(f => f.Blocks == 0);
             var sizes = Files.Where(f => f.Blocks > 0).Select(f => f.Blocks).Order().ToList();
             return (free + Fit(sizes.AsEnumerable().Reverse()), free + Fit(sizes));
@@ -291,6 +301,7 @@ public static partial class ParClient
                 var planned = files.Select(f => f with { Blocks = (f.Length + size - 1) / size }).ToList();
                 long blocks = planned.Sum(f => f.Blocks);
                 int recovery = Recovery(blocks, 0);
+                WarnAboutLargeBlocks(warnings, blocks, size);
                 if (blocks > Par2Math.MaxInputSlices)
                 {
                     errors.Add($"PAR2 allows at most {Par2Math.MaxInputSlices:N0} input blocks; this is {blocks:N0}. Use a larger block size.");
@@ -318,7 +329,7 @@ public static partial class ParClient
 
             default:
             {
-                ulong size = request.BlockSize is long bs ? (ulong)bs : Par3Creator.ChooseBlockSize(lengths.Sum(), request.BlockCount ?? 2000);
+                ulong size = request.BlockSize is long bs ? (ulong)bs : Par3Creator.ChooseBlockSize(lengths, request.BlockCount ?? 2000, request.Par3PackTails);
                 if (size == 0 || size % 8 != 0)
                 {
                     errors.Add("The PAR3 block size must be a positive multiple of 8.");
@@ -338,6 +349,7 @@ public static partial class ParClient
                     warnings.Add("With more than 65,535 blocks the Cauchy code needs GF(2^32), which is very slow: use the FFT code.");
                 }
 
+                WarnAboutLargeBlocks(warnings, blocks, (long)size);
                 if (request.Par3Dedup != Par3Dedup.None)
                 {
                     warnings.Add("Deduplication stores blocks with the same content once, but which blocks are the same is only known when the files are read. "
@@ -346,7 +358,8 @@ public static partial class ParClient
 
                 if (request.Par3StoreData)
                 {
-                    warnings.Add($"Store data copies all {FormatBytes(files.Sum(f => f.Length))} of your files into the PAR files, on top of the recovery data.");
+                    warnings.Add($"Store data writes a full second copy of your files ({FormatBytes(files.Sum(f => f.Length))}) into the PAR files, on top of the recovery data. "
+                        + "That only helps when the PAR files replace the originals (an archive, files you send); if you keep your files, turn it off.");
                 }
 
                 return new ParCreatePlan
@@ -363,6 +376,19 @@ public static partial class ParClient
                     Errors = errors,
                 };
             }
+        }
+    }
+
+    /// <summary>
+    /// Fewer than 100 blocks of a megabyte or more (only when asked for: the default is 2,000 blocks): every repair then
+    /// costs whole huge blocks.
+    /// </summary>
+    private static void WarnAboutLargeBlocks(List<string> warnings, long blocks, long blockSize)
+    {
+        if (blocks is > 0 and < 100 && blockSize >= 1 << 20)
+        {
+            warnings.Add($"Only {blocks:N0} block(s) of {FormatBytes(blockSize)}: any damage, even a single byte, uses up a whole block of recovery data. "
+                + "With a few thousand blocks the same recovery data repairs many more small errors.");
         }
     }
 
