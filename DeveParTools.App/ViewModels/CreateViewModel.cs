@@ -224,7 +224,8 @@ public sealed partial class CreateViewModel : OperationViewModel
     /// <summary>The block slider: log2 of the target block count (so 1 … 32,768 fits one slider).</summary>
     public double BlockSlider
     {
-        get => Math.Log2(Math.Max(1, _explicitBlockSize == null ? _blockTarget : Plan?.InputBlocks ?? 1));
+        // The target, but never below what the files can have (blocks are at most 64 MiB), so the knob shows the real count.
+        get => Math.Log2(Math.Max(1, _explicitBlockSize == null ? Math.Max(_blockTarget, Plan?.MinInputBlocks ?? 1) : Plan?.InputBlocks ?? 1));
         set => SetBlockTarget((int)Math.Round(Math.Pow(2, value)));
     }
 
@@ -254,6 +255,9 @@ public sealed partial class CreateViewModel : OperationViewModel
     public bool ManyBlocksWarning => IsPar3 && Plan is { InputBlocks: > SafeBlockLimit };
 
     /// <summary>The slider's end: log2 of the most blocks allowed (32,768 unless more are allowed, and the format's maximum).</summary>
+    /// <summary>The slider's start: log2 of the fewest blocks the files can have (blocks are at most 64 MiB).</summary>
+    public double BlockSliderMinimum => Math.Log2(Math.Max(1, Plan?.MinInputBlocks ?? 1));
+
     public double BlockSliderMaximum => Math.Log2(Math.Max(2, Math.Min(Plan?.MaxInputBlocks ?? 2, AllowManyBlocks ? long.MaxValue : SafeBlockLimit)));
 
     /// <summary>The real number of input blocks; typing a number makes it the target.</summary>
@@ -337,7 +341,7 @@ public sealed partial class CreateViewModel : OperationViewModel
     /// <summary>Everything that will be written: index, recovery files (and PAR3 data parts).</summary>
     public string ParFilesText => Plan is not { Files.Count: > 0 }
         ? "–"
-        : SizedPlan?.ParFileBytes is long total ? $"{Formatting.Bytes(total)} in {SizedPlan.OutputFiles!.Count:N0} file(s)" : Plan.Errors.Count > 0 ? "–" : "calculating…";
+        : SizedPlan?.ParFileBytes is long total ? $"{Formatting.Bytes(total)} in {SizedPlan.OutputFiles!.Count:N0} file(s)" : SizedPlan != null || Plan.Errors.Count > 0 ? "–" : "calculating…";
 
     /// <summary>The recovery blocks alone.</summary>
     public string RecoveryDataText => Plan is not { RecoveryBlocks: > 0 } plan
@@ -345,7 +349,7 @@ public sealed partial class CreateViewModel : OperationViewModel
         : $"{Formatting.Bytes(plan.RecoveryBytes)} ({plan.RecoveryBlocks:N0} block(s) of {Formatting.Bytes(plan.BlockSize)})";
 
     /// <summary>The share of what is written that is recovery data for real file data (see ParCreatePlan.Efficiency).</summary>
-    public string EfficiencyText => Plan is not { RecoveryBlocks: > 0 } ? "–" : SizedPlan?.Efficiency is double e ? $"{e * 100:0.0}%" : Plan.Errors.Count > 0 ? "–" : "calculating…";
+    public string EfficiencyText => Plan is not { RecoveryBlocks: > 0 } ? "–" : SizedPlan?.Efficiency is double e ? $"{e * 100:0.0}%" : SizedPlan != null || Plan.Errors.Count > 0 ? "–" : "calculating…";
 
     /// <summary>For "Automatic": which code it picks for this set.</summary>
     public string? CodeChoiceText => CodeIndex == 0 && Plan is { RecoveryBlocks: > 0 } plan
@@ -486,7 +490,7 @@ public sealed partial class CreateViewModel : OperationViewModel
         ShowFiles(plan);
         foreach (var name in new[]
         {
-            nameof(BlockSlider), nameof(BlockSliderMaximum), nameof(BlockCount), nameof(BlockSize), nameof(Redundancy), nameof(RecoveryCount),
+            nameof(BlockSlider), nameof(BlockSliderMinimum), nameof(BlockSliderMaximum), nameof(BlockCount), nameof(BlockSize), nameof(Redundancy), nameof(RecoveryCount),
             nameof(HasInputs), nameof(InputSummary), nameof(BlockSizeText), nameof(RedundancyText), nameof(BlockFillText), nameof(RecoveryDataText),
             nameof(RebuildText), nameof(CodeText), nameof(CodeChoiceText), nameof(RecoveryCountMaximum), nameof(ShowManyBlocksOption), nameof(ManyBlocksWarning),
         })
@@ -506,7 +510,18 @@ public sealed partial class CreateViewModel : OperationViewModel
             return;
         }
 
-        var sized = await Task.Run(() => ParClient.Plan(request, files, withFileSizes: true));
+        ParCreatePlan sized;
+        try
+        {
+            sized = await Task.Run(() => ParClient.Plan(request, files, withFileSizes: true));
+        }
+        catch (Exception e)
+        {
+            // Never leave "calculating…" standing: the numbers without the file sizes, and why in the log.
+            sized = Plan!;
+            Log.Add(new LogLine(DateTime.Now, ParLogLevel.Warning, "Could not calculate the sizes of the PAR files: " + e.Message));
+        }
+
         if (version == _sizeVersion)
         {
             SizedPlan = sized;

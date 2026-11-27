@@ -95,7 +95,7 @@
                           ToolTip.Tip="PAR3: protects folder trees, fast for large sets (FFT code), can store permissions; read by DeveParTools and par3cmdline. PAR2: read by almost every PAR tool (par2cmdline, MultiPar, QuickPar …), at most 32,768 blocks. PAR1: only for very old tools; one block per file." />
 
                 <TextBlock Grid.Row="1" Text="Blocks" VerticalAlignment="Center" />
-                <Slider Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="{Binding BlockSliderMaximum}" Value="{Binding BlockSlider}" IsEnabled="{Binding HasBlockChoice}"
+                <Slider Grid.Row="1" Grid.Column="1" Minimum="{Binding BlockSliderMinimum}" Maximum="{Binding BlockSliderMaximum}" Value="{Binding BlockSlider}" IsEnabled="{Binding HasBlockChoice}"
                         ToolTip.Tip="Your files are cut into blocks; a recovery block can replace any one lost block. More blocks: damage is repaired more precisely, but every block costs checksums and work. Fewer blocks: less overhead, but a small error costs a whole block." />
                 <NumericUpDown Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" Value="{Binding BlockCount}" Minimum="1" FormatString="N0" IsEnabled="{Binding HasBlockChoice}"
                                AutomationProperties.Name="Number of blocks" ToolTip.Tip="Number of input blocks. Type one to aim for it; the real count can differ a little, because every file is rounded up to whole blocks." />

@@ -58,6 +58,12 @@ public sealed class ParCreatePlan
     /// <summary>The most input blocks the format allows for these files (the smallest block size): for a block count slider.</summary>
     public required long MaxInputBlocks { get; init; }
 
+    /// <summary>
+    /// The fewest input blocks the files can have: blocks are at most 64 MiB (<see cref="BlockSizeLimit"/>), and PAR2
+    /// needs a block per file at least.
+    /// </summary>
+    public long MinInputBlocks { get; init; } = 1;
+
     /// <summary>Things worth knowing that do not stop Create (a slow code, deduplication not counted), in plain words.</summary>
     public IReadOnlyList<string> Warnings { get; init; } = [];
 
@@ -241,6 +247,7 @@ public static partial class ParClient
         RecoveryFiles = plan.RecoveryFiles,
         Code = plan.Code,
         MaxInputBlocks = plan.MaxInputBlocks,
+        MinInputBlocks = plan.MinInputBlocks,
         Warnings = warnings,
         Errors = plan.Errors,
         OutputFiles = sizes,
@@ -298,9 +305,17 @@ public static partial class ParClient
                     size = Math.Max(4, (size + 3) / 4 * 4);
                 }
 
+                long limit = BlockSizeLimit.For(nonEmpty.Sum(), 4);
+                if (request.BlockSize > limit)
+                {
+                    errors.Add(BlockSizeLimit.TooLarge(limit));
+                }
+
                 var planned = files.Select(f => f with { Blocks = (f.Length + size - 1) / size }).ToList();
                 long blocks = planned.Sum(f => f.Blocks);
                 int recovery = Recovery(blocks, 0);
+                long fewest = nonEmpty.Sum(l => (l + limit - 1) / limit);
+                WarnAboutLimit(warnings, request, size, limit, blocks);
                 WarnAboutLargeBlocks(warnings, blocks, size);
                 if (blocks > Par2Math.MaxInputSlices)
                 {
@@ -322,6 +337,7 @@ public static partial class ParClient
                     RecoveryFiles = Par2Creator.PlanRecoveryFiles(request.OutputPath, SchemeOf(request), request.VolumeCount, request.FirstRecoveryBlock, recovery, size, largest),
                     Code = "Reed-Solomon (GF(2^16))",
                     MaxInputBlocks = Math.Min(Par2Math.MaxInputSlices, nonEmpty.Sum(l => (l + 3) / 4)),
+                    MinInputBlocks = Math.Max(1, fewest),
                     Warnings = warnings,
                     Errors = errors,
                 };
@@ -336,9 +352,17 @@ public static partial class ParClient
                     size = Math.Max(8, (size + 7) / 8 * 8);
                 }
 
+                long limit = BlockSizeLimit.For(lengths.Sum(), 8);
+                if (request.BlockSize > limit)
+                {
+                    errors.Add(BlockSizeLimit.TooLarge(limit));
+                }
+
                 var planned = files.Select(f => f with { Blocks = (long)Par3Creator.FileBlocks(f.Length, size) }).ToList();
                 long blocks = (long)Par3Creator.CountBlocks(lengths, size, request.Par3PackTails);
                 int recovery = Recovery(blocks, 0);
+                long fewest = (long)Par3Creator.CountBlocks(lengths, (ulong)limit, request.Par3PackTails);
+                WarnAboutLimit(warnings, request, (long)size, limit, blocks);
                 var code = Par3Creator.ResolveCode(request.Par3Code, (ulong)blocks, recovery);
                 if (code == Par3Code.Fft && Math.Max(recovery, request.Par3MaxRecoveryBlocks ?? 0) > blocks)
                 {
@@ -372,10 +396,23 @@ public static partial class ParClient
                     RecoveryFiles = Par3Creator.PlanRecoveryFiles(request.OutputPath, SchemeOf(request), request.VolumeCount, (ulong)request.FirstRecoveryBlock, recovery, size, largest),
                     Code = Par3Creator.DescribeCode(code, (ulong)blocks, recovery, (ulong)request.FirstRecoveryBlock, request.Par3MaxRecoveryBlocks, request.Par3Interleave),
                     MaxInputBlocks = Math.Min(Par3MaxPlannedBlocks, (long)Par3Creator.CountBlocks(lengths, Par3MinBlockSize, request.Par3PackTails)),
+                    MinInputBlocks = Math.Max(1, fewest),
                     Warnings = warnings,
                     Errors = errors,
                 };
             }
+        }
+    }
+
+    /// <summary>
+    /// The block count asked for needed blocks above the limit, so the limit chose the block size: say why the set has
+    /// more blocks. (Not when another rule decides, such as PAR2's block per file.)
+    /// </summary>
+    private static void WarnAboutLimit(List<string> warnings, ParCreateRequest request, long size, long limit, long blocks)
+    {
+        if (request.BlockSize == null && size == limit && request.BlockCount is int target && target < blocks)
+        {
+            warnings.Add($"Blocks are at most 64 MiB (verifying and repairing hold whole blocks in memory), so these files make at least {blocks:N0} blocks.");
         }
     }
 

@@ -237,6 +237,11 @@ public static class Par3Creator
             throw new ArgumentException("Block size must be a positive multiple of 8.");
         }
 
+        if (blockSize > (ulong)BlockSizeLimit.For(total, 8))
+        {
+            throw new ArgumentException(BlockSizeLimit.TooLarge(BlockSizeLimit.For(total, 8)));
+        }
+
         if (!sizesOnly)
         {
             // Every step, weighted by its work (block and recovery counts as planned; deduplication can lower them).
@@ -318,18 +323,14 @@ public static class Par3Creator
         var pieceArray = blockPieces.Select(p => (IReadOnlyList<(ulong, ulong, PieceSource)>)p).ToArray();
         var blockSource = new Par3BlockSource(pieceArray, handles);
 
-        // Checksums of tail-packed blocks (the tails at their offsets, zeros elsewhere).
-        var buf = new byte[blockSize];
+        // Checksums of tail-packed blocks (the tails at their offsets, zeros elsewhere), read in pieces like HashFiles.
+        // Planning sizes only needs to know they exist.
+        var piece = sizesOnly ? [] : new byte[(int)Math.Min(blockSize, HashChunk)];
         for (int i = 0; i < blockChecks.Count; i++)
         {
             if (blockChecks[i] == null)
             {
-                if (!sizesOnly)
-                {
-                    blockSource.Read(i, 0, buf);
-                }
-
-                blockChecks[i] = sizesOnly ? default : new BlockChecksum(Crc64Iso.Compute(buf), Fingerprint.Compute(buf));
+                blockChecks[i] = sizesOnly ? default : PackedBlockChecksum(blockSource, i, blockSize, piece, token);
             }
         }
 
@@ -566,6 +567,7 @@ public static class Par3Creator
     /// The smallest block size (a multiple of 8, at least 64) for which the files make at most
     /// <paramref name="targetCount"/> blocks, counted as <see cref="CountBlocks"/> does. When no size gets that low
     /// (without tail packing every file with a tail needs a block of its own), the smallest size with the fewest blocks.
+    /// Never above <see cref="BlockSizeLimit"/> (64 MiB for most sets): then there are more blocks than the target.
     /// </summary>
     /// <remarks>
     /// <para>Total ÷ target is where to start, but there the count is usually a little above the target: every file
@@ -576,6 +578,10 @@ public static class Par3Creator
     /// or one block per file without (block size = the largest file).</para>
     /// </remarks>
     public static ulong ChooseBlockSize(IReadOnlyList<long> lengths, int targetCount, bool packTails)
+        => Math.Min(SmallestFittingBlockSize(lengths, targetCount, packTails), (ulong)BlockSizeLimit.For(lengths.Sum(), 8));
+
+    /// <summary><see cref="ChooseBlockSize"/> without the <see cref="BlockSizeLimit"/>.</summary>
+    private static ulong SmallestFittingBlockSize(IReadOnlyList<long> lengths, int targetCount, bool packTails)
     {
         ulong target = (ulong)Math.Max(1, targetCount);
         long total = lengths.Sum();
@@ -687,59 +693,111 @@ public static class Par3Creator
         return (files.Values.OrderBy(f => f.RelativePath, StringComparer.Ordinal).ToList(), dirs.OrderBy(d => d, StringComparer.Ordinal).ToList());
     }
 
+    /// <summary>How much of a file or block is hashed at a time: blocks can be large (up to 64 MiB, more for huge sets).</summary>
+    internal const int HashChunk = 1 << 20;
+
+    /// <summary>
+    /// Reads every file once (several files in parallel) and computes, per block, CRC-64 and BLAKE3, the tail's checks,
+    /// the whole file's BLAKE3 and the CRC-64 of its first 16 KiB. A block larger than <see cref="HashChunk"/> is read
+    /// and hashed in pieces (both checksums continue from piece to piece), so memory stays at one piece per thread and
+    /// Cancel is noticed within a piece, not only between files.
+    /// </summary>
     private static void HashFiles(List<FileInfoEntry> files, ulong blockSize, OperationContext context)
     {
         long total = Math.Max(1, files.Sum(f => f.Length));
         long done = 0;
-        Parallel.ForEach(files, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, context.Threads), CancellationToken = context.CancellationToken }, f =>
+        var token = context.CancellationToken;
+        Parallel.ForEach(files, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, context.Threads), CancellationToken = token }, f =>
         {
             int full = (int)((ulong)f.Length / blockSize);
             f.BlockChecks = new BlockChecksum[full];
-            var hasher = new Blake3Hasher();
+            var fileHasher = new Blake3Hasher();
             using var fs = new FileStream(f.FullPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16, FileOptions.SequentialScan);
-            var buf = new byte[blockSize];
+            var buf = new byte[(int)Math.Min(blockSize, HashChunk)];
             ulong crc16k = 0;
             long pos = 0;
             for (int b = 0; b <= full; b++)
             {
-                int want = b < full ? (int)blockSize : (int)((ulong)f.Length % blockSize);
+                long want = b < full ? (long)blockSize : (long)((ulong)f.Length % blockSize);
                 if (want == 0)
                 {
                     break;
                 }
 
-                int n = fs.ReadAtLeast(buf.AsSpan(0, want), want, throwOnEndOfStream: true);
-                var data = buf.AsSpan(0, n);
-                hasher.Update(data);
-                if (pos < 16384)
+                bool tail = b == full;
+                var blockHasher = new Blake3Hasher();
+                ulong blockCrc = 0;
+                for (long got = 0; got < want;)
                 {
-                    int take = (int)Math.Min(16384 - pos, n);
-                    crc16k = Crc64Iso.Compute(data[..take], crc16k);
+                    token.ThrowIfCancellationRequested();
+                    int piece = (int)Math.Min(buf.Length, want - got);
+                    int n = fs.ReadAtLeast(buf.AsSpan(0, piece), piece, throwOnEndOfStream: true);
+                    var data = buf.AsSpan(0, n);
+                    fileHasher.Update(data);
+                    if (pos < 16384)
+                    {
+                        crc16k = Crc64Iso.Compute(data[..(int)Math.Min(16384 - pos, n)], crc16k);
+                    }
+
+                    if (tail && want < Par3Chunk.InlineLimit)
+                    {
+                        f.InlineTail = data.ToArray(); // shorter than 40 bytes: one piece
+                    }
+                    else
+                    {
+                        if (tail && got == 0)
+                        {
+                            f.TailCrc = Crc64Iso.Compute(data[..Par3Chunk.InlineLimit]);
+                        }
+
+                        blockCrc = Crc64Iso.Compute(data, blockCrc);
+                        blockHasher.Update(data);
+                    }
+
+                    got += n;
+                    pos += n;
+                    long now = Interlocked.Add(ref done, n);
+                    context.Observer.Progress((double)now / total, $"{now / 1048576.0:N0} of {total / 1048576.0:N0} MiB read");
                 }
 
-                if (b < full)
+                if (!tail)
                 {
-                    f.BlockChecks[b] = new BlockChecksum(Crc64Iso.Compute(data), Fingerprint.Compute(data));
+                    f.BlockChecks[b] = new BlockChecksum(blockCrc, Finish(blockHasher));
                 }
-                else if (n < Par3Chunk.InlineLimit)
+                else if (want >= Par3Chunk.InlineLimit)
                 {
-                    f.InlineTail = data.ToArray();
+                    f.TailHash = Finish(blockHasher);
                 }
-                else
-                {
-                    f.TailCrc = Crc64Iso.Compute(data[..Par3Chunk.InlineLimit]);
-                    f.TailHash = Fingerprint.Compute(data);
-                }
-
-                pos += n;
-                context.Observer.Progress((double)Interlocked.Add(ref done, n) / total, "Hashing");
             }
 
-            var h = new byte[16];
-            hasher.Finalize(h);
-            f.FileHash = Fingerprint.FromBytes(h);
+            f.FileHash = Finish(fileHasher);
             f.Hash16k = crc16k;
         });
+    }
+
+    /// <summary>CRC-64 and BLAKE3 of input block <paramref name="index"/>, read from its pieces in parts of <paramref name="buffer"/>'s size.</summary>
+    private static BlockChecksum PackedBlockChecksum(Par3BlockSource source, int index, ulong blockSize, byte[] buffer, CancellationToken token)
+    {
+        var hasher = new Blake3Hasher();
+        ulong crc = 0;
+        for (ulong offset = 0; offset < blockSize; offset += (ulong)buffer.Length)
+        {
+            token.ThrowIfCancellationRequested();
+            var part = buffer.AsSpan(0, (int)Math.Min((ulong)buffer.Length, blockSize - offset));
+            source.Read(index, (long)offset, part);
+            crc = Crc64Iso.Compute(part, crc);
+            hasher.Update(part);
+        }
+
+        return new BlockChecksum(crc, Finish(hasher));
+    }
+
+    /// <summary>The 16-byte BLAKE3 of what a hasher was fed (the same as <see cref="Fingerprint.Compute"/> of it all at once).</summary>
+    internal static Fingerprint Finish(Blake3Hasher hasher)
+    {
+        Span<byte> h = stackalloc byte[16];
+        hasher.Finalize(h);
+        return Fingerprint.FromBytes(h);
     }
 
     private static void BuildChunks(FileInfoEntry f, ulong blockSize)
@@ -1002,7 +1060,7 @@ public static class Par3Creator
     {
         observer.Stage(Par3Stages.StoringData);
         var parts = PlanDataParts(outputPath, options, blockCount);
-        var buf = new byte[blockSize];
+        var buf = new byte[(int)Math.Min(blockSize, HashChunk)];
         ulong stored = 0;
         foreach (var part in parts)
         {
@@ -1014,16 +1072,27 @@ public static class Par3Creator
                     observer.Progress((double)stored / blockCount);
                 }
 
+                // The packet: header (its checksum covers the rest of the header and the data), then the block, copied in
+                // pieces; the header is written again once the checksum is known.
                 ulong idx = (ulong)(part.First + i);
-                blocks.Read((int)idx, 0, buf);
-                int len = buf.Length;
-                var header = Par3PacketWriter.DataHeader(setId, idx, len);
+                var header = Par3PacketWriter.DataHeader(setId, idx, (long)blockSize);
+                long headerAt = fs.Position;
+                fs.Write(header);
                 var hasher = new Blake3Hasher();
                 hasher.Update(header.AsSpan(24));
-                hasher.Update(buf.AsSpan(0, len));
+                for (ulong offset = 0; offset < blockSize; offset += (ulong)buf.Length)
+                {
+                    var piece = buf.AsSpan(0, (int)Math.Min((ulong)buf.Length, blockSize - offset));
+                    blocks.Read((int)idx, (long)offset, piece);
+                    hasher.Update(piece);
+                    fs.Write(piece);
+                }
+
                 hasher.Finalize(header.AsSpan(8, 16));
+                long end = fs.Position;
+                fs.Position = headerAt;
                 fs.Write(header);
-                fs.Write(buf, 0, len);
+                fs.Position = end;
             }
 
             foreach (var p in vital)

@@ -204,6 +204,7 @@ public static unsafe class Par3Fft
                             blocks.Read((int)block, offset, span[..(int)len]);
                             if (j % 256 == 255 || j + 1 == present)
                             {
+                                options.CancellationToken.ThrowIfCancellationRequested();
                                 progress.Reading(j + 1, present);
                             }
                         }
@@ -219,6 +220,7 @@ public static unsafe class Par3Fft
                         sink.Write(position[wanted[i]], offset, new ReadOnlySpan<byte>((byte*)work[local], (int)len));
                         if (i % 64 == 63 || i + 1 == wanted.Count)
                         {
+                            options.CancellationToken.ThrowIfCancellationRequested();
                             progress.Writing(i + 1, wanted.Count);
                         }
                     }
@@ -302,6 +304,7 @@ public static unsafe class Par3Fft
 
                         if (++read % 256 == 0)
                         {
+                            options.CancellationToken.ThrowIfCancellationRequested();
                             progress.Reading(read, toRead);
                         }
                     }

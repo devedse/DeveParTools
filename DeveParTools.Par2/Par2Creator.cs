@@ -159,6 +159,12 @@ public static class Par2Creator
             throw new ArgumentException("Slice size must be a positive multiple of 4.");
         }
 
+        long limit = BlockSizeLimit.For(inputs.Sum(i => i.Length), 4);
+        if (sliceSize > limit)
+        {
+            throw new ArgumentException(BlockSizeLimit.TooLarge(limit));
+        }
+
         var buf16 = new byte[16384];
         int prepared = 0;
         foreach (var f in inputs)
@@ -472,7 +478,8 @@ public static class Par2Creator
     /// <summary>
     /// Smallest slice size (multiple of 4) for which the slice count (each file rounded up separately) does not
     /// exceed <paramref name="targetCount"/> (and 32768). When even one slice per file is more than the target,
-    /// the smallest size that gives one slice per file.
+    /// the smallest size that gives one slice per file. Never above <see cref="BlockSizeLimit"/> (64 MiB for most
+    /// sets): then there are more slices than the target.
     /// </summary>
     /// <remarks>
     /// The count only falls as the size grows, so the answer lies between <c>lo = total / target</c> (any smaller size
@@ -482,6 +489,10 @@ public static class Par2Creator
     /// slices, but larger recovery slices).
     /// </remarks>
     public static long ChooseSliceSize(IReadOnlyList<long> lengths, int targetCount)
+        => Math.Min(SmallestFittingSliceSize(lengths, targetCount), BlockSizeLimit.For(lengths.Sum(), 4));
+
+    /// <summary><see cref="ChooseSliceSize"/> without the <see cref="BlockSizeLimit"/>.</summary>
+    private static long SmallestFittingSliceSize(IReadOnlyList<long> lengths, int targetCount)
     {
         targetCount = Math.Clamp(targetCount, 1, Par2Math.MaxInputSlices);
         long total = lengths.Sum();
@@ -560,22 +571,43 @@ public static class Par2Creator
 
     private static int Digits(int v) => v.ToString(CultureInfo.InvariantCulture).Length;
 
+    /// <summary>How much of a slice is hashed at a time (slices can be up to 64 MiB, more for huge sets).</summary>
+    internal const int HashChunk = 1 << 20;
+
+    /// <summary>
+    /// Reads every file once (several in parallel): the MD5 and CRC-32 of every slice (the last one padded with zeros,
+    /// as PAR2 defines them) and the file's MD5. A slice larger than <see cref="HashChunk"/> is read and hashed in pieces
+    /// (both checksums continue from piece to piece), so memory stays at one piece per thread and Cancel is noticed
+    /// within a piece, not only between files.
+    /// </summary>
     private static void HashInputs(List<InputFile> inputs, long sliceSize, Md5Hash[] sliceHashes, uint[] sliceCrc, FileHandleCache handles, OperationContext context, BlockStateMap map)
     {
         long done = 0;
         long total = Math.Max(1, inputs.Sum(i => i.Length));
-        Parallel.ForEach(inputs, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, context.Threads), CancellationToken = context.CancellationToken }, f =>
+        var token = context.CancellationToken;
+        Parallel.ForEach(inputs, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, context.Threads), CancellationToken = token }, f =>
         {
             using var fileMd5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
-            var buf = new byte[sliceSize];
+            using var sliceMd5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
+            var buf = new byte[Math.Min(sliceSize, HashChunk)];
             for (int s = 0; s < f.SliceCount; s++)
             {
-                int n = handles.ReadPadded(f.Path, s * sliceSize, buf);
-                fileMd5.AppendData(buf, 0, n);
-                sliceHashes[f.FirstSlice + s] = Md5Hash.Compute(buf);
-                sliceCrc[f.FirstSlice + s] = Crc32Ieee.Compute(buf);
+                uint crc = 0;
+                for (long got = 0; got < sliceSize; got += buf.Length)
+                {
+                    token.ThrowIfCancellationRequested();
+                    var piece = buf.AsSpan(0, (int)Math.Min(buf.Length, sliceSize - got));
+                    int n = handles.ReadPadded(f.Path, s * sliceSize + got, piece);
+                    fileMd5.AppendData(piece[..n]);
+                    sliceMd5.AppendData(piece);
+                    crc = Crc32Ieee.Compute(piece, crc);
+                    long now = Interlocked.Add(ref done, n);
+                    context.Observer.Progress((double)now / total, $"{now / 1048576.0:N0} of {total / 1048576.0:N0} MiB read");
+                }
+
+                sliceHashes[f.FirstSlice + s] = Md5Hash.FromBytes(sliceMd5.GetHashAndReset());
+                sliceCrc[f.FirstSlice + s] = crc;
                 map.Set(f.FirstSlice + s, BlockState.Processed);
-                context.Observer.Progress((double)Interlocked.Add(ref done, n) / total, "Hashing");
             }
 
             f.FileHash = Md5Hash.FromBytes(fileMd5.GetHashAndReset());

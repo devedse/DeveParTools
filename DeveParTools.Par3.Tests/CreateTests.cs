@@ -94,7 +94,7 @@ public sealed class CreateTests
             .Concat(Enumerable.Range(0, 18).Select(_ => (long)rnd.Next(20_000, 70_000))).ToList();
         foreach (bool pack in new[] { true, false })
         {
-            foreach (int target in new[] { 32768, 32767, 32700, 2000, 100, 23 })
+            foreach (int target in new[] { 32768, 32767, 32700, 2000, 100, 60 })
             {
                 ulong size = Par3Creator.ChooseBlockSize(lengths, target, pack);
                 ulong count = Par3Creator.CountBlocks(lengths, size, pack);
@@ -104,6 +104,9 @@ public sealed class CreateTests
                 Assert.IsTrue(count > (ulong)target * 99 / 100, $"target {target}, pack {pack}: close to the target ({count})");
             }
         }
+
+        // Fewer than 2.5 GB ÷ 64 MiB: the blocks stop at 64 MiB, so there are more than asked for.
+        Assert.AreEqual((ulong)(64L << 20), Par3Creator.ChooseBlockSize(lengths, 23, true));
 
         // Pressing "down" in the block count box: one less always gives fewer real blocks.
         ulong last = Par3Creator.CountBlocks(lengths, Par3Creator.ChooseBlockSize(lengths, 32768, true), true);
@@ -599,5 +602,89 @@ public sealed class CreateTests
         var ext = Par3Files.Packets(dir["set.par3"]).OfType<Par3ExternalDataPacket>().ToList();
         CollectionAssert.AreEqual(new ulong[] { 0, 1024, 2048 }, ext.Select(e => e.FirstBlockIndex).ToArray());
         CollectionAssert.AreEqual(new[] { 1024, 1024, 452 }, ext.Select(e => e.Checksums.Count).ToArray());
+    }
+}
+
+/// <summary>Blocks larger than a hashing piece (1 MiB), the block size limit, and Cancel during hashing.</summary>
+[TestClass]
+public sealed class LargeBlockTests
+{
+    [TestMethod]
+    public void BlocksLargerThanAHashingPiece_VerifyAndRepair()
+    {
+        using var dir = new TempDir();
+        // 3 MiB blocks: whole blocks, a tail of 1.5 MiB, and two files that are each smaller than a block, so their
+        // tails share one packed block, all hashed in pieces.
+        var big = TestData.Random(51, 3 * (3 << 20) + (3 << 19));
+        var small1 = TestData.Random(52, (1 << 20) + 12345);
+        var small2 = TestData.Random(53, (1 << 20) + 777);
+        var paths = new[] { dir.Write("big.bin", big), dir.Write("s1.bin", small1), dir.Write("s2.bin", small2) };
+        Par3Creator.Create(new Par3CreateOptions { Inputs = paths, OutputPath = dir["set.par3"], BlockSize = 3 << 20, RecoveryBlockCount = 3, Code = Par3Code.Cauchy, StoreData = true });
+        var verify = Par3Verifier.Verify(new Par3VerifyOptions { Par3Path = dir["set.par3"] });
+        Assert.IsTrue(verify.AllFilesComplete, "the checksums built in pieces match the files");
+
+        // Without the originals: rebuilt from the stored data (also written in pieces).
+        foreach (var p in paths)
+        {
+            File.Delete(p);
+        }
+
+        var report = Par3Verifier.Verify(new Par3VerifyOptions { Par3Path = dir["set.par3"] });
+        Assert.IsTrue(Par3Repairer.Repair(report, new Par3RepairOptions { PurgeBackups = true }).Success);
+        CollectionAssert.AreEqual(big, dir.Read("big.bin"));
+        CollectionAssert.AreEqual(small1, dir.Read("s1.bin"));
+        CollectionAssert.AreEqual(small2, dir.Read("s2.bin"));
+    }
+
+    [TestMethod]
+    public void BlockSizeLimit_ChoosingStopsThere_AndLargerIsRefused()
+    {
+        long[] lengths = [200L << 20, 50L << 20];
+        ulong size = Par3Creator.ChooseBlockSize(lengths, 1, true);
+        Assert.AreEqual((ulong)(64L << 20), size, "one block was asked for; 64 MiB is the most");
+        Assert.AreEqual(4UL, Par3Creator.CountBlocks(lengths, size, true), "3 full blocks of the first file; both tails (8 and 50 MiB) share one");
+
+        using var dir = new TempDir();
+        var path = dir.Write("a.bin", TestData.Random(5, 100_000));
+        var e = Assert.ThrowsExactly<ArgumentException>(() => Par3Creator.Create(new Par3CreateOptions { Inputs = [path], OutputPath = dir["set.par3"], BlockSize = 128UL << 20 }));
+        StringAssert.Contains(e.Message, "64 MiB");
+    }
+
+    [TestMethod]
+    public void Cancel_DuringHashing_StopsWithinAPiece()
+    {
+        using var dir = new TempDir();
+        var path = dir.Write("a.bin", TestData.Random(6, 12 << 20));
+        using var cancel = new CancellationTokenSource();
+        var observer = new CancellingObserver(cancel);
+        var context = new OperationContext { Observer = observer, CancellationToken = cancel.Token, Threads = 1 };
+        Assert.ThrowsExactly<OperationCanceledException>(() => Par3Creator.Create(new Par3CreateOptions { Inputs = [path], OutputPath = dir["set.par3"], BlockSize = 12 << 20 }, context));
+        Assert.IsTrue(observer.HashingReports is > 0 and < 12, $"one 12 MiB block, read in 1 MiB pieces: stopped after {observer.HashingReports}");
+        StringAssert.EndsWith(observer.LastDetail, "MiB read");
+    }
+
+    private sealed class CancellingObserver(CancellationTokenSource cancel) : IParOperationObserver
+    {
+        private string _stage = string.Empty;
+
+        public int HashingReports { get; private set; }
+
+        public string LastDetail { get; private set; } = string.Empty;
+
+        public void Stage(string name) => _stage = name;
+
+        public void Progress(double fraction, string? detail = null)
+        {
+            if (_stage == Par3Stages.Hashing)
+            {
+                HashingReports++;
+                LastDetail = detail ?? string.Empty;
+                cancel.Cancel();
+            }
+        }
+
+        public void Log(ParLogLevel level, string message)
+        {
+        }
     }
 }

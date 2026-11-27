@@ -220,6 +220,35 @@ public sealed class ParCreatePlanTests
     }
 
     [TestMethod]
+    public void BlocksAreAtMost64MiB_TheSliderStartsAtTheFewestBlocks()
+    {
+        // Only the lengths matter for a plan: a 200 MiB file without data.
+        var big = Path.Combine(_dir, "disk.vhdx");
+        using (var fs = new FileStream(big, FileMode.Create))
+        {
+            fs.SetLength(200L << 20);
+        }
+
+        foreach (var output in new[] { "d.par3", "d.par2" })
+        {
+            var asked = ParClient.Plan(new ParCreateRequest { Inputs = [big], OutputPath = Path.Combine(_dir, output), BlockCount = 1 }, withFileSizes: false);
+            Assert.AreEqual(64L << 20, asked.BlockSize, output);
+            Assert.AreEqual(4, asked.InputBlocks, output + ": 200 MiB in blocks of at most 64 MiB");
+            Assert.AreEqual(4, asked.MinInputBlocks, output);
+            Assert.IsTrue(asked.Errors.Count == 0 && asked.Warnings.Any(w => w.StartsWith("Blocks are at most 64 MiB", StringComparison.Ordinal)), output + ": " + string.Join(" | ", asked.Warnings));
+
+            var typed = ParClient.Plan(new ParCreateRequest { Inputs = [big], OutputPath = Path.Combine(_dir, output), BlockSize = 128L << 20 }, withFileSizes: false);
+            StringAssert.Contains(string.Join(" | ", typed.Errors), "at most 67,108,864 bytes", output);
+        }
+
+        var normal = ParClient.Plan(new ParCreateRequest { Inputs = [big], OutputPath = Path.Combine(_dir, "n.par3") }, withFileSizes: false);
+        Assert.IsFalse(normal.Warnings.Any(w => w.StartsWith("Blocks are at most", StringComparison.Ordinal)), "2,000 blocks of 100 KiB: nothing to say");
+        Assert.AreEqual(4, normal.MinInputBlocks);
+        var sized = ParClient.Plan(new ParCreateRequest { Inputs = [Write("x.bin", 1000)], OutputPath = Path.Combine(_dir, "x.par3"), BlockCount = 1 });
+        Assert.AreEqual(1, sized.MinInputBlocks, "kept when the sizes are added");
+    }
+
+    [TestMethod]
     public void FewHugeBlocks_EveryFileCanBeRebuiltAndThereIsAWarning()
     {
         // 23 files packed into 1 block (PAR3 tail packing), 1 recovery block: that block brings back all 23 files.

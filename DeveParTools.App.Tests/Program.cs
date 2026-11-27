@@ -126,6 +126,18 @@ Check(ExplorerContextMenu.ExecutableOf(entries[0].Command) == ProgramFilesExe &&
     Check(naming.OutputPath == Path.Combine(work, "mine.par2"), "a name the user chose stays");
     naming.ClearInputsCommand.Execute(null);
     Check(naming.OutputPath == Path.Combine(work, "mine.par2"), "also when the inputs are cleared");
+
+    // The sizes of the PAR files cannot be worked out (here: the input was deleted after it was listed): the page says
+    // "–", and never keeps saying "calculating…".
+    var gone = Path.Combine(work, "gone.bin");
+    File.WriteAllBytes(gone, new byte[100_000]);
+    naming.Add(gone);
+    Await(naming.Planned);
+    File.Delete(gone);
+    naming.Redundancy = 20;
+    Await(naming.Planned);
+    Check(naming.ParFilesText == "–" && naming.EfficiencyText == "–", $"sizes that cannot be calculated show as –: {naming.ParFilesText}, {naming.EfficiencyText}");
+    naming.ClearInputsCommand.Execute(null);
 }
 
 var shell = new ShellViewModel();

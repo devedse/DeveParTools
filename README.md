@@ -190,7 +190,8 @@ Common options:
 
 Create options:
 - `--redundancy/-r`, `--recovery-count/-c`
-- `--block-count/-b`, `--block-size/-s`
+- `--block-count/-b`, `--block-size/-s`: blocks are at most 64 MiB (for sets beyond 2 TiB, the size 32,768 blocks
+  need), because verifying and repairing hold whole blocks in memory. Asking for fewer blocks than that gives more.
 - `--volumes/-n`, `--uniform/-u`, `--limit/-l`
 - `--first`, `--comment`, `--base/-B`, `--no-recurse`, `--format/-f`
 

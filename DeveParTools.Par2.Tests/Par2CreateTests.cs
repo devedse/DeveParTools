@@ -406,3 +406,33 @@ public sealed class Par2RecoverySinkTests
         CollectionAssert.AreEqual(System.Security.Cryptography.MD5.HashData(Enumerable.Range(32, 36).Select(i => (byte)i).Concat(data).ToArray()), built);
     }
 }
+
+[TestClass]
+public sealed class Par2LargeSliceTests
+{
+    [TestMethod]
+    public void SlicesLargerThanAHashingPiece_VerifyAndRepair()
+    {
+        using var dir = new TestSupport.TempDir();
+        var a = dir.WriteRandom("a.bin", 3 * (3 << 20) + 12345, 1);
+        var b = dir.WriteRandom("b.bin", 1 << 20, 2);
+        Par2Creator.Create(new Par2CreateOptions { InputFiles = [a, b], OutputPath = dir["set.par2"], SliceSize = 3 << 20, RecoverySliceCount = 2 });
+        Assert.IsTrue(TestSupport.TestData.Verify(dir).AllFilesComplete, "the slice checksums built in pieces match");
+
+        var original = File.ReadAllBytes(a);
+        TestSupport.TestData.Corrupt(a, 5 << 20);
+        var report = TestSupport.TestData.Verify(dir);
+        Assert.IsTrue(Par2Repairer.Repair(report, new Par2RepairOptions { PurgeBackups = true }).Success);
+        CollectionAssert.AreEqual(original, File.ReadAllBytes(a));
+    }
+
+    [TestMethod]
+    public void SliceSizeLimit_ChoosingStopsThere_AndLargerIsRefused()
+    {
+        Assert.AreEqual(64L << 20, Par2Creator.ChooseSliceSize([200L << 20], 1));
+        using var dir = new TestSupport.TempDir();
+        var a = dir.WriteRandom("a.bin", 10_000, 1);
+        var e = Assert.ThrowsExactly<ArgumentException>(() => Par2Creator.Create(new Par2CreateOptions { InputFiles = [a], OutputPath = dir["set.par2"], SliceSize = 128L << 20 }));
+        StringAssert.Contains(e.Message, "64 MiB");
+    }
+}
