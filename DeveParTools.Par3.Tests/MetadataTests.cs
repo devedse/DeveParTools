@@ -140,6 +140,20 @@ public sealed class MetadataTests
         StringAssert.StartsWith(observer.Warnings.Single(), "Could not apply metadata to");
     }
 
+    [TestMethod]
+    public void FatAttributes_AreSetOnWindows_AndIgnoredElsewhere()
+    {
+        using var dir = new TempDir();
+        var f = dir.Write("fat", [1]);
+        var observer = new RecordingObserver();
+
+        // 0x21 = read-only + archive.
+        Par3Metadata.ApplyTo(f, [Par3Fat(new InputSetId(2), null) with { Attributes = 0x21 }], isDirectory: false, observer);
+        Assert.AreEqual(OperatingSystem.IsWindows(), File.GetAttributes(f).HasFlag(FileAttributes.ReadOnly));
+        Assert.AreEqual(0, observer.Logs.Count);
+        File.SetAttributes(f, FileAttributes.Normal);
+    }
+
     private static Par3UnixPermissionsPacket Unix(InputSetId set, ushort mode, DateTime? mtime)
         => new(-1, -1, mtime == null ? Par3UnixPermissionsPacket.UnsetTime : (mtime.Value - DateTime.UnixEpoch).Ticks * 100, uint.MaxValue, uint.MaxValue, mode, string.Empty, string.Empty, []) { SetId = set };
 
