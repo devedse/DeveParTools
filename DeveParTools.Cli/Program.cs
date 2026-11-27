@@ -195,6 +195,44 @@ namespace DeveParTools.Cli
                 return result.Success ? ExitCodes.Success : ExitCodes.RepairFailed;
             }));
 
+            // ---------------------------------------------------------------- extend
+            var extendCount = new Option<int?>("--recovery-count", "-c") { Description = "Number of new recovery blocks." };
+            var extendRedundancy = new Option<double?>("--redundancy", "-r") { Description = "New recovery data as a percentage of the input (default 10)." };
+            var extendFirst = new Option<long?>("--first") { Description = "Number of the first new recovery block (default: after the existing ones)." };
+            var extendVolumes = new Option<int?>("--volumes", "-n") { Description = "Number of new recovery files." };
+            var extendOutput = new Option<string?>("--output", "-o") { Description = "Base name for the new recovery files (default: the set's index file)." };
+            var extend = new Command("extend", "Add recovery blocks to an existing set (all input files must be present).");
+            extend.Aliases.Add("e");
+            extend.Arguments.Add(parArg);
+            extend.Arguments.Add(extraArg);
+            foreach (var o in new Option[] { verifyBase, extendCount, extendRedundancy, extendFirst, extendVolumes, extendOutput })
+            {
+                extend.Options.Add(o);
+            }
+
+            extend.SetAction(p => Guard(Ctx(p), c =>
+            {
+                var report = ParClient.Extend(new ParExtendRequest
+                {
+                    ParFile = p.GetValue(parArg)!,
+                    ExtraFiles = p.GetValue(extraArg) ?? [],
+                    BaseDirectory = p.GetValue(verifyBase),
+                    RecoveryBlockCount = p.GetValue(extendCount),
+                    RedundancyPercent = p.GetValue(extendRedundancy) ?? 10,
+                    FirstRecoveryBlock = p.GetValue(extendFirst),
+                    VolumeCount = p.GetValue(extendVolumes),
+                    OutputPath = p.GetValue(extendOutput),
+                }, c.Context);
+                c.Result("extended", new Dictionary<string, object?>
+                {
+                    ["format"] = report.Format.ToString(),
+                    ["recoveryBlocks"] = report.RecoveryBlocks,
+                    ["code"] = report.Description,
+                    ["files"] = report.WrittenFiles,
+                }, $"Added {report.RecoveryBlocks} recovery block(s) ({report.Description}).\n" + string.Join('\n', report.WrittenFiles.Select(f => "  " + f)));
+                return ExitCodes.Success;
+            }));
+
             // ---------------------------------------------------------------- list
             var list = new Command("list", "List the files of a recovery set (and their state).");
             list.Aliases.Add("l");
@@ -231,7 +269,7 @@ namespace DeveParTools.Cli
                 return ExitCodes.Success;
             }));
 
-            foreach (var cmd in new[] { create, verify, repair, list, bench, info })
+            foreach (var cmd in new[] { create, verify, repair, extend, list, bench, info })
             {
                 root.Subcommands.Add(cmd);
             }
@@ -246,7 +284,7 @@ namespace DeveParTools.Cli
             {
                 return body(c);
             }
-            catch (Exception e) when (e is ArgumentException or FormatException)
+            catch (Exception e) when (e is ArgumentException or FormatException or NotSupportedException)
             {
                 c.Error("invalid-arguments", e.Message);
                 return ExitCodes.InvalidArguments;
@@ -265,6 +303,12 @@ namespace DeveParTools.Cli
             {
                 c.Error("out-of-memory", e.Message);
                 return ExitCodes.MemoryError;
+            }
+            catch (InvalidOperationException e)
+            {
+                // An operation that cannot run in the current state (e.g. extending a set with missing input).
+                c.Error("not-possible", e.Message);
+                return ExitCodes.LogicError;
             }
             catch (Exception e)
             {

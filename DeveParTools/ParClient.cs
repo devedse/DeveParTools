@@ -135,6 +135,30 @@ public sealed class ParRepairRequest
     public bool RestoreLinks { get; init; }
 }
 
+/// <summary>Options for <see cref="ParClient.Extend"/>: add recovery blocks to an existing, complete set.</summary>
+public sealed class ParExtendRequest
+{
+    /// <summary>Any PAR file of the set.</summary>
+    public required string ParFile { get; init; }
+
+    public IReadOnlyList<string> ExtraFiles { get; init; } = [];
+
+    public string? BaseDirectory { get; init; }
+
+    /// <summary>Exact number of new recovery blocks (else <see cref="RedundancyPercent"/> of the input blocks).</summary>
+    public int? RecoveryBlockCount { get; init; }
+
+    public double RedundancyPercent { get; init; } = 10;
+
+    /// <summary>Number of the first new recovery block. Default: one past the highest one in the set.</summary>
+    public long? FirstRecoveryBlock { get; init; }
+
+    public int? VolumeCount { get; init; }
+
+    /// <summary>Base name for the new recovery files (default: the set's index file).</summary>
+    public string? OutputPath { get; init; }
+}
+
 public sealed record ParCreateReport(ParFormat Format, IReadOnlyList<string> WrittenFiles, long BlockSize, long InputBlocks, int RecoveryBlocks, string Description);
 
 /// <summary>One entry point for every PAR version: detects the format and dispatches to the format libraries.</summary>
@@ -256,6 +280,35 @@ public static class ParClient
                 return new ParCreateReport(format, r.WrittenFiles, (long)r.BlockSize, (long)r.InputBlocks, r.RecoveryBlocks, r.CodeDescription);
             }
         }
+    }
+
+    /// <summary>
+    /// Adds recovery blocks to an existing set whose input files are all present. The new blocks go to new recovery
+    /// files and work together with the existing ones.
+    /// </summary>
+    /// <exception cref="NotSupportedException">The format (PAR1) or the set's code cannot be extended.</exception>
+    /// <exception cref="InvalidOperationException">Input data is missing: repair first.</exception>
+    public static ParCreateReport Extend(ParExtendRequest request, OperationContext? context = null)
+    {
+        context ??= OperationContext.Default;
+        var format = Detect(request.ParFile);
+        if (format != ParFormat.Par3)
+        {
+            throw new NotSupportedException($"Extending {format} sets is not supported.");
+        }
+
+        var r = Par3Extender.Extend(new Par3ExtendOptions
+        {
+            Par3Path = request.ParFile,
+            ExtraDataFiles = request.ExtraFiles,
+            BaseDirectory = request.BaseDirectory,
+            RecoveryBlockCount = request.RecoveryBlockCount,
+            RedundancyPercent = request.RedundancyPercent,
+            FirstRecoveryBlock = request.FirstRecoveryBlock is long f ? checked((ulong)f) : null,
+            VolumeCount = request.VolumeCount,
+            OutputPath = request.OutputPath,
+        }, context);
+        return new ParCreateReport(format, r.WrittenFiles, (long)r.BlockSize, (long)r.InputBlocks, r.RecoveryBlocks, r.CodeDescription);
     }
 
     public static ParVerifyReport Verify(string parFile, ParVerifyRequest? request = null, OperationContext? context = null)

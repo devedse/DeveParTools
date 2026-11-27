@@ -665,7 +665,7 @@ public static class Par3Creator
         return Math.Max(1, (int)Math.Ceiling(n));
     }
 
-    private static void WriteRecovery(InputSetId setId, Fingerprint rootChecksum, Fingerprint matrixChecksum, byte[] generator, Par3Fft.Layout? fft, ulong blockCount,
+    internal static void WriteRecovery(InputSetId setId, Fingerprint rootChecksum, Fingerprint matrixChecksum, byte[] generator, Par3Fft.Layout? fft, ulong blockCount,
         List<ulong> recoveryIndices, List<Volume> volumes, Par3BlockSource blocks, long blockSize, List<byte[]> vital, byte[] creator, Par3CreateOptions options, OperationContext context, BlockStateMap map)
     {
         int recoveryCount = recoveryIndices.Count;

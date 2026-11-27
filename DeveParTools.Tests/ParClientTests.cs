@@ -378,4 +378,21 @@ public sealed class ParClientTests
 
         File.WriteAllBytes(path, data);
     }
+
+    [TestMethod]
+    public void Extend_Par3_AndUnsupportedFormats()
+    {
+        var files = MakeFiles(("x/one.bin", 70_000));
+        var par3 = Path.Combine(_dir, "x", "one.par3");
+        ParClient.Create(new ParCreateRequest { Inputs = files, OutputPath = par3, RecoveryBlockCount = 2, BlockSize = 4096, Par3Code = Par3Code.Cauchy });
+        var extended = ParClient.Extend(new ParExtendRequest { ParFile = par3, RecoveryBlockCount = 3, FirstRecoveryBlock = 10, VolumeCount = 1 });
+        Assert.AreEqual(ParFormat.Par3, extended.Format);
+        Assert.AreEqual(3, extended.RecoveryBlocks);
+        Assert.IsTrue(extended.WrittenFiles.Single().EndsWith("one.vol10+03.par3", StringComparison.Ordinal), extended.WrittenFiles.Single());
+        Assert.AreEqual(5, ParClient.Verify(par3).RecoveryBlocksAvailable);
+
+        var par1 = Path.Combine(_dir, "x", "one.par");
+        ParClient.Create(new ParCreateRequest { Inputs = files, OutputPath = par1 });
+        Assert.ThrowsExactly<NotSupportedException>(() => ParClient.Extend(new ParExtendRequest { ParFile = par1, RecoveryBlockCount = 1 }));
+    }
 }

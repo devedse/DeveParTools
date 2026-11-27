@@ -105,4 +105,39 @@ public sealed class Par3InteropTests
             CollectionAssert.AreEqual(data, File.ReadAllBytes(path), path);
         }
     }
+
+    /// <summary>
+    /// par3cmdline creates a set, we add recovery blocks, and par3cmdline repairs with only our new blocks
+    /// (its own recovery files are deleted first). This checks that extended blocks are compatible.
+    /// </summary>
+    [TestMethod]
+    [DynamicData(nameof(Codes))]
+    public void TheyCreate_WeExtend_TheyRepairWithOurBlocks(string exe, Par3Code code, string flag)
+    {
+        if (exe.Length == 0)
+        {
+            Assert.Inconclusive("par3cmdline not found (set DEVEPARTOOLS_PAR3CMDLINE or put par3 on the PATH).");
+        }
+
+        var dir = NewDir();
+        var files = MakeFiles(dir, 3);
+        var (rc, output) = ExternalTool.Run(exe, dir, "c", "-b40", "-c4", "-cm32", flag, "theirs.par3", "a.bin", "sub/b.bin", "t.bin");
+        Assert.AreEqual(0, rc, $"par3cmdline create ({flag}):\n{output}");
+        var theirVolumes = Directory.GetFiles(dir, "theirs.vol*.par3");
+
+        var extended = Par3Extender.Extend(new Par3ExtendOptions { Par3Path = Path.Combine(dir, "theirs.par3"), RecoveryBlockCount = 12 });
+        Assert.AreEqual(12, extended.RecoveryBlocks, code.ToString());
+        foreach (var v in theirVolumes)
+        {
+            File.Delete(v);
+        }
+
+        Damage(dir);
+        (rc, output) = ExternalTool.Run(exe, dir, "r", "theirs.par3");
+        Assert.AreEqual(0, rc, $"par3cmdline repair with extended blocks ({flag}):\n{output}");
+        foreach (var (path, data) in files)
+        {
+            CollectionAssert.AreEqual(data, File.ReadAllBytes(path), path);
+        }
+    }
 }

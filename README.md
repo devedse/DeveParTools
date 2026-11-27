@@ -30,6 +30,9 @@ fully managed C# with no native dependencies, and as fast as the native tools.
   - Multithreaded encoding and hashing.
   - PAR3's FFT Reed-Solomon code (a port of the Leopard algorithm) takes O(n log n) instead of O(n²).
   - BLAKE3 hashes up to 16 chunks at once with SIMD.
+- **Grow a set later.** `extend` adds recovery blocks to an existing PAR3 set, also one made by par3cmdline. The
+  Cauchy convention is detected from the existing recovery data, and FFT sets grow up to the maximum chosen at
+  creation (`--max-recovery`).
 - **Safe.** Stored file names cannot escape the target folder. Damaged files are kept as backups (`name.1`) unless
   you ask otherwise. PAR3 links and permissions are restored only on request.
 
@@ -87,6 +90,7 @@ damage, verify and repair.
 devepar create  <output.par2|.par3|.par> <files/folders...> [options]
 devepar verify  <parfile> [extra files...]
 devepar repair  <parfile> [extra files...] [--purge]
+devepar extend  <parfile> [extra files...] -c <count> | -r <percent>
 devepar list    <parfile>
 devepar bench | info
 ```
@@ -99,6 +103,7 @@ devepar create backup.par3 projects/ -r 5 --code fft -n 4 # PAR3 with the FFT co
 devepar verify photos.par2 --map                         # block map in the terminal
 devepar repair photos.par2 ~/Downloads/IMG_0001.jpg      # also look for data in an extra file
 devepar verify backup.par3 --json                        # NDJSON events for scripts and other UIs
+devepar extend backup.par3 -r 5                          # add 5% more recovery data to an existing PAR3 set
 ```
 
 Common options:

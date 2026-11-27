@@ -192,6 +192,8 @@ public sealed class CliTests
         Assert.AreEqual(ExitCodes.FileIoError, GuardThrowing(new IOException("io")));
         Assert.AreEqual(ExitCodes.FileIoError, GuardThrowing(new UnauthorizedAccessException("ua")));
         Assert.AreEqual(ExitCodes.MemoryError, GuardThrowing(new OutOfMemoryException("oom")));
+        Assert.AreEqual(ExitCodes.InvalidArguments, GuardThrowing(new NotSupportedException("ns")));
+        Assert.AreEqual(ExitCodes.LogicError, GuardThrowing(new NullReferenceException("npe")));
         Assert.AreEqual(ExitCodes.LogicError, GuardThrowing(new InvalidOperationException("bug")));
 
         static int GuardThrowing(Exception e)
@@ -300,5 +302,33 @@ public sealed class CliTests
         var grouped = TerminalBlockMap.Render(big, 20, useColor: false);
         Assert.IsTrue(grouped.Contains(TerminalBlockMap.Style(BlockState.Missing).Glyph, StringComparison.Ordinal));
         Assert.AreEqual(string.Empty, TerminalBlockMap.Render(new BlockStateMap(0, 0), 20, false));
+    }
+
+    [TestMethod]
+    public void Extend_AddsRecoveryFiles_ForPar3()
+    {
+        var a = MakeFile("ext/a.bin", 80_000);
+        var par3 = Path.Combine(_dir, "ext", "set.par3");
+        Assert.AreEqual(0, Run("create", par3, a, "-c", "2", "--code", "cauchy", "-s", "4096").Code);
+
+        var extend = Run("extend", par3, "-c", "5", "-n", "1");
+        Assert.AreEqual(0, extend.Code, extend.Err);
+        StringAssert.Contains(extend.Out, "Added 5 recovery block(s)");
+        Assert.IsTrue(File.Exists(Path.Combine(_dir, "ext", "set.vol2+5.par3")) || File.Exists(Path.Combine(_dir, "ext", "set.vol02+05.par3")), string.Join(", ", Directory.GetFiles(Path.Combine(_dir, "ext"))));
+
+        var json = Run("e", par3, "-r", "5", "--first", "50", "-o", Path.Combine(_dir, "ext", "more.par3"), "--json");
+        Assert.AreEqual(0, json.Code, json.Out);
+        Assert.AreEqual(1, Events(json.Out).Single(e => e.GetProperty("type").GetString() == "extended").GetProperty("recoveryBlocks").GetInt32());
+
+        // Missing input: not possible. PAR2: not supported (yet).
+        File.Delete(a);
+        var missing = Run("extend", par3, "-c", "1");
+        Assert.AreEqual(ExitCodes.LogicError, missing.Code);
+        StringAssert.Contains(missing.Err, "Repair the files");
+
+        var b = MakeFile("p2/b.bin", 5000);
+        var par2 = Path.Combine(_dir, "p2", "b.par2");
+        Assert.AreEqual(0, Run("create", par2, b).Code);
+        Assert.AreEqual(ExitCodes.InvalidArguments, Run("extend", par2, "-c", "1").Code);
     }
 }
