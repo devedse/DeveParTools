@@ -789,7 +789,7 @@ public static class Par3Creator
         hasher.Finalize(header.AsSpan(8, 16));
     }
 
-    private sealed class CauchyEncode(ulong blockCount, List<ulong> recoveryIndices, IRegionSource source, IRegionSink sink, long blockSize, LinearCombineOptions options, Par3CauchyConvention convention) : IFieldAction<bool>
+    internal sealed class CauchyEncode(ulong blockCount, List<ulong> recoveryIndices, IRegionSource source, IRegionSink sink, long blockSize, LinearCombineOptions options, Par3CauchyConvention convention) : IFieldAction<bool>
     {
         public bool Run<T>(IGaloisField<T> field) where T : IEquatable<T>
         {
@@ -809,7 +809,7 @@ public static class Par3Creator
         }
     }
 
-    private sealed class RecoverySink((FileStream Stream, long DataOffset, byte[] Header)[] outputs, long blockSize, bool[] done, BlockStateMap map) : IRegionSink
+    internal sealed class RecoverySink((FileStream Stream, long DataOffset, byte[] Header)[] outputs, long blockSize, bool[] done, BlockStateMap map) : IRegionSink
     {
         public void Write(int index, long offset, ReadOnlySpan<byte> source)
         {

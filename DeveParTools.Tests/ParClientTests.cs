@@ -395,4 +395,39 @@ public sealed class ParClientTests
         ParClient.Create(new ParCreateRequest { Inputs = files, OutputPath = par1 });
         Assert.ThrowsExactly<NotSupportedException>(() => ParClient.Extend(new ParExtendRequest { ParFile = par1, RecoveryBlockCount = 1 }));
     }
+
+    [TestMethod]
+    public void Inside_ZipCanBeVerifiedRepairedAndRestored_ThroughTheFacade()
+    {
+        var zipPath = Path.Combine(_dir, "photos.zip");
+        using (var zip = System.IO.Compression.ZipFile.Open(zipPath, System.IO.Compression.ZipArchiveMode.Create))
+        {
+            var rnd = new Random(8);
+            for (int i = 0; i < 3; i++)
+            {
+                var data = new byte[50_000];
+                rnd.NextBytes(data);
+                using var s = zip.CreateEntry($"img{i}.jpg", System.IO.Compression.CompressionLevel.NoCompression).Open();
+                s.Write(data);
+            }
+        }
+
+        var original = File.ReadAllBytes(zipPath);
+        Assert.ThrowsExactly<InvalidDataException>(() => ParClient.Detect(zipPath), "a plain archive is not a PAR file");
+        var inserted = ParClient.Insert(new ParInsertRequest { ArchivePath = zipPath, RedundancyPercent = 5 });
+        Assert.AreEqual("Zip", inserted.ArchiveFormat);
+        Assert.AreEqual(original.Length, inserted.OriginalLength);
+        Assert.AreEqual(ParFormat.Par3, ParClient.Detect(zipPath));
+
+        var bytes = File.ReadAllBytes(zipPath);
+        bytes[5000] ^= 0xFF;
+        File.WriteAllBytes(zipPath, bytes);
+        var report = ParClient.Verify(zipPath);
+        Assert.AreEqual(ParFileStatus.Damaged, report.Files.Single().Status);
+        Assert.IsTrue(ParClient.Repair(report, new ParRepairRequest { PurgeBackups = true }).Success);
+        Assert.IsTrue(ParClient.Verify(zipPath).AllFilesComplete);
+
+        Assert.AreEqual(original.Length, ParClient.RemoveInside(zipPath));
+        CollectionAssert.AreEqual(original, File.ReadAllBytes(zipPath));
+    }
 }

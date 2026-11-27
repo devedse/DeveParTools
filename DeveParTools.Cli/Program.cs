@@ -233,6 +233,50 @@ namespace DeveParTools.Cli
                 return ExitCodes.Success;
             }));
 
+            // ---------------------------------------------------------------- PAR inside archives
+            var archiveArg = new Argument<string>("archive") { Description = "A .zip, .7z or .rar file." };
+            var insertRedundancy = new Option<double?>("--redundancy", "-r") { Description = "Recovery data as a percentage (default 1)." };
+            var insertCount = new Option<int?>("--recovery-count", "-c") { Description = "Exact number of recovery blocks." };
+            var insertBlockSize = new Option<long?>("--block-size", "-s") { Description = "Block size in bytes (default: chosen automatically)." };
+            var insert = new Command("insert", "Put PAR3 recovery data inside a .zip/.7z/.rar so it can repair itself (verify/repair it like a PAR file).");
+            insert.Aliases.Add("i");
+            insert.Arguments.Add(archiveArg);
+            foreach (var o in new Option[] { insertRedundancy, insertCount, insertBlockSize })
+            {
+                insert.Options.Add(o);
+            }
+
+            insert.SetAction(p => Guard(Ctx(p), c =>
+            {
+                var r = ParClient.Insert(new ParInsertRequest
+                {
+                    ArchivePath = p.GetValue(archiveArg)!,
+                    RedundancyPercent = p.GetValue(insertRedundancy) ?? 1,
+                    RecoveryBlockCount = p.GetValue(insertCount),
+                    BlockSize = p.GetValue(insertBlockSize),
+                }, c.Context);
+                c.Result("inserted", new Dictionary<string, object?>
+                {
+                    ["format"] = r.ArchiveFormat,
+                    ["originalLength"] = r.OriginalLength,
+                    ["newLength"] = r.NewLength,
+                    ["blockSize"] = r.BlockSize,
+                    ["inputBlocks"] = r.InputBlocks,
+                    ["recoveryBlocks"] = r.RecoveryBlocks,
+                }, $"Added {r.RecoveryBlocks} recovery block(s) of {r.BlockSize} bytes inside the {r.ArchiveFormat} archive ({r.OriginalLength:N0} → {r.NewLength:N0} bytes).");
+                return ExitCodes.Success;
+            }));
+
+            var delete = new Command("delete", "Remove PAR3 data from inside an archive, restoring the original bytes (repair first if damaged).");
+            delete.Aliases.Add("d");
+            delete.Arguments.Add(archiveArg);
+            delete.SetAction(p => Guard(Ctx(p), c =>
+            {
+                long length = ParClient.RemoveInside(p.GetValue(archiveArg)!, c.Context);
+                c.Result("deleted", new Dictionary<string, object?> { ["length"] = length }, $"Removed the PAR3 data; the archive is back to {length:N0} bytes.");
+                return ExitCodes.Success;
+            }));
+
             // ---------------------------------------------------------------- list
             var list = new Command("list", "List the files of a recovery set (and their state).");
             list.Aliases.Add("l");
@@ -269,7 +313,7 @@ namespace DeveParTools.Cli
                 return ExitCodes.Success;
             }));
 
-            foreach (var cmd in new[] { create, verify, repair, extend, list, bench, info })
+            foreach (var cmd in new[] { create, verify, repair, extend, insert, delete, list, bench, info })
             {
                 root.Subcommands.Add(cmd);
             }

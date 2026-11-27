@@ -152,7 +152,7 @@ public static class Par3Repairer
                 var tmp = fv.TargetPath + ".deveparttools.tmp";
                 Directory.CreateDirectory(Path.GetDirectoryName(fv.TargetPath)!);
                 WriteFile(fv, verify, tmp, blockFile, rebuilt, handles);
-                if (HashFile(tmp, fv.File) != fv.File.Packet.FileHash)
+                if (!FileHashMatches(tmp, fv.File))
                 {
                     failed.Add(fv.TargetPath);
                     File.Delete(tmp);
@@ -597,32 +597,30 @@ public static class Par3Repairer
         }
     }
 
-    private static Fingerprint HashFile(string path, Par3FileEntry file)
+    private static bool FileHashMatches(string path, Par3FileEntry file)
     {
-        var hasher = new Blake3Hasher();
+        var hasher = new Par3FileHasher(file);
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20, FileOptions.SequentialScan);
         var buf = new byte[1 << 20];
-        ulong offset = 0;
         foreach (var c in file.Chunks)
         {
+            if (!c.Protected)
+            {
+                fs.Seek((long)c.Length, SeekOrigin.Current);
+                hasher.Unprotected(c.Length);
+                continue;
+            }
+
             for (ulong done = 0; done < c.Length;)
             {
                 int n = (int)Math.Min(c.Length - done, (ulong)buf.Length);
                 fs.ReadExactly(buf, 0, n);
-                if (!c.Protected)
-                {
-                    Array.Clear(buf, 0, n);
-                }
-
-                hasher.Update(buf.AsSpan(0, n));
+                hasher.Protected(buf.AsSpan(0, n));
                 done += (ulong)n;
             }
-
-            offset += c.Length;
         }
 
-        var h = new byte[16];
-        hasher.Finalize(h);
-        return Fingerprint.FromBytes(h);
+        return hasher.Matches(file.Packet.FileHash);
     }
+
 }

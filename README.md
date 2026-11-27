@@ -33,6 +33,10 @@ fully managed C# with no native dependencies, and as fast as the native tools.
 - **Grow a set later.** `extend` adds recovery blocks to an existing PAR3 set, also one made by par3cmdline. The
   Cauchy convention is detected from the existing recovery data, and FFT sets grow up to the maximum chosen at
   creation (`--max-recovery`).
+- **Archives that repair themselves ("PAR inside").** `insert` puts PAR3 recovery data inside a .zip, .7z or .rar.
+  The archive keeps working in archive tools (Info-ZIP, 7-Zip, .NET's ZipArchive), can be verified and repaired like
+  a PAR file, and `delete` restores the original bytes. It is compatible with par3cmdline's insert, delete, verify
+  itself and repair itself commands.
 - **Safe.** Stored file names cannot escape the target folder. Damaged files are kept as backups (`name.1`) unless
   you ask otherwise. PAR3 links and permissions are restored only on request.
 
@@ -91,6 +95,8 @@ devepar create  <output.par2|.par3|.par> <files/folders...> [options]
 devepar verify  <parfile> [extra files...]
 devepar repair  <parfile> [extra files...] [--purge]
 devepar extend  <parfile> [extra files...] -c <count> | -r <percent>
+devepar insert  <archive.zip|.7z|.rar> [-r <percent>]
+devepar delete  <archive.zip|.7z|.rar>
 devepar list    <parfile>
 devepar bench | info
 ```
@@ -104,6 +110,9 @@ devepar verify photos.par2 --map                         # block map in the term
 devepar repair photos.par2 ~/Downloads/IMG_0001.jpg      # also look for data in an extra file
 devepar verify backup.par3 --json                        # NDJSON events for scripts and other UIs
 devepar extend backup.par3 -r 5                          # add 5% more recovery data to an existing PAR3 set
+devepar insert photos.zip -r 3                           # the ZIP now carries recovery data for itself...
+devepar repair photos.zip                                # ...so it can repair itself
+devepar delete photos.zip                                # back to the original bytes
 ```
 
 Common options:

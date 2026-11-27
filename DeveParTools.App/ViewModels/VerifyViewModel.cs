@@ -128,7 +128,7 @@ public sealed partial class VerifyViewModel : OperationViewModel
             return;
         }
 
-        var files = await Dialogs.OpenFilesAsync("Open a PAR file", false, ["*.par2", "*.par3", "*.par", "*.p??"]);
+        var files = await Dialogs.OpenFilesAsync("Open a PAR file or a protected archive", false, ["*.par2", "*.par3", "*.par", "*.p??", "*.zip", "*.7z", "*.rar"]);
         if (files.Count > 0)
         {
             ParFile = files[0];

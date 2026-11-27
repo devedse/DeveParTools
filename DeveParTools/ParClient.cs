@@ -159,6 +159,21 @@ public sealed class ParExtendRequest
     public string? OutputPath { get; init; }
 }
 
+/// <summary>Options for <see cref="ParClient.Insert"/>.</summary>
+public sealed class ParInsertRequest
+{
+    public required string ArchivePath { get; init; }
+
+    /// <summary>Recovery data as a percentage of the archive's blocks (default 1%, like par3cmdline).</summary>
+    public double RedundancyPercent { get; init; } = 1;
+
+    public int? RecoveryBlockCount { get; init; }
+
+    public long? BlockSize { get; init; }
+}
+
+public sealed record ParInsertReport(string ArchiveFormat, long OriginalLength, long NewLength, long BlockSize, long InputBlocks, int RecoveryBlocks);
+
 public sealed record ParCreateReport(ParFormat Format, IReadOnlyList<string> WrittenFiles, long BlockSize, long InputBlocks, int RecoveryBlocks, string Description);
 
 /// <summary>One entry point for every PAR version: detects the format and dispatches to the format libraries.</summary>
@@ -198,8 +213,35 @@ public static class ParClient
             return ParFormat.Par1;
         }
 
+        // "PAR inside": an archive (or any file) that carries PAR3 packets near its end.
+        if (Par3Inside.ContainsPar3Packets(path))
+        {
+            return ParFormat.Par3;
+        }
+
         throw new InvalidDataException($"'{path}' is not a PAR file.");
     }
+
+    /// <summary>
+    /// Adds PAR3 recovery data inside a .zip, .7z or .rar archive, in place ("PAR inside", compatible with
+    /// par3cmdline's insert). The archive stays a valid archive and can then be verified and repaired by opening it
+    /// like any PAR file.
+    /// </summary>
+    public static ParInsertReport Insert(ParInsertRequest request, OperationContext? context = null)
+    {
+        var r = Par3Inside.Insert(new Par3InsideOptions
+        {
+            ArchivePath = request.ArchivePath,
+            RedundancyPercent = request.RedundancyPercent,
+            RecoveryBlockCount = request.RecoveryBlockCount,
+            BlockSize = request.BlockSize is long bs ? checked((ulong)bs) : null,
+        }, context);
+        return new ParInsertReport(r.Format.ToString(), r.OriginalLength, r.NewLength, (long)r.BlockSize, (long)r.InputBlocks, r.RecoveryBlocks);
+    }
+
+    /// <summary>Removes PAR3 data that <see cref="Insert"/> (or par3cmdline) put inside an archive; the archive must be intact.</summary>
+    /// <returns>The archive's original length.</returns>
+    public static long RemoveInside(string archivePath, OperationContext? context = null) => Par3Inside.Delete(archivePath, context);
 
     /// <summary>
     /// The format that belongs to a file name: <c>.par</c>, <c>.pNN</c> and <c>.qNN</c> (PAR1 index and volumes),

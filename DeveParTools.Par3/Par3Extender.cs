@@ -104,7 +104,7 @@ public static class Par3Extender
         {
             // All x (≤ input blocks) and y = MAX − R must differ: blocks + 1 + R < 2^bits − 1.
             ulong max = (1UL << (generator.Length * 8)) - 1;
-            if (blockCount + 1 + indices[^1] >= max)
+            if (blockCount + 1 + indices[^1] > max)
             {
                 throw new ArgumentException($"Recovery block {indices[^1]} does not fit the set's GF(2^{generator.Length * 8}) Cauchy code with {blockCount} input blocks.");
             }

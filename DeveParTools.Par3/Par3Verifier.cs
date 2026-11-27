@@ -239,7 +239,7 @@ public static class Par3Verifier
         var f = fv.File;
         long actualLen = new FileInfo(fv.TargetPath).Length;
         ulong bs = set.BlockSize;
-        var hasher = new Blake3Hasher();
+        var hasher = new Par3FileHasher(f);
         var buf = new byte[(int)Math.Min(bs, 1 << 24)];
         bool allPieces = true;
         var unverified = new List<(ulong Index, long Position)>();
@@ -248,15 +248,8 @@ public static class Par3Verifier
         {
             if (!c.Protected)
             {
-                // Unprotected bytes are hashed as zeros.
-                var zeros = new byte[Math.Min(c.Length, 1 << 20)];
-                for (ulong left = c.Length; left > 0;)
-                {
-                    int n = (int)Math.Min(left, (ulong)zeros.Length);
-                    hasher.Update(zeros.AsSpan(0, n));
-                    left -= (ulong)n;
-                }
-
+                // Not covered by any block; it only counts in the file hash (see Par3FileHasher).
+                hasher.Unprotected(c.Length);
                 offset += c.Length;
                 continue;
             }
@@ -298,7 +291,7 @@ public static class Par3Verifier
                 long pos = (long)(offset + full * bs);
                 var data = new byte[tail];
                 int n = handles.ReadPadded(fv.TargetPath, pos, data);
-                hasher.Update(data.AsSpan(0, n));
+                hasher.Protected(data.AsSpan(0, n));
                 bool ok = n == (int)tail;
                 if (tail < Par3Chunk.InlineLimit)
                 {
@@ -319,9 +312,7 @@ public static class Par3Verifier
             offset += c.Length;
         }
 
-        var h = new byte[16];
-        hasher.Finalize(h);
-        bool complete = allPieces && actualLen == (long)f.Length && Fingerprint.FromBytes(h) == f.Packet.FileHash;
+        bool complete = allPieces && actualLen == (long)f.Length && hasher.Matches(f.Packet.FileHash);
         if (complete)
         {
             foreach (var (idx, pos) in unverified)
@@ -334,7 +325,7 @@ public static class Par3Verifier
         return complete;
     }
 
-    private static bool HashRange(string path, long pos, long length, FileHandleCache handles, Blake3Hasher fileHasher, byte[] buf, out ulong crc, out Fingerprint fp)
+    private static bool HashRange(string path, long pos, long length, FileHandleCache handles, Par3FileHasher fileHasher, byte[] buf, out ulong crc, out Fingerprint fp)
     {
         crc = 0;
         var blockHasher = new Blake3Hasher();
@@ -344,7 +335,7 @@ public static class Par3Verifier
             int n = (int)Math.Min(length - done, buf.Length);
             int got = handles.ReadPadded(path, pos + done, buf.AsSpan(0, n));
             complete &= got == n;
-            fileHasher.Update(buf.AsSpan(0, got));
+            fileHasher.Protected(buf.AsSpan(0, got));
             blockHasher.Update(buf.AsSpan(0, n));
             crc = Crc64Iso.Compute(buf.AsSpan(0, n), crc);
             done += n;

@@ -331,4 +331,29 @@ public sealed class CliTests
         Assert.AreEqual(0, Run("create", par2, b).Code);
         Assert.AreEqual(ExitCodes.InvalidArguments, Run("extend", par2, "-c", "1").Code);
     }
+
+    [TestMethod]
+    public void InsertAndDelete_Archive()
+    {
+        var zipPath = Path.Combine(_dir, "a.zip");
+        using (var zip = System.IO.Compression.ZipFile.Open(zipPath, System.IO.Compression.ZipArchiveMode.Create))
+        {
+            using var s = zip.CreateEntry("x.bin", System.IO.Compression.CompressionLevel.NoCompression).Open();
+            s.Write(new Random(3).GetItems<byte>(Enumerable.Range(0, 256).Select(i => (byte)i).ToArray(), 80_000));
+        }
+
+        var original = File.ReadAllBytes(zipPath);
+        var insert = Run("insert", zipPath, "-r", "5");
+        Assert.AreEqual(0, insert.Code, insert.Err);
+        StringAssert.Contains(insert.Out, "inside the Zip archive");
+        Assert.AreEqual(ExitCodes.InsufficientCriticalData, Run("i", zipPath).Code, "already protected");
+
+        Assert.AreEqual(0, Run("verify", zipPath).Code);
+        var json = Run("d", zipPath, "--json");
+        Assert.AreEqual(0, json.Code, json.Out);
+        Assert.AreEqual(original.Length, Events(json.Out).Single(e => e.GetProperty("type").GetString() == "deleted").GetProperty("length").GetInt64());
+        CollectionAssert.AreEqual(original, File.ReadAllBytes(zipPath));
+
+        Assert.AreEqual(ExitCodes.InsufficientCriticalData, Run("insert", MakeFile("plain.bin", 100), "-c", "1", "-s", "64").Code);
+    }
 }
