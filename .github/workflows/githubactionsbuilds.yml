@@ -1,4 +1,5 @@
-# Purpose: build, test (incl. interop against par2cmdline and par3cmdline), measure coverage, package and release DeveParTools.
+# Purpose: build and test DeveParTools on every OS/architecture (incl. interop against par2cmdline and par3cmdline),
+# measure coverage on real and emulated CPUs, publish the CLI and the desktop app, and release from master.
 name: GitHubActionsBuilds
 
 on:
@@ -7,6 +8,7 @@ on:
 
 env:
   PAR3CMDLINE_COMMIT: 6673827
+  SDE_VERSION: 10.13.1
   DOTNET_CLI_TELEMETRY_OPTOUT: 1
   DOTNET_NOLOGO: 1
 
@@ -24,8 +26,7 @@ jobs:
       with:
         token: ${{secrets.github_token}}
 
-  # Unit + interop tests on every OS/architecture, so every SIMD path the runner supports is exercised
-  # (x64: SSSE3/AVX2/AVX-512/GFNI when available; arm64: NEON).
+  # Unit, interop and UI tests on every OS/architecture.
   test:
     needs: generate_version_number
     strategy:
@@ -35,7 +36,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v7
-    - name: Setup .NET Core
+    - name: Setup .NET
       uses: actions/setup-dotnet@v6
       with:
         dotnet-version: 10.0.x
@@ -53,59 +54,232 @@ jobs:
         cmake -S /tmp/par3cmdline/src -B /tmp/par3build -DCMAKE_BUILD_TYPE=Release
         cmake --build /tmp/par3build -j
         echo "DEVEPARTOOLS_PAR3CMDLINE=/tmp/par3build/par3cmd/par3" >> $GITHUB_ENV
-    - name: Show CPU features
-      shell: bash
-      run: |
-        if [ -f /proc/cpuinfo ]; then grep -m1 -o -w -E 'avx2|avx512bw|gfni' /proc/cpuinfo | sort -u || true; fi
     - name: dotnet restore
       run: dotnet restore DeveParTools.slnx
     - name: dotnet build
       run: dotnet build DeveParTools.slnx -c Release --no-restore /p:Version=1.0.${{needs.generate_version_number.outputs.build_number}}
+    - name: Show CPU features and kernels
+      run: dotnet DeveParTools.Cli/bin/Release/net10.0/devepar.dll info
     - name: dotnet test
       shell: bash
       run: |
-        for p in DeveParTools.Core.Tests DeveParTools.Par1.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests; do
+        for p in DeveParTools.Core.Tests DeveParTools.Par1.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests DeveParTools.Tests; do
           dotnet test --project $p/$p.csproj -c Release --no-build --verbosity normal
         done
         # Interop tests are inconclusive (skipped) where the reference tools are not available.
         dotnet test --project DeveParTools.InteropTests/DeveParTools.InteropTests.csproj -c Release --no-build --verbosity normal --ignore-exit-code 8
+    - name: Desktop app UI checks (headless, with screenshots)
+      if: runner.os == 'Linux' && runner.arch == 'X64'
+      run: dotnet run -c Release --no-build --project DeveParTools.App.Tests -- artifacts/ui-tests
+    - name: Upload UI screenshots
+      if: runner.os == 'Linux' && runner.arch == 'X64'
+      uses: actions/upload-artifact@v7
+      with:
+        name: ui-screenshots
+        path: artifacts/ui-tests
 
-  build_linux_with_codecov:
+  # Coverage of the libraries. Every upload goes to Codecov, which merges them: a line counts as covered when any
+  # run executed it. Together they reach every SIMD path:
+  #   linux-x64 / windows / macOS: whatever the runner has (plus interop with the reference tools on linux-x64)
+  #   linux-arm64: the NEON paths
+  #   sde-*: Intel's Software Development Emulator pretends to be another CPU, so the AVX-512 and GFNI paths
+  #          run (and are checked) even when the runner lacks them.
+  coverage:
     needs: generate_version_number
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - name: linux-x64
+          os: ubuntu-latest
+          interop: true
+        - name: linux-arm64
+          os: ubuntu-24.04-arm
+        - name: windows-x64
+          os: windows-latest
+        - name: macos-arm64
+          os: macos-latest
+        - name: sde-sapphirerapids
+          os: ubuntu-latest
+          sde: spr
+        - name: sde-alderlake
+          os: ubuntu-latest
+          sde: adl
+        - name: sde-skylakex
+          os: ubuntu-latest
+          sde: skx
+        - name: sde-sandybridge
+          os: ubuntu-latest
+          sde: snb
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
       id-token: write
     steps:
     - uses: actions/checkout@v7
-    - name: Setup .NET Core
+    - name: Setup .NET
       uses: actions/setup-dotnet@v6
       with:
         dotnet-version: 10.0.x
-    - name: Install par2cmdline (interop oracle)
-      run: sudo apt-get update -y && sudo apt-get install -y par2
-    - name: Build par3cmdline (interop oracle)
+    - name: Install par2cmdline and build par3cmdline (interop oracles)
+      if: matrix.interop
       run: |
+        sudo apt-get update -y && sudo apt-get install -y par2
         git clone https://github.com/Parchive/par3cmdline.git /tmp/par3cmdline
         git -C /tmp/par3cmdline checkout ${{ env.PAR3CMDLINE_COMMIT }}
         cmake -S /tmp/par3cmdline/src -B /tmp/par3build -DCMAKE_BUILD_TYPE=Release
         cmake --build /tmp/par3build -j
         echo "DEVEPARTOOLS_PAR3CMDLINE=/tmp/par3build/par3cmd/par3" >> $GITHUB_ENV
-    - name: Install tools
+    - name: Setup Intel SDE
+      if: matrix.sde
+      uses: petarpetrovt/setup-sde@v6.0
+      with:
+        environmentVariableName: SDE_PATH
+        sdeVersion: ${{ env.SDE_VERSION }}
+    - name: Install dotnet-coverage
       run: dotnet tool install --global dotnet-coverage
-    - name: dotnet restore
-      run: dotnet restore DeveParTools.slnx
     - name: dotnet build
-      run: dotnet build DeveParTools.slnx -c Release --no-restore /p:Version=1.0.${{needs.generate_version_number.outputs.build_number}}
-    - name: dotnet test with coverage
+      shell: bash
+      run: |
+        for p in DeveParTools.Core.Tests DeveParTools.Par1.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests DeveParTools.Tests DeveParTools.InteropTests; do
+          dotnet build $p/$p.csproj -c Release
+        done
+    - name: Tests with coverage
+      if: ${{ !matrix.sde }}
+      shell: bash
       run: |
         mkdir -p TestResults
-        dotnet-coverage collect --settings coverage.runsettings.xml -f cobertura -o TestResults/coverage.cobertura.xml \
-          "bash -c 'for p in DeveParTools.Core.Tests DeveParTools.Par1.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests DeveParTools.InteropTests; do dotnet test --project \$p/\$p.csproj -c Release --no-build || exit 1; done'"
-    - name: Run CodeCov
+        projects="DeveParTools.Core.Tests DeveParTools.Par1.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests DeveParTools.Tests"
+        if [ "${{ matrix.interop }}" = "true" ]; then projects="$projects DeveParTools.InteropTests"; fi
+        for p in $projects; do
+          (cd $p/bin/Release/net10.0 && dotnet-coverage collect --settings "$GITHUB_WORKSPACE/coverage.runsettings.xml" -f cobertura \
+            -o "$GITHUB_WORKSPACE/TestResults/$p.cobertura.xml" "dotnet exec $p.dll --ignore-exit-code 8")
+        done
+    - name: Core tests with coverage on an emulated CPU (${{ matrix.sde }})
+      if: matrix.sde
+      shell: bash
+      env:
+        # The emulator cannot host the runtime's diagnostics IPC and debugger pipes; the profiler (coverage) still works.
+        DOTNET_EnableWriteXorExecute: 0
+        DOTNET_EnableDiagnostics_IPC: 0
+        DOTNET_EnableDiagnostics_Debugger: 0
+      run: |
+        mkdir -p TestResults
+        "$SDE_PATH/sde64" -${{ matrix.sde }} -- dotnet DeveParTools.Cli/bin/Release/net10.0/devepar.dll info || true
+        cd DeveParTools.Core.Tests/bin/Release/net10.0
+        dotnet-coverage collect --settings "$GITHUB_WORKSPACE/coverage.runsettings.xml" -f cobertura \
+          -o "$GITHUB_WORKSPACE/TestResults/core-${{ matrix.sde }}.cobertura.xml" "$SDE_PATH/sde64 -${{ matrix.sde }} -- dotnet exec DeveParTools.Core.Tests.dll"
+    - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v7
       with:
         directory: ./TestResults
+        flags: ${{ matrix.name }}
         fail_ci_if_error: false
         use_oidc: true
-        verbose: true
+
+  # devepar command line tool: one self-contained executable (no .NET install needed), trimmed and ReadyToRun.
+  # Not Native AOT on purpose: AOT compiles for a baseline CPU and would never use the AVX2/AVX-512/GFNI kernels;
+  # with the JIT, the best kernels for the actual CPU are picked at run time.
+  publish_cli:
+    needs: [generate_version_number, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - rid: linux-x64
+          os: ubuntu-latest
+        - rid: linux-arm64
+          os: ubuntu-24.04-arm
+        - rid: win-x64
+          os: windows-latest
+        - rid: osx-arm64
+          os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v7
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: 10.0.x
+    - name: dotnet publish
+      run: dotnet publish DeveParTools.Cli/DeveParTools.Cli.csproj -c Release -r ${{ matrix.rid }} --self-contained -p:PublishSingleFile=true -p:PublishTrimmed=true -p:PublishReadyToRun=true -p:Version=1.0.${{needs.generate_version_number.outputs.build_number}} -o publish/cli
+    - name: Package
+      shell: bash
+      run: |
+        mkdir -p dist
+        cp LICENSE THIRD_PARTY_NOTICES.md publish/cli/
+        rm -f publish/cli/*.pdb publish/cli/*.dbg
+        if [ "${{ runner.os }}" = "Windows" ]; then
+          (cd publish/cli && 7z a -tzip "../../dist/devepar-${{ matrix.rid }}.zip" .)
+        else
+          tar -C publish/cli -czf "dist/devepar-${{ matrix.rid }}.tar.gz" .
+        fi
+    - uses: actions/upload-artifact@v7
+      with:
+        name: devepar-${{ matrix.rid }}
+        path: dist/*
+
+  # Desktop app: self-contained single file.
+  publish_app:
+    needs: [generate_version_number, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - rid: linux-x64
+          os: ubuntu-latest
+        - rid: win-x64
+          os: windows-latest
+        - rid: osx-arm64
+          os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v7
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v6
+      with:
+        dotnet-version: 10.0.x
+    - name: dotnet publish
+      run: dotnet publish DeveParTools.App/DeveParTools.App.csproj -c Release -r ${{ matrix.rid }} --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:Version=1.0.${{needs.generate_version_number.outputs.build_number}} -o publish/app
+    - name: Package
+      shell: bash
+      run: |
+        mkdir -p dist
+        cp LICENSE THIRD_PARTY_NOTICES.md publish/app/
+        rm -f publish/app/*.pdb
+        if [ "${{ runner.os }}" = "Windows" ]; then
+          (cd publish/app && 7z a -tzip "../../dist/DeveParTools-${{ matrix.rid }}.zip" .)
+        else
+          tar -C publish/app -czf "dist/DeveParTools-${{ matrix.rid }}.tar.gz" .
+        fi
+    - uses: actions/upload-artifact@v7
+      with:
+        name: app-${{ matrix.rid }}
+        path: dist/*
+
+  release:
+    needs: [generate_version_number, test, publish_cli, publish_app]
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Download CLI packages
+      uses: actions/download-artifact@v8
+      with:
+        path: dist
+        pattern: devepar-*
+        merge-multiple: true
+    - name: Download app packages
+      uses: actions/download-artifact@v8
+      with:
+        path: dist
+        pattern: app-*
+        merge-multiple: true
+    - name: Create release
+      uses: softprops/action-gh-release@v3
+      with:
+        tag_name: 1.0.${{needs.generate_version_number.outputs.build_number}}
+        name: DeveParTools 1.0.${{needs.generate_version_number.outputs.build_number}}
+        generate_release_notes: true
+        files: dist/*

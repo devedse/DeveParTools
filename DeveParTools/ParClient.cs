@@ -140,38 +140,47 @@ public sealed record ParCreateReport(ParFormat Format, IReadOnlyList<string> Wri
 /// <summary>One entry point for every PAR version: detects the format and dispatches to the format libraries.</summary>
 public static class ParClient
 {
-    /// <summary>Detects the format of a PAR file by its magic bytes (falls back to the extension).</summary>
+    /// <summary>
+    /// Detects the format of a PAR file from its first 8 bytes. If the file does not exist (for example a deleted
+    /// index file whose volumes are still there), the extension decides.
+    /// </summary>
+    /// <exception cref="InvalidDataException">The file exists but is not a PAR file, or the extension is unknown.</exception>
     public static ParFormat Detect(string path)
     {
+        if (!File.Exists(path))
+        {
+            return FromExtension(path) ?? throw new InvalidDataException($"'{path}' does not exist and its extension is not a PAR extension.");
+        }
+
         Span<byte> head = stackalloc byte[8];
-        int n = 0;
-        if (File.Exists(path))
+        using (var fs = File.OpenRead(path))
         {
-            using var fs = File.OpenRead(path);
-            n = fs.ReadAtLeast(head, 8, throwOnEndOfStream: false);
+            int n = fs.ReadAtLeast(head, 8, throwOnEndOfStream: false);
+            head = head[..n];
         }
 
-        if (n == 8)
+        if (head.SequenceEqual("PAR2\0PKT"u8))
         {
-            if (head.SequenceEqual("PAR2\0PKT"u8))
-            {
-                return ParFormat.Par2;
-            }
-
-            if (head.SequenceEqual("PAR3\0PKT"u8))
-            {
-                return ParFormat.Par3;
-            }
-
-            if (head.SequenceEqual("PAR\0\0\0\0\0"u8))
-            {
-                return ParFormat.Par1;
-            }
+            return ParFormat.Par2;
         }
 
-        return FromExtension(path) ?? throw new InvalidDataException($"'{path}' is not a recognised PAR file.");
+        if (head.SequenceEqual("PAR3\0PKT"u8))
+        {
+            return ParFormat.Par3;
+        }
+
+        if (head.SequenceEqual("PAR\0\0\0\0\0"u8))
+        {
+            return ParFormat.Par1;
+        }
+
+        throw new InvalidDataException($"'{path}' is not a PAR file.");
     }
 
+    /// <summary>
+    /// The format that belongs to a file name: <c>.par</c>, <c>.pNN</c> and <c>.qNN</c> (PAR1 index and volumes),
+    /// <c>.par2</c> or <c>.par3</c>. Returns null for anything else.
+    /// </summary>
     public static ParFormat? FromExtension(string path)
     {
         var ext = Path.GetExtension(path).ToLowerInvariant();
@@ -180,7 +189,7 @@ public static class ParClient
             ".par2" => ParFormat.Par2,
             ".par3" => ParFormat.Par3,
             ".par" => ParFormat.Par1,
-            _ when ext.Length == 4 && ext[1] >= 'p' && ext[1] <= 'z' && char.IsDigit(ext[2]) && char.IsDigit(ext[3]) => ParFormat.Par1,
+            _ when ext.Length == 4 && ext[1] is 'p' or 'q' && char.IsAsciiDigit(ext[2]) && char.IsAsciiDigit(ext[3]) => ParFormat.Par1,
             _ => null,
         };
     }
@@ -193,9 +202,10 @@ public static class ParClient
         {
             case ParFormat.Par1:
             {
-                int volumes = request.RecoveryBlockCount ?? Math.Max(1, (int)Math.Ceiling(request.Inputs.Count * request.RedundancyPercent / 100));
-                var written = Par1Set.Create(new Par1CreateOptions { InputFiles = request.Inputs, OutputPath = request.OutputPath, RecoveryVolumes = volumes, Comment = request.Comment }, context);
-                return new ParCreateReport(format, written, 0, request.Inputs.Count, volumes, "PAR1 Reed-Solomon (GF(2^8), one block per file)");
+                var files = ExpandFiles(request.Inputs, request.Recursive);
+                int volumes = request.RecoveryBlockCount ?? Math.Max(1, (int)Math.Ceiling(files.Count * request.RedundancyPercent / 100));
+                var written = Par1Set.Create(new Par1CreateOptions { InputFiles = files, OutputPath = request.OutputPath, RecoveryVolumes = volumes, Comment = request.Comment }, context);
+                return new ParCreateReport(format, written, 0, files.Count, volumes, "PAR1 Reed-Solomon (GF(2^8), one block per file)");
             }
 
             case ParFormat.Par2:
@@ -235,7 +245,7 @@ public static class ParClient
                     Dedup = request.Par3Dedup,
                     PackTails = request.Par3PackTails,
                     StoreData = request.Par3StoreData,
-                    VolumeCount = request.UniformVolumes ? request.VolumeCount : request.VolumeCount,
+                    VolumeCount = request.VolumeCount,
                     Comment = request.Comment,
                     UnixPermissions = request.Par3UnixPermissions,
                     FatPermissions = request.Par3FatPermissions,
@@ -346,7 +356,11 @@ public static class ParClient
         }
     }
 
-    /// <summary>Expands directories into their files (PAR1/PAR2 protect files only).</summary>
+    /// <summary>
+    /// Expands directories into their files, sorted by path (PAR1 and PAR2 protect files only). PAR files found inside
+    /// a directory are skipped, so a set created inside the folder it protects does not protect itself next time.
+    /// Files named explicitly are always kept.
+    /// </summary>
     public static List<string> ExpandFiles(IEnumerable<string> inputs, bool recursive)
     {
         var result = new List<string>();
@@ -355,7 +369,7 @@ public static class ParClient
             if (Directory.Exists(i))
             {
                 result.AddRange(Directory.EnumerateFiles(i, "*", recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly)
-                    .Where(f => !f.EndsWith(".par2", StringComparison.OrdinalIgnoreCase)).OrderBy(f => f, StringComparer.Ordinal));
+                    .Where(f => FromExtension(f) == null).OrderBy(f => f, StringComparer.Ordinal));
             }
             else
             {
