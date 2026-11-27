@@ -44,20 +44,3 @@ public sealed class PercentConverter : IValueConverter
 
     public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) => throw new NotSupportedException();
 }
-
-/// <summary>
-/// Adds the (usually negative) number in the parameter to a size, not going below 0. For example the Create page's
-/// options get <c>MaxHeight = column height − 220</c>, so the block grid below them keeps at least 220 pixels and the
-/// options scroll instead.
-/// </summary>
-public sealed class OffsetConverter : IValueConverter
-{
-    public static readonly OffsetConverter Instance = new();
-
-    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
-        => value is double size && double.TryParse(parameter as string, NumberStyles.Float, CultureInfo.InvariantCulture, out var offset)
-            ? Math.Max(0, size + offset)
-            : double.PositiveInfinity;
-
-    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) => throw new NotSupportedException();
-}

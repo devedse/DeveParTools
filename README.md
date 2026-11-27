@@ -80,14 +80,20 @@ state. Colour is never the only cue: states with similar colours also get a glyp
 | Repairing / Repaired ✓ | Being rebuilt right now / rebuilt and verified. |
 | Unrecoverable | Not enough recovery data. |
 
-**Create.** Drop files or folders, pick the format and the redundancy, and see an estimate of the recovery data size.
-PAR2 is the most compatible. PAR3 protects folder trees, is much faster for large sets thanks to the FFT code, and
-can store permissions. **Advanced options** has the rest of the command line's create options:
-- an exact number of recovery blocks;
-- the first block number;
-- equal-size or size-limited recovery files;
-- a base folder, and whether to include subfolders;
-- for PAR3: the maximum number of recovery blocks of an FFT set, the interleave, and the Cauchy coefficients.
+**Create.** Drop files or folders and pick the format. Every number shown is what will actually be written:
+- **Blocks:** a slider (from 1 block to the format's maximum) and a count box set the number of blocks; the block
+  size box sets the size instead. Both always show the actual count and size, for example 1,998 blocks when you
+  asked for 2,000, because every file is rounded up to whole blocks.
+- **Recovery:** the redundancy slider and the recovery block box are linked in the same way.
+- **Recovery files:** growing (1, 2, 4, 8…), equal, or never larger than the largest input file, with an optional
+  file count.
+- **Summary:** recovery data size, efficiency (how full the blocks are), how many missing files can be rebuilt
+  completely, the code, a preview of the recovery files, and warnings such as PAR2's 32,768-block limit.
+
+The file list shows the size and blocks of every file and folder. PAR2 is the most compatible. PAR3 protects folder
+trees, is much faster for large sets thanks to the FFT code, and can store permissions. **Advanced options** has the
+first block number, the base folder, whether to include subfolders, and for PAR3 the maximum number of recovery
+blocks of an FFT set, the interleave and the Cauchy coefficients.
 
 **More options** on the Verify page sets the folder that holds the protected files, and the details of adding
 recovery data: an exact count, the first block number, the number of files and their name. An archive with recovery

@@ -3,18 +3,32 @@
              xmlns:vm="using:DeveParTools.App.ViewModels"
              xmlns:c="using:DeveParTools.App.Controls"
              x:Class="DeveParTools.App.Views.CreateView"
-             x:DataType="vm:CreateViewModel">
+             x:DataType="vm:CreateViewModel"
+             c:FileDrop.Command="{Binding AddPathsCommand}">
+  <UserControl.Styles>
+    <!-- Label / value pairs in the summary. -->
+    <Style Selector="TextBlock.Label">
+      <Setter Property="Opacity" Value="0.75" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="TextBlock.Value">
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+  </UserControl.Styles>
+
   <Grid RowDefinitions="Auto,*,Auto" Margin="24,16,24,16" RowSpacing="14">
     <StackPanel Grid.Row="0" Spacing="2">
       <TextBlock Classes="Title" Text="Create a recovery set" />
-      <TextBlock Classes="Subtitle" Text="Choose what to protect and how much recovery data to make. Drop files or folders anywhere on this page." />
+      <TextBlock Classes="Subtitle" Text="Choose what to protect and how much recovery data to make. Every number below is what will really be written." />
     </StackPanel>
 
-    <Grid Grid.Row="1" ColumnDefinitions="*,*" ColumnSpacing="12">
-      <!-- Inputs and output -->
-      <Grid Grid.Column="0" RowDefinitions="*,Auto,Auto" RowSpacing="12">
+    <Grid Grid.Row="1" ColumnDefinitions="5*,6*" ColumnSpacing="12">
+      <!-- Left: inputs, output, create -->
+      <Grid Grid.Column="0" RowDefinitions="*,Auto,Auto,Auto" RowSpacing="12">
         <Border Classes="Card">
-          <Grid RowDefinitions="Auto,*" RowSpacing="8">
+          <Grid RowDefinitions="Auto,Auto,*,Auto" RowSpacing="8">
             <Grid ColumnDefinitions="*,Auto">
               <TextBlock Classes="Section" Margin="0" Text="Files and folders" VerticalAlignment="Center" />
               <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
@@ -23,95 +37,169 @@
                 <Button Content="Clear" Command="{Binding ClearInputsCommand}" />
               </StackPanel>
             </Grid>
-            <ListBox Grid.Row="1" ItemsSource="{Binding Inputs}" SelectedItem="{Binding SelectedInput}" Background="Transparent">
+            <!-- Column headers -->
+            <Grid Grid.Row="1" ColumnDefinitions="*,70,90,80,76" Margin="12,4,12,0" IsVisible="{Binding HasInputs}">
+              <TextBlock Classes="Caption" Text="Name" />
+              <TextBlock Grid.Column="1" Classes="Caption" Text="Files" HorizontalAlignment="Right" />
+              <TextBlock Grid.Column="2" Classes="Caption" Text="Size" HorizontalAlignment="Right" />
+              <TextBlock Grid.Column="3" Classes="Caption" Text="Blocks" HorizontalAlignment="Right" />
+            </Grid>
+            <ListBox Grid.Row="2" ItemsSource="{Binding Inputs}" SelectedItem="{Binding SelectedInput}" Background="Transparent">
               <ListBox.ItemTemplate>
-                <DataTemplate x:DataType="x:String">
-                  <Grid ColumnDefinitions="*,Auto">
-                    <TextBlock Text="{Binding}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
-                    <Button Grid.Column="1" Content="Remove" Padding="8,2"
+                <DataTemplate x:DataType="vm:CreateInputRow">
+                  <Grid ColumnDefinitions="*,70,90,80,76" ToolTip.Tip="{Binding Path}">
+                    <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1" Text="{Binding Files}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="2" Text="{Binding Size}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="3" Text="{Binding Blocks}" HorizontalAlignment="Right" VerticalAlignment="Center" />
+                    <Button Grid.Column="4" Content="Remove" Padding="8,2" HorizontalAlignment="Right"
                             Command="{Binding $parent[UserControl].((vm:CreateViewModel)DataContext).RemoveInputCommand}" CommandParameter="{Binding}" />
                   </Grid>
                 </DataTemplate>
               </ListBox.ItemTemplate>
             </ListBox>
+            <TextBlock Grid.Row="3" Text="{Binding InputSummary}" Opacity="0.8" TextWrapping="Wrap" />
           </Grid>
         </Border>
         <Border Grid.Row="1" Classes="Card">
-          <StackPanel Spacing="8">
-            <TextBlock Classes="Section" Margin="0" Text="Output" />
-            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-              <TextBox Text="{Binding OutputPath}" PlaceholderText="recovery.par2" />
-              <Button Grid.Column="1" Content="Browse…" Command="{Binding BrowseOutputCommand}" />
-            </Grid>
-            <TextBlock Text="{Binding Estimate}" TextWrapping="Wrap" Opacity="0.8" />
-          </StackPanel>
+          <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="10" RowSpacing="10">
+            <TextBlock Text="Save as" VerticalAlignment="Center" />
+            <TextBox Grid.Column="1" Text="{Binding OutputPath}" PlaceholderText="{Binding OutputPlaceholder}" />
+            <Button Grid.Column="2" Content="Browse…" Command="{Binding BrowseOutputCommand}" />
+            <TextBlock Grid.Row="1" Text="Comment" VerticalAlignment="Center" />
+            <TextBox Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Text="{Binding Comment}" PlaceholderText="optional, stored in the set" />
+          </Grid>
         </Border>
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="8">
+        <Grid Grid.Row="2" ColumnDefinitions="Auto,Auto,*" ColumnSpacing="8">
           <Button Classes="accent" Content="Create recovery set" Command="{Binding CreateCommand}" Padding="20,8" />
-          <Button Content="Cancel" Command="{Binding CancelCommand}" />
-          <StackPanel VerticalAlignment="Center" Spacing="4" Margin="12,0,0,0" Width="300">
+          <Button Grid.Column="1" Content="Cancel" Command="{Binding CancelCommand}" />
+          <StackPanel Grid.Column="2" VerticalAlignment="Center" Spacing="4" Margin="12,0,0,0">
             <TextBlock Classes="Caption" Text="{Binding Stage}" />
-            <ProgressBar Minimum="0" Maximum="100" Value="{Binding Progress}" Height="8" />
+            <ProgressBar Minimum="0" Maximum="100" Value="{Binding Progress}" Height="8" MinWidth="0" />
           </StackPanel>
-        </StackPanel>
+        </Grid>
+        <TextBlock Grid.Row="3" Text="{Binding StatusText}" TextWrapping="Wrap" IsVisible="{Binding StatusText, Converter={x:Static ObjectConverters.IsNotNull}}" />
       </Grid>
 
-      <!-- Options and live grid -->
-      <Grid Grid.Column="1" RowDefinitions="Auto,*" RowSpacing="12" x:Name="OptionsColumn">
-        <ScrollViewer HorizontalScrollBarVisibility="Disabled"
-                      MaxHeight="{Binding #OptionsColumn.Bounds.Height, Converter={x:Static c:OffsetConverter.Instance}, ConverterParameter=-232}">
-        <Border Classes="Card">
-          <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10">
-            <TextBlock Text="Format" VerticalAlignment="Center" />
-            <ComboBox Grid.Column="1" ItemsSource="{Binding Formats}" SelectedIndex="{Binding FormatIndex}" HorizontalAlignment="Stretch" />
-            <TextBlock Grid.Row="1" Text="Redundancy" VerticalAlignment="Center" />
-            <Grid Grid.Row="1" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="10">
-              <Slider Minimum="1" Maximum="100" Value="{Binding Redundancy}" TickFrequency="1" IsSnapToTickEnabled="True" IsEnabled="{Binding UsesRedundancy}" />
-              <TextBlock Grid.Column="1" VerticalAlignment="Center" Text="{Binding Redundancy, StringFormat='{}{0:0}%'}" Width="44" />
-            </Grid>
-            <TextBlock Grid.Row="2" Text="Blocks (target)" VerticalAlignment="Center" />
-            <NumericUpDown Grid.Row="2" Grid.Column="1" Value="{Binding BlockCount}" Minimum="1" Maximum="1000000" FormatString="N0" />
-            <TextBlock Grid.Row="3" Text="Block size (bytes)" VerticalAlignment="Center" />
-            <NumericUpDown Grid.Row="3" Grid.Column="1" Value="{Binding BlockSize}" Minimum="0" PlaceholderText="automatic" FormatString="N0" />
-            <TextBlock Grid.Row="4" Text="Recovery files" VerticalAlignment="Center" />
-            <NumericUpDown Grid.Row="4" Grid.Column="1" Value="{Binding VolumeCount}" Minimum="0" PlaceholderText="automatic (1, 2, 4, 8…)" FormatString="N0" />
-            <TextBlock Grid.Row="5" Text="Comment" VerticalAlignment="Center" />
-            <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding Comment}" />
-            <StackPanel Grid.Row="6" Grid.ColumnSpan="2" Spacing="8" IsVisible="{Binding IsPar3}">
-              <TextBlock Classes="Section" Margin="0,6,0,0" Text="PAR3 options" />
-              <Grid ColumnDefinitions="Auto,*" ColumnSpacing="14">
-                <TextBlock Text="Code" VerticalAlignment="Center" />
-                <ComboBox Grid.Column="1" ItemsSource="{Binding Codes}" SelectedIndex="{Binding CodeIndex}" HorizontalAlignment="Stretch" />
+      <!-- Right: choices with their real numbers, then the live block grid -->
+      <Grid Grid.Column="1" RowDefinitions="*,Auto" RowSpacing="12">
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+          <StackPanel Spacing="12">
+            <!-- Format and blocks -->
+            <Border Classes="Card">
+              <Grid ColumnDefinitions="Auto,*,150" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10">
+                <TextBlock Text="Format" VerticalAlignment="Center" />
+                <ComboBox Grid.Column="1" Grid.ColumnSpan="2" ItemsSource="{Binding Formats}" SelectedIndex="{Binding FormatIndex}" HorizontalAlignment="Stretch" />
+
+                <TextBlock Grid.Row="1" Text="Blocks" VerticalAlignment="Center" />
+                <Slider Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="{Binding BlockSliderMaximum}" Value="{Binding BlockSlider}"
+                        IsEnabled="{Binding HasBlockChoice}" ToolTip.Tip="More blocks: finer repair, but more work and more metadata." />
+                <NumericUpDown Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" Value="{Binding BlockCount}" Minimum="1" FormatString="N0" IsEnabled="{Binding HasBlockChoice}"
+                               AutomationProperties.Name="Number of blocks" />
+
+                <TextBlock Grid.Row="2" Text="Block size" VerticalAlignment="Center" />
+                <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
+                  <TextBlock Classes="Value" Text="{Binding BlockSizeText}" />
+                  <TextBlock Classes="Label" Text="{Binding EfficiencyText, StringFormat='efficiency {0}'}"
+                             ToolTip.Tip="How full the blocks are: the last block of each file is partly empty." />
+                </StackPanel>
+                <NumericUpDown Grid.Row="2" Grid.Column="2" Value="{Binding BlockSize}" Minimum="4" Increment="{Binding BlockSizeStep}" FormatString="N0"
+                               IsEnabled="{Binding HasBlockChoice}" AutomationProperties.Name="Block size in bytes" />
+
+                <TextBlock Grid.Row="3" Grid.ColumnSpan="3" Classes="Caption" Text="PAR1 uses one block per file." IsVisible="{Binding IsPar1}" />
               </Grid>
-              <WrapPanel>
-                <CheckBox Content="Deduplicate identical blocks" IsChecked="{Binding Dedup}" Margin="0,0,16,0" />
-                <CheckBox Content="Pack file tails" IsChecked="{Binding PackTails}" Margin="0,0,16,0" />
-                <CheckBox Content="Store data (archive)" IsChecked="{Binding StoreData}" Margin="0,0,16,0" />
-                <CheckBox Content="Store Unix permissions" IsChecked="{Binding UnixPermissions}" Margin="0,0,16,0" />
-                <CheckBox Content="Store Windows attributes" IsChecked="{Binding FatPermissions}" Margin="0,0,16,0" />
-                <CheckBox Content="Reproducible output" IsChecked="{Binding Reproducible}" />
-              </WrapPanel>
-              <CheckBox IsVisible="{Binding CanInsertIntoArchive}" IsChecked="{Binding InsideArchive}"
-                        Content="Store the recovery data inside the archive itself, so it can repair itself (PAR inside)" />
-            </StackPanel>
-            <Expander Grid.Row="7" Grid.ColumnSpan="2" Header="Advanced options" HorizontalAlignment="Stretch" Padding="12,8">
-              <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10">
-                <TextBlock Text="Recovery blocks (exact)" VerticalAlignment="Center" />
-                <NumericUpDown Grid.Column="1" Value="{Binding RecoveryCount}" Minimum="0" Maximum="1000000" PlaceholderText="from the redundancy" FormatString="N0"
-                               ToolTip.Tip="An exact number of recovery blocks instead of a percentage. Leave empty to use the redundancy." />
-                <TextBlock Grid.Row="1" Text="First recovery block" VerticalAlignment="Center" />
-                <NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding FirstRecoveryBlock}" Minimum="0" Maximum="65535" PlaceholderText="0" FormatString="N0"
+            </Border>
+
+            <!-- Recovery -->
+            <Border Classes="Card">
+              <StackPanel Spacing="10">
+                <Grid ColumnDefinitions="Auto,*,150" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10">
+                  <TextBlock Text="Redundancy" VerticalAlignment="Center" />
+                  <Slider Grid.Column="1" Minimum="0" Maximum="100" Value="{Binding Redundancy}" />
+                  <TextBlock Grid.Column="2" Classes="Value" Text="{Binding RedundancyText}" HorizontalAlignment="Right" />
+
+                  <TextBlock Grid.Row="1" Text="Recovery blocks" VerticalAlignment="Center" />
+                  <TextBlock Grid.Row="1" Grid.Column="1" Classes="Label" Text="exact number (instead of the percentage)" />
+                  <NumericUpDown Grid.Row="1" Grid.Column="2" Value="{Binding RecoveryCount}" Minimum="0" Maximum="{Binding RecoveryCountMaximum}" FormatString="N0"
+                                 AutomationProperties.Name="Number of recovery blocks" />
+
+                  <TextBlock Grid.Row="2" Text="Recovery files" VerticalAlignment="Center" />
+                  <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding VolumeSizings}" SelectedIndex="{Binding VolumeSizingIndex}" HorizontalAlignment="Stretch"
+                            IsEnabled="{Binding HasBlockChoice}" />
+                  <NumericUpDown Grid.Row="2" Grid.Column="2" Value="{Binding VolumeCount}" Minimum="0" PlaceholderText="automatic" FormatString="N0"
+                                 IsEnabled="{Binding HasBlockChoice}" AutomationProperties.Name="Number of recovery files" />
+                </Grid>
+
+                <!-- What the choices give -->
+                <Border Padding="12" CornerRadius="6" Background="{DynamicResource SubtleFillColorSecondaryBrush}">
+                  <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="6">
+                    <TextBlock Classes="Label" Text="Recovery data" />
+                    <TextBlock Grid.Column="1" Classes="Value" Text="{Binding RecoveryDataText}" />
+                    <TextBlock Grid.Row="1" Classes="Label" Text="Missing files it can rebuild" />
+                    <TextBlock Grid.Row="1" Grid.Column="1" Classes="Value" Text="{Binding RebuildText}"
+                               ToolTip.Tip="Whole files that can be recreated when they are gone completely: if the largest ones are lost … if the smallest ones are lost." />
+                    <TextBlock Grid.Row="2" Classes="Label" Text="Code" />
+                    <TextBlock Grid.Row="2" Grid.Column="1" Classes="Value" Text="{Binding CodeText}" />
+                    <ItemsControl Grid.Row="3" Grid.ColumnSpan="2" ItemsSource="{Binding Warnings}" IsVisible="{Binding HasWarnings}">
+                      <ItemsControl.ItemTemplate>
+                        <DataTemplate x:DataType="x:String">
+                          <TextBlock Text="{Binding StringFormat='⚠ {0}'}" TextWrapping="Wrap" Foreground="{DynamicResource BlockDamagedBrush}" Margin="0,4,0,0" />
+                        </DataTemplate>
+                      </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                  </Grid>
+                </Border>
+
+                <Expander Header="{Binding RecoveryFilesHeader}" HorizontalAlignment="Stretch" Padding="12,8">
+                  <ItemsControl ItemsSource="{Binding RecoveryFiles}">
+                    <ItemsControl.ItemTemplate>
+                      <DataTemplate x:DataType="vm:RecoveryFileRow">
+                        <Grid ColumnDefinitions="*,90,90" Margin="0,2">
+                          <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                          <TextBlock Grid.Column="1" Text="{Binding Blocks, StringFormat='{}{0} blocks'}" HorizontalAlignment="Right" Opacity="0.8" />
+                          <TextBlock Grid.Column="2" Text="{Binding Size}" HorizontalAlignment="Right" />
+                        </Grid>
+                      </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                  </ItemsControl>
+                </Expander>
+              </StackPanel>
+            </Border>
+
+            <!-- PAR3 -->
+            <Border Classes="Card" IsVisible="{Binding IsPar3}">
+              <StackPanel Spacing="8">
+                <TextBlock Classes="Section" Margin="0" Text="PAR3 options" />
+                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="14">
+                  <TextBlock Text="Code" VerticalAlignment="Center" />
+                  <ComboBox Grid.Column="1" ItemsSource="{Binding Codes}" SelectedIndex="{Binding CodeIndex}" HorizontalAlignment="Stretch" />
+                </Grid>
+                <WrapPanel>
+                  <CheckBox Content="Deduplicate identical blocks" IsChecked="{Binding Dedup}" Margin="0,0,16,0" />
+                  <CheckBox Content="Pack file tails" IsChecked="{Binding PackTails}" Margin="0,0,16,0" />
+                  <CheckBox Content="Store data (archive)" IsChecked="{Binding StoreData}" Margin="0,0,16,0" />
+                  <CheckBox Content="Store Unix permissions" IsChecked="{Binding UnixPermissions}" Margin="0,0,16,0" />
+                  <CheckBox Content="Store Windows attributes" IsChecked="{Binding FatPermissions}" Margin="0,0,16,0" />
+                  <CheckBox Content="Reproducible output" IsChecked="{Binding Reproducible}" />
+                </WrapPanel>
+                <CheckBox IsVisible="{Binding CanInsertIntoArchive}" IsChecked="{Binding InsideArchive}"
+                          Content="Store the recovery data inside the archive itself, so it can repair itself (PAR inside)" />
+              </StackPanel>
+            </Border>
+
+            <!-- Rarely needed -->
+            <Expander Header="Advanced options" HorizontalAlignment="Stretch" Padding="12,8">
+              <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10">
+                <TextBlock Text="First recovery block" VerticalAlignment="Center" />
+                <NumericUpDown Grid.Column="1" Value="{Binding FirstRecoveryBlock}" Minimum="0" Maximum="65535" PlaceholderText="0" FormatString="N0"
                                ToolTip.Tip="Number of the first recovery block. Use another start to make extra recovery files for the same files later." />
-                <TextBlock Grid.Row="2" Text="Recovery file sizes" VerticalAlignment="Center" />
-                <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding VolumeSizings}" SelectedIndex="{Binding VolumeSizingIndex}" HorizontalAlignment="Stretch" />
-                <TextBlock Grid.Row="3" Text="Base folder" VerticalAlignment="Center" />
-                <Grid Grid.Row="3" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                  <TextBox Text="{Binding BaseDirectory}" PlaceholderText="the folder of the inputs"
-                           ToolTip.Tip="File names are stored relative to this folder." />
+                <TextBlock Grid.Row="1" Text="Base folder" VerticalAlignment="Center" />
+                <Grid Grid.Row="1" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                  <TextBox Text="{Binding BaseDirectory}" PlaceholderText="the folder of the recovery set" ToolTip.Tip="File names are stored relative to this folder." />
                   <Button Grid.Column="1" Content="Browse…" Command="{Binding BrowseBaseCommand}" />
                 </Grid>
-                <CheckBox Grid.Row="4" Grid.ColumnSpan="2" Content="Include subfolders" IsChecked="{Binding Recursive}" />
-                <Grid Grid.Row="5" Grid.ColumnSpan="2" ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10" IsVisible="{Binding IsPar3}">
+                <CheckBox Grid.Row="2" Grid.ColumnSpan="2" Content="Include subfolders" IsChecked="{Binding Recursive}" />
+                <Grid Grid.Row="3" Grid.ColumnSpan="2" ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="14" RowSpacing="10" IsVisible="{Binding IsPar3}">
                   <TextBlock Text="Most recovery blocks ever (FFT)" VerticalAlignment="Center" />
                   <NumericUpDown Grid.Column="1" Value="{Binding MaxRecoveryBlocks}" Minimum="0" Maximum="32768" PlaceholderText="automatic" FormatString="N0"
                                  ToolTip.Tip="An FFT set can only be extended up to this number of recovery blocks." />
@@ -123,16 +211,15 @@
                 </Grid>
               </Grid>
             </Expander>
-          </Grid>
-        </Border>
+          </StackPanel>
         </ScrollViewer>
-        <Border Grid.Row="1" Classes="Card" Padding="12">
-          <Grid RowDefinitions="Auto,*,Auto" RowSpacing="8">
+
+        <Border Grid.Row="1" Classes="Card" Padding="12" Height="230" IsVisible="{Binding ShowBlocks}">
+          <Grid RowDefinitions="Auto,*" RowSpacing="8">
             <TextBlock Classes="Section" Margin="0" Text="Blocks processed" />
             <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled">
               <c:BlockGrid Map="{Binding Map}" Version="{Binding MapVersion}" CellSize="{Binding CellSize}" />
             </ScrollViewer>
-            <TextBlock Grid.Row="2" Text="{Binding StatusText}" TextWrapping="Wrap" />
           </Grid>
         </Border>
       </Grid>

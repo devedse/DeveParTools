@@ -96,9 +96,12 @@ shell.Create.FormatIndex = 1;
 shell.Create.Redundancy = 30;
 shell.Create.BlockCount = 3000;
 shell.Create.OutputPath = Path.Combine(work, "backup.par3");
+Await(shell.Create.Planned);
+Check(shell.Create.Plan is { InputBlocks: > 2500 and <= 3000, Files.Count: 5 } && shell.Create.RecoveryFiles.Count > 0, $"the plan shows the real set: {shell.Create.Plan?.InputBlocks} blocks of {shell.Create.BlockSizeText}");
+Save(window, output, "create");
 Await(shell.Create.CreateCommand.ExecuteAsync(null));
 Check(File.Exists(Path.Combine(work, "backup.par3")), "PAR3 set created");
-Save(window, output, "create");
+Save(window, output, "create-done");
 
 // Damage: overwrite part of a photo, delete another, shift the video.
 var photo = File.ReadAllBytes(Path.Combine(work, "photos/holiday-001.jpg"));
@@ -177,7 +180,9 @@ shell.Create.FirstRecoveryBlock = 10;
 shell.Create.VolumeSizingIndex = 1;
 shell.Create.VolumeCount = 2;
 shell.Create.OutputPath = Path.Combine(work, "advanced.par2");
-Check(!shell.Create.UsesRedundancy && shell.Create.Estimate.Contains("6 block(s)", StringComparison.Ordinal), "an exact recovery count replaces the redundancy: " + shell.Create.Estimate);
+Await(shell.Create.Planned);
+Check(shell.Create.RecoveryCount == 6 && shell.Create.RecoveryFiles.Count == 2 && shell.Create.RecoveryFiles[0].Name.StartsWith("advanced.vol10+", StringComparison.Ordinal),
+    "an exact recovery count, first block and equal files are planned: " + string.Join(", ", shell.Create.RecoveryFiles.Select(f => f.Name)));
 Settle();
 foreach (var expander in window.GetVisualDescendants().OfType<Expander>().Where(e => e.Header as string == "Advanced options"))
 {
@@ -209,6 +214,25 @@ Save(window, output, "verify-options");
 Await(shell.Verify.ExtendCommand.ExecuteAsync(null));
 var more = Directory.GetFiles(work, "more.vol*.par2").Select(Path.GetFileName).ToList();
 Check(more.Count == 1 && more[0]!.StartsWith("more.vol16+", StringComparison.Ordinal), "4 more blocks from number 16 in 1 file: " + string.Join(", ", more));
+
+// The linked controls show what will really be made.
+shell.Page = AppPage.Create;
+shell.Create.Redundancy = 25;
+var linked = shell.Create.Plan!;
+Check(linked.RecoveryBlocks == (int)Math.Ceiling(linked.InputBlocks * 0.25) && shell.Create.RecoveryCount == linked.RecoveryBlocks, $"the redundancy slider sets the recovery count: {linked.RecoveryBlocks} of {linked.InputBlocks}");
+shell.Create.BlockCount = 100;
+Check(shell.Create.BlockCount is > 0 and <= 100 && shell.Create.BlockSize == shell.Create.Plan!.BlockSize, $"a target block count gives the real count and size: {shell.Create.BlockCount} × {shell.Create.BlockSize}");
+shell.Create.BlockSize = 4097;
+long videoLength = new FileInfo(Path.Combine(work, "video.mp4")).Length, notesLength = new FileInfo(Path.Combine(work, "notes.txt")).Length;
+Check(shell.Create.BlockSize == 4100 && shell.Create.BlockCount == (videoLength + 4099) / 4100 + (notesLength + 4099) / 4100, $"a typed block size is rounded up to a multiple of 4 and gives the count: {shell.Create.BlockCount}");
+shell.Create.RecoveryCount = 7;
+Check(shell.Create.RedundancyText == $"{700.0 / (double)shell.Create.BlockCount!:0.00}%", "an exact recovery count shows the real percentage: " + shell.Create.RedundancyText);
+shell.Create.BlockSlider = 5;
+Check(shell.Create.BlockCount is > 0 and <= 32, "the block slider (log scale) sets a target of 2^5 = 32 blocks: " + shell.Create.BlockCount);
+Check(shell.Create.RebuildText.Contains(" of 2", StringComparison.Ordinal) && shell.Create.EfficiencyText.EndsWith('%'), $"rebuild {shell.Create.RebuildText}, efficiency {shell.Create.EfficiencyText}");
+shell.Create.FormatIndex = 2;
+Check(!shell.Create.HasBlockChoice && shell.Create.BlockCount == 2, "PAR1: one block per file, no block choice");
+shell.Create.FormatIndex = 0;
 
 shell.Page = AppPage.Benchmark;
 shell.Benchmark.TimePerItem = TimeSpan.FromMilliseconds(120);

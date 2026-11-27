@@ -3,7 +3,8 @@
              xmlns:vm="using:DeveParTools.App.ViewModels"
              xmlns:c="using:DeveParTools.App.Controls"
              x:Class="DeveParTools.App.Views.VerifyView"
-             x:DataType="vm:VerifyViewModel">
+             x:DataType="vm:VerifyViewModel"
+             c:FileDrop.Command="{Binding OpenDroppedCommand}">
   <Grid RowDefinitions="Auto,Auto,Auto,*,Auto" Margin="24,16,24,16" RowSpacing="14">
     <!-- Header -->
     <StackPanel Grid.Row="0" Spacing="2">

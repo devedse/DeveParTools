@@ -334,6 +334,16 @@ public sealed partial class VerifyViewModel : OperationViewModel
         StatusText = message;
     }
 
+    /// <summary>Opens the first dropped file.</summary>
+    [RelayCommand]
+    private async Task OpenDroppedAsync(IReadOnlyList<string> paths)
+    {
+        if (paths.FirstOrDefault(File.Exists) is { } file)
+        {
+            await OpenAsync(file);
+        }
+    }
+
     /// <summary>Opens a file passed on the command line or by a file association.</summary>
     public async Task OpenAsync(string path)
     {
