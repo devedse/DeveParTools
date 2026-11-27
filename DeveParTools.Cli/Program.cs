@@ -209,10 +209,12 @@ namespace DeveParTools.Cli
             // ---------------------------------------------------------------- bench / info
             var size = new Option<int>("--size") { Description = "Buffer size in KiB.", DefaultValueFactory = _ => 256 };
             var bench = new Command("bench", "Measure the speed of the SIMD kernels, hashes and the FFT code on this machine.");
+            var time = new Option<int>("--time") { Description = "Milliseconds per measurement (the first third warms up).", DefaultValueFactory = _ => 450 };
             bench.Options.Add(size);
+            bench.Options.Add(time);
             bench.SetAction(p => Guard(Ctx(p), c =>
             {
-                Bench.Run(c, p.GetValue(size) * 1024);
+                Bench.Run(c, p.GetValue(size) * 1024, TimeSpan.FromMilliseconds(Math.Max(3, p.GetValue(time))));
                 return ExitCodes.Success;
             }));
 

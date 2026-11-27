@@ -63,7 +63,7 @@ jobs:
     - name: dotnet test
       shell: bash
       run: |
-        for p in DeveParTools.Core.Tests DeveParTools.Par1.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests DeveParTools.Tests; do
+        for p in DeveParTools.Core.Tests DeveParTools.Par1.Tests DeveParTools.Par2.Tests DeveParTools.Par3.Tests DeveParTools.Tests DeveParTools.Cli.Tests; do
           dotnet test --project $p/$p.csproj -c Release --no-build --verbosity normal
         done
         # Interop tests are inconclusive (skipped) where the reference tools are not available.
