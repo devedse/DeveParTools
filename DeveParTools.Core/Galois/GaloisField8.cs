@@ -5,7 +5,7 @@ namespace DeveParTools.Core.Galois;
 /// <summary>
 /// GF(2^8) defined by a generator polynomial including the x^8 term (e.g. 0x11D).
 /// </summary>
-public sealed class GaloisField8
+public sealed class GaloisField8 : IGf8Multiplier
 {
     public const int Bits = 8;
     public const int Order = 1 << Bits;

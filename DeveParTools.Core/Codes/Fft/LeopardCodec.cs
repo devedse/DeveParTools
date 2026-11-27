@@ -1,0 +1,598 @@
+using System.Numerics;
+using System.Runtime.Intrinsics;
+using DeveParTools.Core.Galois;
+
+namespace DeveParTools.Core.Codes.Fft;
+
+/// <summary>
+/// FFT-based systematic Reed-Solomon erasure code in O(n log n), a port of Leopard-RS
+/// (Lin, Chung &amp; Han, "Novel Polynomial Basis and Its Application to Reed-Solomon Erasure Codes").
+/// Bit-compatible with the Leopard library used by par3cmdline's "PAR FFT" packet.
+/// </summary>
+/// <remarks>
+/// <para><b>Idea.</b> The k original blocks and the recovery blocks are all values of one polynomial of degree
+/// &lt; k, evaluated at different points of the field. Encoding interpolates the polynomial from the originals
+/// (inverse FFT) and evaluates it at the recovery points (FFT). Matrix-based RS needs k·m multiplications per symbol;
+/// here it is O((k + m) log m).</para>
+/// <para><b>Layout of the code word</b> (positions are field elements in the Cantor basis):</para>
+/// <code>
+/// position: [0 .. m)                  [m .. m + k)          [m + k .. n)
+///           recovery blocks (m = NextPow2(recovery count))   originals   zero padding
+/// </code>
+/// <para>Encoding processes the originals in groups of m: each group is IFFT'd with the matching "skew" offset
+/// and XOR-accumulated, then one FFT of size m produces the recovery blocks. A recovery block's value only depends
+/// on m and the data, so asking for fewer recovery blocks (but the same m) gives the same first blocks.</para>
+/// <para><b>Decoding</b> without matrix inversion:</para>
+/// <list type="number">
+/// <item>mark erased positions (missing originals, missing recovery blocks, and the unused [count, m) slots);</item>
+/// <item>evaluate the error-locator polynomial at every position with two Walsh-Hadamard transforms of the
+/// logarithm table (this is where the Cantor basis pays off);</item>
+/// <item>multiply every received block by its locator value, IFFT, take the formal derivative (a cheap XOR
+/// pattern), FFT;</item>
+/// <item>divide the result at each erased original position by its locator value → the original.</item>
+/// </list>
+/// <para>Every step is either a 2-element "butterfly" on whole blocks (<c>x ^= y·c; y ^= x</c>) or an XOR, so the
+/// SIMD region kernels do all the heavy lifting. The region is split into independent byte ranges that are
+/// processed in parallel (every symbol position is an independent codeword).</para>
+/// </remarks>
+public static unsafe class LeopardCodec
+{
+    public static int NextPow2(int v)
+    {
+        int r = 1;
+        while (r < v)
+        {
+            r <<= 1;
+        }
+
+        return r;
+    }
+
+    /// <summary>Number of work buffers <see cref="Encode"/> needs.</summary>
+    public static int EncodeWorkCount(int originalCount, int recoveryCount)
+    {
+        if (originalCount == 1)
+        {
+            return recoveryCount;
+        }
+
+        if (recoveryCount == 1)
+        {
+            return 1;
+        }
+
+        return NextPow2(recoveryCount) * 2;
+    }
+
+    /// <summary>Number of work buffers <see cref="Decode"/> needs.</summary>
+    public static int DecodeWorkCount(int originalCount, int recoveryCount)
+    {
+        if (originalCount == 1 || recoveryCount == 1)
+        {
+            return originalCount;
+        }
+
+        int m = NextPow2(recoveryCount);
+        return NextPow2(m + originalCount);
+    }
+
+    /// <summary>The field Leopard selects for a code of this size (FF8 when the code word fits in 256).</summary>
+    public static LeopardField SelectField(int originalCount, int recoveryCount)
+    {
+        int m = NextPow2(recoveryCount);
+        int n = NextPow2(m + originalCount);
+        return n <= 256 ? LeopardField.FF8 : LeopardField.FF16;
+    }
+
+    public static void Validate(LeopardField field, int originalCount, int recoveryCount)
+    {
+        if (originalCount < 1 || recoveryCount < 1 || recoveryCount > originalCount)
+        {
+            throw new ArgumentException("Leopard requires 1 ≤ recovery count ≤ original count.");
+        }
+
+        int m = NextPow2(recoveryCount);
+        if (originalCount > 1 && recoveryCount > 1 && NextPow2(m + originalCount) > field.Order)
+        {
+            throw new ArgumentException($"Too many blocks for GF(2^{field.Bits}): NextPow2(m + k) must be ≤ {field.Order}.");
+        }
+    }
+
+    /// <summary>
+    /// Computes <paramref name="recoveryCount"/> recovery blocks of <paramref name="bytes"/> bytes each.
+    /// On return, recovery block i is in <c>work[i]</c>. <paramref name="work"/> needs
+    /// <see cref="EncodeWorkCount"/> buffers.
+    /// </summary>
+    public static void Encode(LeopardField field, ReadOnlySpan<nint> originals, int recoveryCount, ReadOnlySpan<nint> work, long bytes, int threads = 1)
+    {
+        int k = originals.Length;
+        Validate(field, k, recoveryCount);
+        var orig = originals.ToArray();
+        var w = work.ToArray();
+        RunParallel(field, bytes, threads, (ofs, len) => EncodeRange(field, orig, recoveryCount, w, ofs, len));
+    }
+
+    /// <summary>
+    /// Recovers missing originals (entries equal to 0 in <paramref name="originals"/>) from the available recovery
+    /// blocks (0 = missing). Recovered original i is written to <c>work[i]</c>. <paramref name="work"/> needs
+    /// <see cref="DecodeWorkCount"/> buffers. Requires missing originals ≤ available recovery blocks.
+    /// </summary>
+    public static void Decode(LeopardField field, ReadOnlySpan<nint> originals, ReadOnlySpan<nint> recovery, ReadOnlySpan<nint> work, long bytes, int threads = 1)
+    {
+        int k = originals.Length;
+        int rc = recovery.Length;
+        Validate(field, k, rc);
+        int missing = 0, available = 0;
+        foreach (var o in originals)
+        {
+            missing += o == 0 ? 1 : 0;
+        }
+
+        foreach (var r in recovery)
+        {
+            available += r == 0 ? 0 : 1;
+        }
+
+        if (missing > available)
+        {
+            throw new InvalidOperationException($"Cannot recover {missing} blocks with {available} recovery blocks.");
+        }
+
+        var orig = originals.ToArray();
+        var rec = recovery.ToArray();
+        var w = work.ToArray();
+        if (missing == 0)
+        {
+            return;
+        }
+
+        if (k == 1)
+        {
+            // Every recovery block is a copy of the single original.
+            nint src = rec.First(r => r != 0);
+            RunParallel(field, bytes, threads, (ofs, len) => Copy((byte*)w[0] + ofs, (byte*)src + ofs, len));
+            return;
+        }
+
+        if (rc == 1)
+        {
+            // The single recovery block is the XOR of all originals.
+            int lost = Array.IndexOf(orig, (nint)0);
+            RunParallel(field, bytes, threads, (ofs, len) =>
+            {
+                Copy((byte*)w[lost] + ofs, (byte*)rec[0] + ofs, len);
+                for (int i = 0; i < k; i++)
+                {
+                    if (i != lost)
+                    {
+                        Xor((byte*)w[lost] + ofs, (byte*)orig[i] + ofs, len);
+                    }
+                }
+            });
+            return;
+        }
+
+        int m = NextPow2(rc);
+        int n = NextPow2(m + k);
+        var errorLocations = ComputeErrorLocations(field, orig, rec, m);
+        RunParallel(field, bytes, threads, (ofs, len) => DecodeRange(field, orig, rec, w, m, n, errorLocations, ofs, len));
+    }
+
+    /// <summary>
+    /// Values of the error-locator polynomial (as logarithms) at every position, computed with two Walsh-Hadamard
+    /// transforms: positions flagged 1 are erasures.
+    /// </summary>
+    private static int[] ComputeErrorLocations(LeopardField field, nint[] originals, nint[] recovery, int m)
+    {
+        var err = new int[field.Order];
+        for (int i = 0; i < recovery.Length; i++)
+        {
+            if (recovery[i] == 0)
+            {
+                err[i] = 1;
+            }
+        }
+
+        for (int i = recovery.Length; i < m; i++)
+        {
+            err[i] = 1;
+        }
+
+        for (int i = 0; i < originals.Length; i++)
+        {
+            if (originals[i] == 0)
+            {
+                err[i + m] = 1;
+            }
+        }
+
+        field.Fwht(err, field.Order, m + originals.Length);
+        for (int i = 0; i < field.Order; i++)
+        {
+            err[i] = (int)((long)err[i] * field.LogWalsh[i] % field.Modulus);
+        }
+
+        field.Fwht(err, field.Order, field.Order);
+        return err;
+    }
+
+    private static void RunParallel(LeopardField field, long bytes, int threads, Action<long, long> body)
+    {
+        // Split into independent ranges: a multiple of 64 bytes (and of the symbol size).
+        long chunks = Math.Max(1, Math.Min(Math.Max(1, threads), bytes / 4096));
+        long per = (bytes + chunks - 1) / chunks;
+        per = (per + 63) / 64 * 64;
+        int count = (int)((bytes + per - 1) / per);
+        if (count <= 1)
+        {
+            body(0, bytes);
+            return;
+        }
+
+        Parallel.For(0, count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, threads) }, c =>
+        {
+            long ofs = c * per;
+            body(ofs, Math.Min(per, bytes - ofs));
+        });
+        _ = field;
+    }
+
+    // ------------------------------------------------------------------ encode
+
+    private static void EncodeRange(LeopardField field, nint[] originals, int recoveryCount, nint[] work, long ofs, long len)
+    {
+        int k = originals.Length;
+        if (k == 1)
+        {
+            for (int i = 0; i < recoveryCount; i++)
+            {
+                Copy((byte*)work[i] + ofs, (byte*)originals[0] + ofs, len);
+            }
+
+            return;
+        }
+
+        if (recoveryCount == 1)
+        {
+            Copy((byte*)work[0] + ofs, (byte*)originals[0] + ofs, len);
+            for (int i = 1; i < k; i++)
+            {
+                Xor((byte*)work[0] + ofs, (byte*)originals[i] + ofs, len);
+            }
+
+            return;
+        }
+
+        var ops = new RegionOps(field, ofs, len);
+        int m = NextPow2(recoveryCount);
+        int skew = m - 1;
+
+        // work[0..m) = IFFT(first group of originals)
+        IfftDitEncoder(ops, originals, 0, Math.Min(k, m), work, 0, xorInto: false, m, skew);
+        int lastCount = k % m;
+        if (m < k)
+        {
+            int dataIndex = 0;
+            for (int i = m; i + m <= k; i += m)
+            {
+                dataIndex += m;
+                skew += m;
+                // work[m..2m) = IFFT(next group); work[0..m) ^= work[m..2m)
+                IfftDitEncoder(ops, originals, dataIndex, m, work, m, xorInto: true, m, skew);
+            }
+
+            if (lastCount != 0)
+            {
+                dataIndex += m;
+                skew += m;
+                IfftDitEncoder(ops, originals, dataIndex, lastCount, work, m, xorInto: true, m, skew);
+            }
+        }
+
+        // recovery = FFT(work) truncated to recoveryCount outputs.
+        FftDit(ops, work, 0, recoveryCount, m, -1);
+    }
+
+    private static void IfftDitEncoder(RegionOps ops, nint[] data, int dataIndex, int mTruncated, nint[] work, int workIndex, bool xorInto, int m, int skew)
+    {
+        for (int i = 0; i < mTruncated; i++)
+        {
+            ops.Copy(work[workIndex + i], data[dataIndex + i]);
+        }
+
+        for (int i = mTruncated; i < m; i++)
+        {
+            ops.Zero(work[workIndex + i]);
+        }
+
+        IfftDitCore(ops, work, workIndex, mTruncated, m, skew);
+        if (xorInto)
+        {
+            for (int i = 0; i < m; i++)
+            {
+                ops.Xor(work[i], work[workIndex + i]);
+            }
+        }
+    }
+
+    /// <summary>Decimation-in-time IFFT, two layers at a time (4-way butterflies).</summary>
+    private static void IfftDitCore(RegionOps ops, nint[] work, int baseIndex, int mTruncated, int m, int skew)
+    {
+        var f = ops.Field;
+        int dist = 1, dist4 = 4;
+        for (; dist4 <= m; dist = dist4, dist4 <<= 2)
+        {
+            for (int r = 0; r < mTruncated; r += dist4)
+            {
+                int iEnd = r + dist;
+                int logM01 = f.FftSkew[skew + iEnd];
+                int logM02 = f.FftSkew[skew + iEnd + dist];
+                int logM23 = f.FftSkew[skew + iEnd + dist * 2];
+                for (int i = r; i < iEnd; i++)
+                {
+                    IfftDit4(ops, work, baseIndex + i, dist, logM01, logM23, logM02);
+                }
+            }
+        }
+
+        if (dist < m)
+        {
+            int logM = f.FftSkew[skew + dist];
+            for (int i = 0; i < dist; i++)
+            {
+                if (logM == f.Modulus)
+                {
+                    ops.Xor(work[baseIndex + i + dist], work[baseIndex + i]);
+                }
+                else
+                {
+                    ops.IfftButterfly(work[baseIndex + i], work[baseIndex + i + dist], logM);
+                }
+            }
+        }
+    }
+
+    private static void IfftDit4(RegionOps ops, nint[] work, int i, int dist, int logM01, int logM23, int logM02)
+    {
+        int mod = ops.Field.Modulus;
+        if (logM01 == mod)
+        {
+            ops.Xor(work[i + dist], work[i]);
+        }
+        else
+        {
+            ops.IfftButterfly(work[i], work[i + dist], logM01);
+        }
+
+        if (logM23 == mod)
+        {
+            ops.Xor(work[i + dist * 3], work[i + dist * 2]);
+        }
+        else
+        {
+            ops.IfftButterfly(work[i + dist * 2], work[i + dist * 3], logM23);
+        }
+
+        if (logM02 == mod)
+        {
+            ops.Xor(work[i + dist * 2], work[i]);
+            ops.Xor(work[i + dist * 3], work[i + dist]);
+        }
+        else
+        {
+            ops.IfftButterfly(work[i], work[i + dist * 2], logM02);
+            ops.IfftButterfly(work[i + dist], work[i + dist * 3], logM02);
+        }
+    }
+
+    /// <summary>Decimation-in-time FFT, two layers at a time; only the first <paramref name="mTruncated"/> outputs are needed.</summary>
+    private static void FftDit(RegionOps ops, nint[] work, int baseIndex, int mTruncated, int m, int skew)
+    {
+        var f = ops.Field;
+        int dist4 = m, dist = m >> 2;
+        for (; dist != 0; dist4 = dist, dist >>= 2)
+        {
+            for (int r = 0; r < mTruncated; r += dist4)
+            {
+                int iEnd = r + dist;
+                int logM01 = f.FftSkew[skew + iEnd];
+                int logM02 = f.FftSkew[skew + iEnd + dist];
+                int logM23 = f.FftSkew[skew + iEnd + dist * 2];
+                for (int i = r; i < iEnd; i++)
+                {
+                    FftDit4(ops, work, baseIndex + i, dist, logM01, logM23, logM02);
+                }
+            }
+        }
+
+        if (dist4 == 2)
+        {
+            for (int r = 0; r < mTruncated; r += 2)
+            {
+                int logM = f.FftSkew[skew + r + 1];
+                if (logM == f.Modulus)
+                {
+                    ops.Xor(work[baseIndex + r + 1], work[baseIndex + r]);
+                }
+                else
+                {
+                    ops.FftButterfly(work[baseIndex + r], work[baseIndex + r + 1], logM);
+                }
+            }
+        }
+    }
+
+    private static void FftDit4(RegionOps ops, nint[] work, int i, int dist, int logM01, int logM23, int logM02)
+    {
+        int mod = ops.Field.Modulus;
+        if (logM02 == mod)
+        {
+            ops.Xor(work[i + dist * 2], work[i]);
+            ops.Xor(work[i + dist * 3], work[i + dist]);
+        }
+        else
+        {
+            ops.FftButterfly(work[i], work[i + dist * 2], logM02);
+            ops.FftButterfly(work[i + dist], work[i + dist * 3], logM02);
+        }
+
+        if (logM01 == mod)
+        {
+            ops.Xor(work[i + dist], work[i]);
+        }
+        else
+        {
+            ops.FftButterfly(work[i], work[i + dist], logM01);
+        }
+
+        if (logM23 == mod)
+        {
+            ops.Xor(work[i + dist * 3], work[i + dist * 2]);
+        }
+        else
+        {
+            ops.FftButterfly(work[i + dist * 2], work[i + dist * 3], logM23);
+        }
+    }
+
+    // ------------------------------------------------------------------ decode
+
+    private static void DecodeRange(LeopardField field, nint[] originals, nint[] recovery, nint[] work, int m, int n, int[] err, long ofs, long len)
+    {
+        var ops = new RegionOps(field, ofs, len);
+        int k = originals.Length;
+        int rc = recovery.Length;
+
+        // Multiply received blocks by their error-locator values.
+        for (int i = 0; i < rc; i++)
+        {
+            if (recovery[i] != 0)
+            {
+                ops.Mul(work[i], recovery[i], err[i]);
+            }
+            else
+            {
+                ops.Zero(work[i]);
+            }
+        }
+
+        for (int i = rc; i < m; i++)
+        {
+            ops.Zero(work[i]);
+        }
+
+        for (int i = 0; i < k; i++)
+        {
+            if (originals[i] != 0)
+            {
+                ops.Mul(work[m + i], originals[i], err[m + i]);
+            }
+            else
+            {
+                ops.Zero(work[m + i]);
+            }
+        }
+
+        for (int i = m + k; i < n; i++)
+        {
+            ops.Zero(work[i]);
+        }
+
+        IfftDitCore(ops, work, 0, m + k, n, -1);
+
+        // Formal derivative: in the novel polynomial basis this is a fixed XOR pattern.
+        for (int i = 1; i < n; i++)
+        {
+            int width = ((i ^ (i - 1)) + 1) >> 1;
+            for (int j = 0; j < width; j++)
+            {
+                ops.Xor(work[i - width + j], work[i + j]);
+            }
+        }
+
+        FftDit(ops, work, 0, m + k, n, -1);
+
+        // Reveal erasures: divide by the locator value.
+        for (int i = 0; i < k; i++)
+        {
+            if (originals[i] == 0)
+            {
+                ops.Mul(work[i], work[i + m], field.Modulus - err[i + m]);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ region helpers
+
+    private static void Copy(byte* dst, byte* src, long len) => Buffer.MemoryCopy(src, dst, len, len);
+
+    /// <summary>dst ^= src.</summary>
+    private static void Xor(byte* dst, byte* src, long len)
+    {
+        long i = 0;
+        if (Vector256.IsHardwareAccelerated)
+        {
+            for (; i + 32 <= len; i += 32)
+            {
+                (Vector256.Load(dst + i) ^ Vector256.Load(src + i)).Store(dst + i);
+            }
+        }
+
+        for (; i + 16 <= len; i += 16)
+        {
+            (Vector128.Load(dst + i) ^ Vector128.Load(src + i)).Store(dst + i);
+        }
+
+        for (; i < len; i++)
+        {
+            dst[i] ^= src[i];
+        }
+    }
+
+    /// <summary>Region operations restricted to the byte range [ofs, ofs + len) of every buffer.</summary>
+    private readonly struct RegionOps(LeopardField field, long ofs, long len)
+    {
+        public LeopardField Field { get; } = field;
+
+        private Span<byte> S(nint p) => new((byte*)p + ofs, (int)len);
+
+        public void Copy(nint dst, nint src) => LeopardCodec.Copy((byte*)dst + ofs, (byte*)src + ofs, len);
+
+        public void Zero(nint dst) => S(dst).Clear();
+
+        /// <summary>dst ^= src.</summary>
+        public void Xor(nint dst, nint src) => LeopardCodec.Xor((byte*)dst + ofs, (byte*)src + ofs, len);
+
+        /// <summary>x = y · exp(logM).</summary>
+        public void Mul(nint x, nint y, int logM) => MulAdd(x, y, logM, overwrite: true);
+
+        /// <summary>IFFT butterfly: y ^= x; x ^= y · exp(logM).</summary>
+        public void IfftButterfly(nint x, nint y, int logM)
+        {
+            Xor(y, x);
+            MulAdd(x, y, logM, overwrite: false);
+        }
+
+        /// <summary>FFT butterfly: x ^= y · exp(logM); y ^= x.</summary>
+        public void FftButterfly(nint x, nint y, int logM)
+        {
+            MulAdd(x, y, logM, overwrite: false);
+            Xor(y, x);
+        }
+
+        private void MulAdd(nint x, nint y, int logM, bool overwrite)
+        {
+            int c = Field.Exp(logM);
+            if (Field.Bits == 16)
+            {
+                Gf16Kernels.MulAdd(Field, (ushort)c, S(y), S(x), overwrite);
+            }
+            else
+            {
+                Gf8Kernels.MulAdd(Field, (byte)c, S(y), S(x), overwrite);
+            }
+        }
+    }
+
+    internal static int Log2(int v) => BitOperations.Log2((uint)v);
+}

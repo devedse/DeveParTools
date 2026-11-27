@@ -16,9 +16,9 @@ public sealed unsafe class Gf16MulTables : IDisposable
     public int Count { get; }
     public int Stride { get; }
     public SimdLevel Level { get; }
-    public GaloisField16 Field { get; }
+    public IGf16Multiplier Field { get; }
 
-    private Gf16MulTables(GaloisField16 field, int count, SimdLevel level)
+    private Gf16MulTables(IGf16Multiplier field, int count, SimdLevel level)
     {
         Field = field;
         Count = count;
@@ -27,7 +27,7 @@ public sealed unsafe class Gf16MulTables : IDisposable
         Ptr = (byte*)NativeMemory.AlignedAlloc((nuint)Math.Max(1, count * Stride), 64);
     }
 
-    public static Gf16MulTables Create(GaloisField16 field, ReadOnlySpan<ushort> coefficients, SimdLevel? level = null)
+    public static Gf16MulTables Create(IGf16Multiplier field, ReadOnlySpan<ushort> coefficients, SimdLevel? level = null)
     {
         var lvl = level ?? Gf16Kernels.Level;
         var t = new Gf16MulTables(field, coefficients.Length, lvl);
@@ -97,7 +97,7 @@ public static unsafe class Gf16Kernels
     };
 
     /// <summary>The 4 GFNI affine matrices (lo→lo, hi→lo, lo→hi, hi→hi) for multiplying by <paramref name="c"/>.</summary>
-    public static void GetAffineMatrices(GaloisField16 field, ushort c, out ulong loToLo, out ulong hiToLo, out ulong loToHi, out ulong hiToHi)
+    public static void GetAffineMatrices(IGf16Multiplier field, ushort c, out ulong loToLo, out ulong hiToLo, out ulong loToHi, out ulong hiToHi)
     {
         loToLo = hiToLo = loToHi = hiToHi = 0;
         for (int i = 0; i < 8; i++)
@@ -134,7 +134,7 @@ public static unsafe class Gf16Kernels
         return (byte)r;
     }
 
-    internal static void BuildTable(GaloisField16 field, ushort c, SimdLevel level, byte* dst)
+    internal static void BuildTable(IGf16Multiplier field, ushort c, SimdLevel level, byte* dst)
     {
         switch (level)
         {
@@ -197,7 +197,7 @@ public static unsafe class Gf16Kernels
     }
 
     /// <summary><c>dst ^= c * src</c> (or <c>dst = c * src</c> when <paramref name="overwrite"/>).</summary>
-    public static void MulAdd(GaloisField16 field, ushort c, ReadOnlySpan<byte> src, Span<byte> dst, bool overwrite = false)
+    public static void MulAdd(IGf16Multiplier field, ushort c, ReadOnlySpan<byte> src, Span<byte> dst, bool overwrite = false)
     {
         if (src.Length != dst.Length)
         {

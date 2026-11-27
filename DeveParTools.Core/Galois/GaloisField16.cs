@@ -6,7 +6,7 @@ namespace DeveParTools.Core.Galois;
 /// GF(2^16) defined by a generator polynomial (including the x^16 term, e.g. 0x1100B for PAR2).
 /// Elements are stored as little-endian 16-bit values in polynomial basis.
 /// </summary>
-public sealed class GaloisField16
+public sealed class GaloisField16 : IGf16Multiplier
 {
     public const int Bits = 16;
     public const int Order = 1 << Bits;

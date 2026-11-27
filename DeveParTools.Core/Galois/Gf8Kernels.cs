@@ -12,9 +12,9 @@ public sealed unsafe class Gf8MulTables : IDisposable
     public int Count { get; }
     public int Stride { get; }
     public SimdLevel Level { get; }
-    public GaloisField8 Field { get; }
+    public IGf8Multiplier Field { get; }
 
-    private Gf8MulTables(GaloisField8 field, int count, SimdLevel level)
+    private Gf8MulTables(IGf8Multiplier field, int count, SimdLevel level)
     {
         Field = field;
         Count = count;
@@ -23,7 +23,7 @@ public sealed unsafe class Gf8MulTables : IDisposable
         Ptr = (byte*)NativeMemory.AlignedAlloc((nuint)Math.Max(1, count * Stride), 64);
     }
 
-    public static Gf8MulTables Create(GaloisField8 field, ReadOnlySpan<byte> coefficients, SimdLevel? level = null)
+    public static Gf8MulTables Create(IGf8Multiplier field, ReadOnlySpan<byte> coefficients, SimdLevel? level = null)
     {
         var lvl = level ?? Gf8Kernels.Level;
         var t = new Gf8MulTables(field, coefficients.Length, lvl);
@@ -81,7 +81,7 @@ public static unsafe class Gf8Kernels
     };
 
     /// <summary>GFNI affine matrix for multiplying a byte by <paramref name="c"/> in <paramref name="field"/>.</summary>
-    public static ulong GetAffineMatrix(GaloisField8 field, byte c)
+    public static ulong GetAffineMatrix(IGf8Multiplier field, byte c)
     {
         ulong m = 0;
         for (int i = 0; i < 8; i++)
@@ -98,7 +98,7 @@ public static unsafe class Gf8Kernels
         return m;
     }
 
-    internal static void BuildTable(GaloisField8 field, byte c, SimdLevel level, byte* dst)
+    internal static void BuildTable(IGf8Multiplier field, byte c, SimdLevel level, byte* dst)
     {
         switch (level)
         {
@@ -144,7 +144,7 @@ public static unsafe class Gf8Kernels
     }
 
     /// <summary><c>dst ^= c * src</c> (or <c>dst = c * src</c> when <paramref name="overwrite"/>).</summary>
-    public static void MulAdd(GaloisField8 field, byte c, ReadOnlySpan<byte> src, Span<byte> dst, bool overwrite = false)
+    public static void MulAdd(IGf8Multiplier field, byte c, ReadOnlySpan<byte> src, Span<byte> dst, bool overwrite = false)
     {
         if (src.Length != dst.Length)
         {
@@ -187,7 +187,7 @@ public static unsafe class Gf8Kernels
         MulAddMultiCore(tables.Level, tables.Field, dst, srcs, tables.Ptr + (nint)first * tables.Stride, tables.Stride, count, length, overwrite);
     }
 
-    private static void MulAddMultiCore(SimdLevel level, GaloisField8 field, byte* dst, byte** srcs, byte* tables, int stride, int count, nint length, bool overwrite)
+    private static void MulAddMultiCore(SimdLevel level, IGf8Multiplier field, byte* dst, byte** srcs, byte* tables, int stride, int count, nint length, bool overwrite)
     {
         nint done = level switch
         {
@@ -216,7 +216,7 @@ public static unsafe class Gf8Kernels
         }
     }
 
-    private static int ScalarProduct(SimdLevel level, GaloisField8 field, byte* t, byte x)
+    private static int ScalarProduct(SimdLevel level, IGf8Multiplier field, byte* t, byte x)
     {
         switch (level)
         {
