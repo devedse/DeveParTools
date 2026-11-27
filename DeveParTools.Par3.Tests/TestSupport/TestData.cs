@@ -62,6 +62,9 @@ internal sealed class RecordingObserver : IParOperationObserver
     /// <summary>Every progress fraction, per stage.</summary>
     public Dictionary<string, List<double>> Fractions { get; } = new();
 
+    /// <summary>Every detail line sent with the progress ("pass 1 of 3: reading …"), per stage.</summary>
+    public Dictionary<string, List<string>> Details { get; } = new();
+
     public List<(ParLogLevel Level, string Message)> Logs { get; } = new();
 
     public double LastProgress { get; private set; }
@@ -112,6 +115,15 @@ internal sealed class RecordingObserver : IParOperationObserver
             }
 
             list.Add(fraction);
+            if (detail != null)
+            {
+                if (!Details.TryGetValue(stage, out var details))
+                {
+                    Details[stage] = details = new List<string>();
+                }
+
+                details.Add(detail);
+            }
         }
     }
 

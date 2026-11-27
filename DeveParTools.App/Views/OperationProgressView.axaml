@@ -47,7 +47,7 @@
     <ItemsControl ItemsSource="{Binding Stages}">
       <ItemsControl.ItemTemplate>
         <DataTemplate x:DataType="vm:StageRowViewModel">
-          <Grid ColumnDefinitions="22,Auto,*,40,100" ColumnSpacing="10" Margin="0,3" Background="Transparent" ToolTip.Tip="{Binding Description}">
+          <Grid ColumnDefinitions="22,Auto,*,40,100" RowDefinitions="Auto,Auto" ColumnSpacing="10" Margin="0,3" Background="Transparent" ToolTip.Tip="{Binding Description}">
             <Panel Width="16" Height="16" VerticalAlignment="Center">
               <Path Classes="Spinner" IsVisible="{Binding IsActive}" Stroke="{DynamicResource AccentStripBrush}" StrokeThickness="2"
                     Data="M 8,1 A 7,7 0 1 1 1,8" Width="16" Height="16" Stretch="None">
@@ -65,6 +65,9 @@
               <TextBlock Classes="BarText" Text="{Binding PercentText}" FontSize="11" />
             </Panel>
             <TextBlock Grid.Column="3" Grid.ColumnSpan="2" Text="{Binding ShareText}" VerticalAlignment="Center" Classes="Caption" />
+            <!-- What the active step is doing right now (e.g. which pass, and reading, computing or writing). -->
+            <TextBlock Grid.Row="1" Grid.Column="2" Grid.ColumnSpan="3" Text="{Binding Detail}" Classes="Caption" Margin="0,2,0,0"
+                       TextTrimming="CharacterEllipsis" IsVisible="{Binding Detail, Converter={x:Static ObjectConverters.IsNotNull}}" />
           </Grid>
         </DataTemplate>
       </ItemsControl.ItemTemplate>

@@ -254,7 +254,6 @@ public static class Par2Creator
             HashInputs(inputs, sliceSize, sliceHashes, sliceCrc, handles, context, map);
         }
 
-        var recoveryDone = new bool[recoveryCount];
         if (recoveryCount > 0)
         {
             observer.Stage(Par2Stages.Encoding);
@@ -278,7 +277,7 @@ public static class Par2Creator
                 }
 
                 var source = new SliceSource(inputs, sliceSize, handles, singlePass ? sliceMd5 : null, singlePass ? sliceCrc : null, map);
-                var sink = new RecoverySink(outputs, sliceSize, recoveryDone, map);
+                var sink = new RecoverySink(outputs, sliceSize, map);
                 var exponents = Enumerable.Range(options.FirstExponent, recoveryCount).Select(e => (uint)e).ToArray();
                 if (singlePass)
                 {
@@ -306,17 +305,13 @@ public static class Par2Creator
                     }
                 }
 
-                // Recovery packets whose MD5 could not be computed on the fly (multi-pass): read back. Progress of
+                // The packet headers with their MD5 (built while the data was written, see RecoverySink). Progress of
                 // this step: the packet headers are the first half, the copies of the critical packets the second.
                 observer.Stage(Par2Stages.WritingRecovery);
                 for (int j = 0; j < recoveryCount; j++)
                 {
                     context.CancellationToken.ThrowIfCancellationRequested();
-                    if (!recoveryDone[j])
-                    {
-                        FinishRecoveryPacketFromDisk(outputs[j].Stream, outputs[j].DataOffset, outputs[j].Header, sliceSize);
-                    }
-
+                    sink.Complete(j);
                     RandomAccess.Write(outputs[j].Stream.SafeFileHandle, outputs[j].Header, outputs[j].DataOffset - outputs[j].Header.Length);
                     map.SetRecovery(j, RecoveryBlockState.Created);
                     if (j % 64 == 63)
@@ -667,23 +662,66 @@ public static class Par2Creator
         }
     }
 
-    /// <summary>Writes recovery data into the volume files and, when a whole slice arrives at once, its packet MD5.</summary>
-    private sealed class RecoverySink(List<(FileStream Stream, long DataOffset, byte[] Header)> outputs, long sliceSize, bool[] done, BlockStateMap map) : IRegionSink
+    /// <summary>
+    /// Writes recovery data into the volume files and builds each recovery packet's MD5 (of the header from byte 32 on,
+    /// then the data) as the data goes by.
+    /// </summary>
+    /// <remarks>
+    /// The encoder writes a slice in parts, in order (one part per pass when the memory budget needs several), so an MD5
+    /// per slice that is fed each part has the hash when the last part arrives, and the recovery data never has to be
+    /// read back. A part that arrives out of order drops that slice's MD5; <see cref="Complete"/> then reads it back.
+    /// </remarks>
+    internal sealed class RecoverySink(List<(FileStream Stream, long DataOffset, byte[] Header)> outputs, long sliceSize, BlockStateMap map) : IRegionSink
     {
+        private readonly IncrementalHash?[] _md5 = new IncrementalHash?[outputs.Count];
+        private readonly long[] _next = new long[outputs.Count];
+        private readonly bool[] _done = new bool[outputs.Count];
+
         public void Write(int index, long offset, ReadOnlySpan<byte> source)
         {
             var (stream, dataOffset, header) = outputs[index];
             RandomAccess.Write(stream.SafeFileHandle, source, dataOffset + offset);
-            if (offset == 0 && source.Length == sliceSize)
+            if (offset == 0)
             {
-                using var md5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
-                md5.AppendData(header, 32, header.Length - 32);
+                _md5[index]?.Dispose();
+                _md5[index] = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
+                _md5[index]!.AppendData(header, 32, header.Length - 32);
+                _next[index] = 0;
+            }
+
+            if (_md5[index] is { } md5 && offset == _next[index])
+            {
                 md5.AppendData(source);
-                md5.GetHashAndReset().CopyTo(header, 16);
-                done[index] = true;
+                _next[index] = offset + source.Length;
+                if (_next[index] == sliceSize)
+                {
+                    md5.GetHashAndReset().CopyTo(header, 16);
+                    md5.Dispose();
+                    _md5[index] = null;
+                    _done[index] = true;
+                }
+            }
+            else
+            {
+                _md5[index]?.Dispose();
+                _md5[index] = null;
             }
 
             map.SetRecovery(index, RecoveryBlockState.Created);
+        }
+
+        /// <summary>Makes sure slice <paramref name="index"/>'s MD5 is in its header, reading the slice back when it could not be built while writing.</summary>
+        /// <returns>The bytes read back.</returns>
+        public long Complete(int index)
+        {
+            if (_done[index])
+            {
+                return 0;
+            }
+
+            FinishRecoveryPacketFromDisk(outputs[index].Stream, outputs[index].DataOffset, outputs[index].Header, sliceSize);
+            _done[index] = true;
+            return sliceSize;
         }
     }
 }

@@ -57,10 +57,34 @@ public static class ObserverExtensions
     /// <summary>Like <see cref="ToProgress(IParOperationObserver, string?)"/>, for a part of a stage: 0..1 becomes <paramref name="from"/>..<paramref name="to"/>.</summary>
     public static IProgress<double> ToProgress(this IParOperationObserver observer, double from, double to) => new ObserverProgress(observer, null, from, to);
 
-    private sealed class ObserverProgress(IParOperationObserver observer, string? detail, double from, double to) : IProgress<double>
+    /// <summary>
+    /// Reports progress with a line about what is happening right now ("pass 3 of 9: computing the recovery data") when
+    /// <paramref name="progress"/> takes one (an observer's, see <see cref="IDetailedProgress"/>), otherwise just the value.
+    /// </summary>
+    public static void ReportDetail(this IProgress<double>? progress, double value, string? detail)
+    {
+        if (progress is IDetailedProgress detailed)
+        {
+            detailed.Report(value, detail);
+        }
+        else
+        {
+            progress?.Report(value);
+        }
+    }
+
+    private sealed class ObserverProgress(IParOperationObserver observer, string? detail, double from, double to) : IDetailedProgress
     {
         public void Report(double value) => observer.Progress(from + (to - from) * value, detail);
+
+        public void Report(double value, string? now) => observer.Progress(from + (to - from) * value, now ?? detail);
     }
+}
+
+/// <summary>A progress that can also say what is happening right now (see <see cref="ObserverExtensions.ReportDetail"/>).</summary>
+public interface IDetailedProgress : IProgress<double>
+{
+    void Report(double value, string? detail);
 }
 
 public sealed class NullObserver : IParOperationObserver

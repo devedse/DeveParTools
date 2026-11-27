@@ -104,10 +104,10 @@ public static class Par3Stages
 
     /// <summary>What <see cref="Encoding"/> does, for the code that is used.</summary>
     public static string EncodingDescription(bool fft, int recoveryBlocks) => fft
-        ? $"Reads all input blocks again and computes the {recoveryBlocks:N0} recovery blocks with the FFT Reed-Solomon code, one group of blocks (cohort) at a time. The recovery files were created at their final size when this step started; they are filled in now."
-        : $"Reads all input blocks again and computes the {recoveryBlocks:N0} recovery blocks with the Cauchy Reed-Solomon code: every recovery block is a different weighted sum of all input blocks, calculated in a Galois field. The recovery files were created at their final size when this step started; they are filled in now.";
+        ? $"Computes the {recoveryBlocks:N0} recovery blocks with the FFT Reed-Solomon code and writes them into the recovery files. When not every block fits in the memory budget at once, this happens in passes, a slice of every block each: read the slice of every input block, compute, write the slice of every recovery block. The line under the bar says which pass and which part."
+        : $"Computes the {recoveryBlocks:N0} recovery blocks with the Cauchy Reed-Solomon code (every recovery block is a different weighted sum of all input blocks, calculated in a Galois field) and writes them into the recovery files, in passes over slices of the blocks when they do not all fit in the memory budget.";
 
-    public const string WritingRecoveryDescription = "Completes the checksum of every recovery block and writes copies of the set's description (file list and block checksums) into every recovery file, so each recovery file can also be used on its own.";
+    public const string WritingRecoveryDescription = "The recovery data was written while encoding. This step writes the header of every recovery block (with its checksum) and copies of the set's description (file list and block checksums) into every recovery file, so each recovery file can also be used on its own.";
 
     /// <summary>
     /// The steps of <see cref="Par3Creator.Create"/>, weighted by the bytes each one reads or writes: hashing reads the
@@ -135,7 +135,7 @@ public static class Par3Stages
             stages.Add(new(StoringData, inputBytes * 2.0, "Copies the contents of your files into the .part files (archive mode), so the set alone can recreate them."));
         }
 
-        stages.Add(new(WritingIndex, description, "Writes the index file: the description of the set, once."));
+        stages.Add(new(WritingIndex, description, "Writes the index file, the .par3 file without \"vol\" in its name: the description of the set (names, sizes and a checksum for every block), once. It is the file you open to verify; the recovery files hold the recovery data and copies of the same description."));
         return stages;
     }
 }
@@ -931,8 +931,7 @@ public static class Par3Creator
                 streams[v].SetLength(pos);
             }
 
-            var done = new bool[recoveryCount];
-            var sink = new RecoverySink(outputs, blockSize, done, map);
+            var sink = new RecoverySink(outputs, blockSize, map);
             var progress = context.Observer.ToProgress();
             var combine = context.Combine.Create(progress);
             var source = new Par3BlockSource(blocks.Blocks, blocks.Handles) { OnRead = b => map.Set(b, BlockState.Processed) };
@@ -946,42 +945,48 @@ public static class Par3Creator
             }
 
             // Then the packet headers (with the checksums), and the vital packets after the recovery data, repeated
-            // per spec Appendix D. Progress: the headers count as one copy of the vital packets.
+            // per spec Appendix D. Progress by bytes: the headers (and reading back a recovery block whose checksum could not be built while
+            // it was written, see RecoverySink), then the copies of the description.
             context.Observer.Stage(Par3Stages.WritingRecovery);
             int perFile = VitalCopiesPerFile(vital.Count, recoveryCount, blockCount, volumes.Count);
-            double steps = 1 + (double)perFile * streams.Count;
+            long vitalBytes = vital.Sum(p => (long)p.Length);
+            long headerBytes = 0, rereadBytes = 0;
+            for (int j = 0; j < recoveryCount; j++)
+            {
+                headerBytes += outputs[j].Header.Length;
+                rereadBytes += sink.ReadBackBytes(j);
+            }
+
+            double totalBytes = Math.Max(1, headerBytes + rereadBytes + (double)vitalBytes * perFile * streams.Count), doneBytes = 0;
             for (int j = 0; j < recoveryCount; j++)
             {
                 context.CancellationToken.ThrowIfCancellationRequested();
-                if (!done[j])
-                {
-                    FinishChecksumFromDisk(outputs[j].Stream, outputs[j].DataOffset, outputs[j].Header, blockSize);
-                }
-
+                doneBytes += sink.Complete(j);
                 RandomAccess.Write(outputs[j].Stream.SafeFileHandle, outputs[j].Header, outputs[j].DataOffset - outputs[j].Header.Length);
+                doneBytes += outputs[j].Header.Length;
                 map.SetRecovery(j, RecoveryBlockState.Created);
-                if (j % 256 == 255)
+                if (j % 256 == 255 || j + 1 == recoveryCount)
                 {
-                    context.Observer.Progress((j + 1.0) / recoveryCount / steps);
+                    context.Observer.Progress(doneBytes / totalBytes, $"recovery block headers ({j + 1:N0} of {recoveryCount:N0})");
                 }
             }
 
-            int copiesWritten = 0;
-            foreach (var s in streams)
+            for (int v = 0; v < streams.Count; v++)
             {
-                s.Seek(0, SeekOrigin.End);
+                streams[v].Seek(0, SeekOrigin.End);
                 for (int c = 0; c < perFile; c++)
                 {
                     context.CancellationToken.ThrowIfCancellationRequested();
                     foreach (var p in vital)
                     {
-                        s.Write(p);
+                        streams[v].Write(p);
                     }
 
-                    context.Observer.Progress((1 + ++copiesWritten) / steps);
+                    doneBytes += vitalBytes;
+                    context.Observer.Progress(doneBytes / totalBytes, $"copies of the set's description (recovery file {v + 1:N0} of {streams.Count:N0})");
                 }
 
-                s.Write(creator);
+                streams[v].Write(creator);
             }
         }
         finally
@@ -1070,19 +1075,68 @@ public static class Par3Creator
         }
     }
 
-    internal sealed class RecoverySink((FileStream Stream, long DataOffset, byte[] Header)[] outputs, long blockSize, bool[] done, BlockStateMap map) : IRegionSink
+    /// <summary>
+    /// Writes recovery data into the recovery files and builds each recovery packet's checksum (BLAKE3 of the header from
+    /// byte 24 on, then the data) as the data goes by.
+    /// </summary>
+    /// <remarks>
+    /// The encoders write a block in slices, in order (pass 1: bytes 0 to 504 KiB of every recovery block, pass 2: the
+    /// next 504 KiB, …), so a hasher per block that is fed each slice has the checksum when the last slice arrives and
+    /// the data never has to be read back. Without this, a 13 GB set of recovery data was read back from disk after
+    /// encoding. A slice that arrives out of order drops that block's hasher; such a block is read back at the end
+    /// (<see cref="FinishChecksumFromDisk"/>). Different blocks may be written from different threads at once.
+    /// </remarks>
+    internal sealed class RecoverySink((FileStream Stream, long DataOffset, byte[] Header)[] outputs, long blockSize, BlockStateMap map) : IRegionSink
     {
+        private readonly Blake3Hasher?[] _hashers = new Blake3Hasher?[outputs.Length];
+        private readonly long[] _next = new long[outputs.Length];
+        private readonly bool[] done = new bool[outputs.Length];
+
+        /// <summary>Bytes still to read back to finish block <paramref name="index"/>'s checksum: 0 when it was built while writing.</summary>
+        public long ReadBackBytes(int index) => done[index] ? 0 : blockSize;
+
+        /// <summary>
+        /// Makes sure the checksum of block <paramref name="index"/> is in its header, reading the block back when it
+        /// could not be built while writing.
+        /// </summary>
+        /// <returns>The bytes read back.</returns>
+        public long Complete(int index)
+        {
+            long read = ReadBackBytes(index);
+            if (read > 0)
+            {
+                FinishChecksumFromDisk(outputs[index].Stream, outputs[index].DataOffset, outputs[index].Header, blockSize);
+                done[index] = true;
+            }
+
+            return read;
+        }
+
         public void Write(int index, long offset, ReadOnlySpan<byte> source)
         {
             var (stream, dataOffset, header) = outputs[index];
             RandomAccess.Write(stream.SafeFileHandle, source, dataOffset + offset);
-            if (offset == 0 && source.Length == blockSize)
+            if (offset == 0)
             {
-                var hasher = new Blake3Hasher();
-                hasher.Update(header.AsSpan(24));
+                _hashers[index] = new Blake3Hasher();
+                _hashers[index]!.Update(header.AsSpan(24));
+                _next[index] = 0;
+            }
+
+            if (_hashers[index] is { } hasher && offset == _next[index])
+            {
                 hasher.Update(source);
-                hasher.Finalize(header.AsSpan(8, 16));
-                done[index] = true;
+                _next[index] = offset + source.Length;
+                if (_next[index] == blockSize)
+                {
+                    hasher.Finalize(header.AsSpan(8, 16));
+                    done[index] = true;
+                    _hashers[index] = null;
+                }
+            }
+            else
+            {
+                _hashers[index] = null;
             }
 
             map.SetRecovery(index, RecoveryBlockState.Created);

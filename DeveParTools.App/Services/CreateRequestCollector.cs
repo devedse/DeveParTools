@@ -28,6 +28,7 @@ public sealed class CreateRequestCollector : IDisposable
 {
     private readonly CancellationTokenSource _stop = new();
     private readonly List<string> _pending = [];
+    private readonly HashSet<string> _received = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     private readonly object _lock = new();
     private Action<IReadOnlyList<string>>? _handler;
     private volatile bool _collecting;
@@ -174,11 +175,21 @@ public sealed class CreateRequestCollector : IDisposable
         }
     }
 
+    /// <summary>
+    /// Passes new paths on. A sender that did not get the answer in time (a busy computer) sends its paths again, so
+    /// paths that already arrived are dropped.
+    /// </summary>
     private void Deliver(List<string> paths)
     {
         Action<IReadOnlyList<string>>? handler;
         lock (_lock)
         {
+            paths = paths.Where(_received.Add).ToList();
+            if (paths.Count == 0)
+            {
+                return;
+            }
+
             handler = _handler;
             if (handler == null)
             {

@@ -364,3 +364,45 @@ public sealed class Par2CreateTests
         observer.AssertStagesFollowThePlan();
     }
 }
+
+[TestClass]
+public sealed class Par2RecoverySinkTests
+{
+    [TestMethod]
+    public void BuildsTheMd5WhileWriting_OrReadsBackWhenOutOfOrder()
+    {
+        using var dir = new TestSupport.TempDir();
+        const int SliceSize = 1000;
+        var data = new byte[SliceSize];
+        new Random(3).NextBytes(data);
+        byte[] Md5(bool inOrder, out long readBack)
+        {
+            using var stream = new FileStream(System.IO.Path.Combine(dir.Path, inOrder ? "a.bin" : "b.bin"), FileMode.Create, FileAccess.ReadWrite);
+            var header = Enumerable.Range(0, 68).Select(i => (byte)i).ToArray();
+            stream.SetLength(header.Length + SliceSize);
+            var sink = new Par2Creator.RecoverySink([(stream, header.Length, header)], SliceSize, new DeveParTools.Core.Operations.BlockStateMap(1, 1));
+            (int Offset, int Length)[] parts = inOrder ? [(0, 600), (600, 400)] : [(600, 400), (0, 600)];
+            foreach (var (offset, length) in parts)
+            {
+                sink.Write(0, offset, data.AsSpan(offset, length));
+            }
+
+            if (!inOrder)
+            {
+                sink.Write(0, 0, data.AsSpan(0, 600)); // restarted at 0, then again out of order: still read back
+                sink.Write(0, 900, data.AsSpan(900, 100));
+            }
+
+            readBack = sink.Complete(0);
+            Assert.AreEqual(0, sink.Complete(0));
+            return header[16..32];
+        }
+
+        var built = Md5(true, out long none);
+        var read = Md5(false, out long readBytes);
+        Assert.AreEqual(0, none);
+        Assert.AreEqual(SliceSize, readBytes);
+        CollectionAssert.AreEqual(built, read);
+        CollectionAssert.AreEqual(System.Security.Cryptography.MD5.HashData(Enumerable.Range(32, 36).Select(i => (byte)i).Concat(data).ToArray()), built);
+    }
+}

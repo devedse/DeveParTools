@@ -63,7 +63,14 @@ Check(ExplorerContextMenu.ExecutableOf(entries[0].Command) == ProgramFilesExe &&
     using var first = CreateRequestCollector.StartOrForward(name, ["item0"], TimeSpan.FromSeconds(2));
     Check(first is { IsCollecting: true }, "the first process of a multi-selection collects");
     var arrived = new List<string>();
-    var senders = Enumerable.Range(1, 6).Select(i => Task.Run(() => CreateRequestCollector.StartOrForward(name, [$"item{i}", $"extra{i}"], TimeSpan.FromSeconds(2)))).ToArray();
+    // Each sender on a thread of its own, as each is a process of its own in Explorer: thread-pool tasks that block
+    // would starve the pool that the pipe's replies need, so the replies would arrive after the senders gave up.
+    var senders = Enumerable.Range(1, 6).Select(i =>
+    {
+        var done = new TaskCompletionSource<CreateRequestCollector?>();
+        new Thread(() => done.SetResult(CreateRequestCollector.StartOrForward(name, [$"item{i}", $"extra{i}"], TimeSpan.FromSeconds(2)))) { IsBackground = true }.Start();
+        return done.Task;
+    }).ToArray();
     Task.WaitAll(senders);
     first!.Attach(paths =>
     {
@@ -75,7 +82,7 @@ Check(ExplorerContextMenu.ExecutableOf(entries[0].Command) == ProgramFilesExe &&
     Check(senders.All(t => t.Result == null), "the other processes hand their paths over and exit");
     lock (arrived)
     {
-        Check(arrived.Count == 12 && Enumerable.Range(1, 6).All(i => arrived.Contains($"item{i}") && arrived.Contains($"extra{i}")), $"all paths arrive in the first window ({arrived.Count})");
+        Check(arrived.Count == 12 && Enumerable.Range(1, 6).All(i => arrived.Contains($"item{i}") && arrived.Contains($"extra{i}")), $"all paths arrive in the first window, each once ({arrived.Count})");
     }
 
     var until = DateTime.UtcNow.AddSeconds(10);
@@ -100,6 +107,27 @@ Check(ExplorerContextMenu.ExecutableOf(entries[0].Command) == ProgramFilesExe &&
     createWindow.Close();
 }
 
+// The suggested name: after the one item, or after the folder that several items share; a chosen name stays.
+{
+    var naming = new CreateViewModel(new SettingsViewModel(Path.Combine(work, "naming.txt")));
+    naming.Add(Path.Combine(work, "notes.txt"));
+    Check(naming.OutputPath == Path.Combine(work, "notes.par3"), "one file: the set is named after it: " + naming.OutputPath);
+    naming.Add(Path.Combine(work, "video.mp4"));
+    naming.Add(Path.Combine(work, "photos", "holiday-001.jpg"));
+    var folder = Path.Combine(work, Path.GetFileName(work) + ".par3");
+    Check(naming.OutputPath == folder, "several items: named after the folder they share, inside it: " + naming.OutputPath);
+    naming.FormatIndex = 1;
+    Check(naming.OutputPath == Path.ChangeExtension(folder, ".par2"), "another format changes the extension: " + naming.OutputPath);
+    naming.RemoveInputCommand.Execute(naming.Inputs[2]);
+    naming.RemoveInputCommand.Execute(naming.Inputs[1]);
+    Check(naming.OutputPath == Path.Combine(work, "notes.par2"), "back to one file: named after it again: " + naming.OutputPath);
+    naming.OutputPath = Path.Combine(work, "mine.par2");
+    naming.Add(Path.Combine(work, "video.mp4"));
+    Check(naming.OutputPath == Path.Combine(work, "mine.par2"), "a name the user chose stays");
+    naming.ClearInputsCommand.Execute(null);
+    Check(naming.OutputPath == Path.Combine(work, "mine.par2"), "also when the inputs are cleared");
+}
+
 var shell = new ShellViewModel();
 var window = new MainWindow { DataContext = shell, Width = 1440, Height = 900 };
 window.Show();
@@ -122,6 +150,7 @@ Check(shell.Create.Plan is { InputBlocks: > 2500 and <= 3000, Files.Count: 5 } &
 Save(window, output, "create");
 Await(shell.Create.CreateCommand.ExecuteAsync(null));
 Check(File.Exists(Path.Combine(work, "backup.par3")), "PAR3 set created");
+Check(shell.Create.Stages.All(st => st.Detail == null), "when done, no step says what it is doing any more");
 Check(shell.Create.Stages.Select(st => st.Name).SequenceEqual(["Preparing", "Hashing", "Writing metadata", "Encoding", "Writing recovery files", "Writing the index file"])
     && shell.Create.Stages.All(st => st.IsDone) && Math.Abs(shell.Create.Progress - 100) < 1e-9 && shell.Create.TotalText?.StartsWith("Done in", StringComparison.Ordinal) == true,
     $"every step is shown and done: {string.Join(", ", shell.Create.Stages.Select(st => $"{st.Name} {st.PercentText} ({st.ShareText})"))}; {shell.Create.TotalText}");

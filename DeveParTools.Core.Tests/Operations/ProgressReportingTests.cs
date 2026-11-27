@@ -46,6 +46,20 @@ public sealed class ProgressReportingTests
     }
 
     [TestMethod]
+    public void ReportDetail_SaysWhatIsHappeningWhenTheProgressTakesIt()
+    {
+        var r = new Recorder();
+        r.ToProgress("default").ReportDetail(0.5, "pass 1 of 2: reading");
+        r.ToProgress("default").ReportDetail(0.6, null);
+        r.ToProgress(0.5, 1).ReportDetail(0.5, "now");
+        CollectionAssert.AreEqual(new[] { "progress 0.50 pass 1 of 2: reading", "progress 0.60 default", "progress 0.75 now" }, r.Events);
+
+        var plain = new List<double>();
+        new Progress<double>(plain.Add).ReportDetail(0.25, "ignored: a plain progress has no place for it");
+        ((IProgress<double>?)null).ReportDetail(0.5, "nobody listens");
+    }
+
+    [TestMethod]
     public void Plan_HasADefaultThatDoesNothing()
     {
         IParOperationObserver o = new StagesOnly();

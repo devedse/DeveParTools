@@ -64,7 +64,10 @@ public sealed unsafe class LeopardCodecTests
         var field = LeopardCodec.SelectField(k, rc);
         var orig = Enumerable.Range(0, k).Select(_ => { var b = new byte[bytes]; rnd.NextBytes(b); return b; }).ToArray();
         var work = Enumerable.Range(0, LeopardCodec.EncodeWorkCount(k, rc)).Select(_ => new byte[bytes]).ToArray();
-        WithPointers(orig, op => WithPointers(work, wp => LeopardCodec.Encode(field, op, rc, wp, bytes, threads: 4)));
+        var encoding = new System.Collections.Concurrent.ConcurrentBag<double>();
+        WithPointers(orig, op => WithPointers(work, wp => LeopardCodec.Encode(field, op, rc, wp, bytes, threads: 4, progress: encoding.Add)));
+        Assert.AreEqual(1.0, encoding.Max(), 1e-12, "every thread's part reports its transforms, up to 100%");
+        Assert.IsTrue(encoding.All(f => f > 0));
         var recovery = work.Take(rc).Select(w => (byte[])w.Clone()).ToArray();
 
         // Lose up to rc originals (some recovery blocks lost too, as long as enough remain).
@@ -74,6 +77,7 @@ public sealed unsafe class LeopardCodecTests
         var lostRec = Enumerable.Range(0, rc).OrderBy(_ => rnd.Next()).Take(dropRecovery).ToHashSet();
 
         var dwork = Enumerable.Range(0, LeopardCodec.DecodeWorkCount(k, rc)).Select(_ => new byte[bytes]).ToArray();
+        var decoding = new System.Collections.Concurrent.ConcurrentBag<double>();
         WithPointers(orig, op => WithPointers(recovery, rp => WithPointers(dwork, wp =>
         {
             var o = op.ToArray();
@@ -88,8 +92,9 @@ public sealed unsafe class LeopardCodecTests
                 r[i] = 0;
             }
 
-            LeopardCodec.Decode(field, o, r, wp, bytes, threads: 3);
+            LeopardCodec.Decode(field, o, r, wp, bytes, threads: 3, progress: decoding.Add);
         })));
+        Assert.AreEqual(1.0, decoding.Max(), 1e-12, "decoding reports up to 100%");
         foreach (var i in lostOrig)
         {
             CollectionAssert.AreEqual(orig[i], dwork[i], $"original {i}");

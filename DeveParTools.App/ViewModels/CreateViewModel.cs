@@ -58,6 +58,9 @@ public sealed partial class CreateViewModel : OperationViewModel
     private int _scanVersion;
     private int _blockTarget = 2000;
     private long? _explicitBlockSize;
+
+    /// <summary>The output path the page chose from the inputs; a path the user typed or picked differs from it.</summary>
+    private string? _automaticOutput;
     private double _redundancy = 10;
     private int? _exactRecovery;
 
@@ -66,6 +69,13 @@ public sealed partial class CreateViewModel : OperationViewModel
     {
         Inputs.CollectionChanged += (_, _) =>
         {
+            // The name follows the inputs until the user chooses one.
+            if (OutputPath == null || OutputPath == _automaticOutput)
+            {
+                _automaticOutput = AutomaticOutput();
+                OutputPath = _automaticOutput;
+            }
+
             OnPropertyChanged(nameof(CanInsertIntoArchive));
             Rescan();
         };
@@ -375,7 +385,9 @@ public sealed partial class CreateViewModel : OperationViewModel
         _explicitBlockSize = null; // PAR2 sizes are multiples of 4, PAR3 of 8
         if (OutputPath != null)
         {
+            bool automatic = OutputPath == _automaticOutput;
             OutputPath = Path.ChangeExtension(OutputPath, Extension);
+            _automaticOutput = automatic ? OutputPath : _automaticOutput;
         }
 
         foreach (var name in new[] { nameof(IsPar3), nameof(IsPar1), nameof(HasBlockChoice), nameof(CanInsertIntoArchive), nameof(OutputPlaceholder), nameof(BlockSizeStep) })
@@ -604,7 +616,7 @@ public sealed partial class CreateViewModel : OperationViewModel
         }
     }
 
-    /// <summary>Adds a file or folder; the first one also names the output.</summary>
+    /// <summary>Adds a file or folder (the output's name follows the inputs until the user chooses one).</summary>
     public void Add(string path)
     {
         if (Inputs.Any(i => i.Path == path))
@@ -613,12 +625,36 @@ public sealed partial class CreateViewModel : OperationViewModel
         }
 
         Inputs.Add(new CreateInputRow(path));
-        if (OutputPath == null)
+    }
+
+    /// <summary>
+    /// The output the page suggests. One input: named after it, next to it (photos\ → photos.par3, video.mp4 →
+    /// video.par3). Several: named after the folder they are all in, inside it (23 files of "Season 02" →
+    /// Season 02\Season 02.par3, not after whichever file came first). Null without inputs.
+    /// </summary>
+    private string? AutomaticOutput()
+    {
+        if (Inputs.Count == 0)
         {
-            var dir = Directory.Exists(path) ? Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(path))! : Path.GetDirectoryName(path)!;
-            var name = Path.GetFileNameWithoutExtension(Path.TrimEndingDirectorySeparator(path));
-            OutputPath = Path.Combine(dir, name + Extension);
+            return null;
         }
+
+        var parents = Inputs.Select(i => Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(i.Path)) ?? i.Path).ToList();
+        if (Inputs.Count == 1)
+        {
+            return Path.Combine(parents[0], Path.GetFileNameWithoutExtension(Path.TrimEndingDirectorySeparator(Inputs[0].Path)) + Extension);
+        }
+
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        string common = parents[0];
+        while (!parents.All(p => p.Equals(common, comparison) || p.StartsWith(Path.TrimEndingDirectorySeparator(common) + Path.DirectorySeparatorChar, comparison))
+            && Path.GetDirectoryName(common) is { } up)
+        {
+            common = up;
+        }
+
+        string name = Path.GetFileName(Path.TrimEndingDirectorySeparator(common));
+        return Path.Combine(common, (name.Length > 0 ? name : "recovery set") + Extension);
     }
 
     [RelayCommand]

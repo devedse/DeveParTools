@@ -169,6 +169,9 @@ public static unsafe class Par3Fft
         int workCount = LeopardCodec.EncodeWorkCount(k2, m);
         long slice = Math.Max(64, options.MemoryBudget / Math.Max(1, k2 + workCount)) / 64 * 64;
         slice = Math.Min(slice, (blockSize + 63) / 64 * 64);
+        long slices = (blockSize + slice - 1) / slice;
+        int cohortsWithWork = Enumerable.Range(0, c).Count(cohort => recoveryIndices.Any(r => (int)(r % (ulong)c) == cohort));
+        var progress = new FftPassProgress(options.Progress, (int)(cohortsWithWork * slices), "computing the recovery data", "writing the recovery data");
         for (int cohort = 0; cohort < c; cohort++)
         {
             var wanted = recoveryIndices.Where(r => (int)(r % (ulong)c) == cohort).ToList();
@@ -177,12 +180,16 @@ public static unsafe class Par3Fft
                 continue;
             }
 
+            // Input blocks of this cohort that exist (the rest of the k2 positions are zero padding).
+            int present = (int)Math.Min((ulong)k2, (blockCount - (ulong)cohort + (ulong)c - 1) / (ulong)c);
+
             var buffers = Alloc(k2 + workCount, slice);
             try
             {
                 for (long offset = 0; offset < blockSize; offset += slice)
                 {
                     options.CancellationToken.ThrowIfCancellationRequested();
+                    progress.StartPass();
                     long len = Math.Min(slice, blockSize - offset);
                     long lenAligned = (len + 63) / 64 * 64;
                     var originals = new nint[k2];
@@ -195,25 +202,28 @@ public static unsafe class Par3Fft
                         if (block < blockCount)
                         {
                             blocks.Read((int)block, offset, span[..(int)len]);
-                        }
-
-                        // Reading is most of the time (the blocks of a cohort are spread over all files), so report it
-                        // as it goes: 90% of this slice's share for reading, the rest when the slice is encoded.
-                        if (j % 512 == 511)
-                        {
-                            options.Progress?.Report((cohort + (offset + 0.9 * len * (j + 1.0) / k2) / blockSize) / c);
+                            if (j % 256 == 255 || j + 1 == present)
+                            {
+                                progress.Reading(j + 1, present);
+                            }
                         }
                     }
 
+                    progress.Begin(FftPassProgress.Phase.Computing);
                     var work = buffers.AsSpan(k2, workCount).ToArray();
-                    LeopardCodec.Encode(layout.Field, originals, m, work, lenAligned, options.Threads);
-                    foreach (var r in wanted)
+                    LeopardCodec.Encode(layout.Field, originals, m, work, lenAligned, options.Threads, progress.Computing);
+                    progress.Begin(FftPassProgress.Phase.Writing);
+                    for (int i = 0; i < wanted.Count; i++)
                     {
-                        int local = (int)(r / (ulong)c);
-                        sink.Write(position[r], offset, new ReadOnlySpan<byte>((byte*)work[local], (int)len));
+                        int local = (int)(wanted[i] / (ulong)c);
+                        sink.Write(position[wanted[i]], offset, new ReadOnlySpan<byte>((byte*)work[local], (int)len));
+                        if (i % 64 == 63 || i + 1 == wanted.Count)
+                        {
+                            progress.Writing(i + 1, wanted.Count);
+                        }
                     }
 
-                    options.Progress?.Report((cohort + (double)(offset + len) / blockSize) / c);
+                    progress.EndPass();
                 }
             }
             finally
@@ -245,6 +255,9 @@ public static unsafe class Par3Fft
         int workCount = LeopardCodec.DecodeWorkCount(k2, m);
         long slice = Math.Max(64, options.MemoryBudget / Math.Max(1, k2 + m + workCount)) / 64 * 64;
         slice = Math.Min(slice, (blockSize + 63) / 64 * 64);
+        long slices = (blockSize + slice - 1) / slice;
+        int cohortsWithWork = Enumerable.Range(0, c).Count(cohort => MissingInCohort(layout, blockCount, available, cohort).Count > 0);
+        var progress = new FftPassProgress(options.Progress, (int)(cohortsWithWork * slices), "computing the missing blocks", "writing the rebuilt blocks");
         for (int cohort = 0; cohort < c; cohort++)
         {
             var missingLocal = MissingInCohort(layout, blockCount, available, cohort);
@@ -267,9 +280,11 @@ public static unsafe class Par3Fft
                 for (long offset = 0; offset < blockSize; offset += slice)
                 {
                     options.CancellationToken.ThrowIfCancellationRequested();
+                    progress.StartPass();
                     long len = Math.Min(slice, blockSize - offset);
                     long lenAligned = (len + 63) / 64 * 64;
                     var originals = new nint[k2];
+                    int toRead = k2 + recLocal.Count, read = 0;
                     for (int j = 0; j < k2; j++)
                     {
                         ulong block = (ulong)j * (ulong)c + (ulong)cohort;
@@ -285,10 +300,9 @@ public static unsafe class Par3Fft
                             originals[j] = buffers[j];
                         }
 
-                        // As in Encode: report the reading, which is most of the time.
-                        if (j % 512 == 511)
+                        if (++read % 256 == 0)
                         {
-                            options.Progress?.Report((cohort + (offset + 0.9 * len * (j + 1.0) / k2) / blockSize) / c);
+                            progress.Reading(read, toRead);
                         }
                     }
 
@@ -299,17 +313,27 @@ public static unsafe class Par3Fft
                         span.Clear();
                         recoveryReader.Read(reader, offset, span[..(int)len]);
                         rec[local] = buffers[k2 + local];
+                        if (++read % 256 == 0 || read == toRead)
+                        {
+                            progress.Reading(read, toRead);
+                        }
                     }
 
+                    progress.Begin(FftPassProgress.Phase.Computing);
                     var work = buffers.AsSpan(k2 + m, workCount).ToArray();
-                    LeopardCodec.Decode(layout.Field, originals, rec, work, lenAligned, options.Threads);
-                    foreach (int j in missingLocal)
+                    LeopardCodec.Decode(layout.Field, originals, rec, work, lenAligned, options.Threads, progress.Computing);
+                    progress.Begin(FftPassProgress.Phase.Writing);
+                    for (int i = 0; i < missingLocal.Count; i++)
                     {
-                        ulong block = (ulong)j * (ulong)c + (ulong)cohort;
-                        sink.Write((int)block, offset, new ReadOnlySpan<byte>((byte*)work[j], (int)len));
+                        ulong block = (ulong)missingLocal[i] * (ulong)c + (ulong)cohort;
+                        sink.Write((int)block, offset, new ReadOnlySpan<byte>((byte*)work[missingLocal[i]], (int)len));
+                        if (i % 64 == 63 || i + 1 == missingLocal.Count)
+                        {
+                            progress.Writing(i + 1, missingLocal.Count);
+                        }
                     }
 
-                    options.Progress?.Report((cohort + (double)(offset + len) / blockSize) / c);
+                    progress.EndPass();
                 }
             }
             finally

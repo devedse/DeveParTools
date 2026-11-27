@@ -118,3 +118,143 @@ public sealed class ProgressTests
         CollectionAssert.AreEqual(content, dir.Read("a.bin"));
     }
 }
+
+/// <summary>The FFT code in passes (a slice of every block at a time): what each pass reports, and the checksums.</summary>
+[TestClass]
+public sealed class FftPassTests
+{
+    [TestMethod]
+    public void CreateAndRepair_InPasses_SayWhichPassAndWhatPart_AndTheSetIsCorrect()
+    {
+        using var dir = new TempDir();
+        var content = TestData.Random(41, 400 * 1024);
+        var path = dir.Write("a.bin", content);
+
+        // A small memory budget: blocks of 4 KiB are encoded in slices, a few passes.
+        var context = new OperationContext { Observer = new RecordingObserver(), MemoryBudget = 200_000 };
+        var create = (RecordingObserver)context.Observer;
+        Par3Creator.Create(new Par3CreateOptions { Inputs = [path], OutputPath = dir["set.par3"], BlockSize = 4096, RecoveryBlockCount = 40, Code = Par3Code.Fft }, context);
+
+        var encoding = create.Details[Par3Stages.Encoding];
+        int passes = int.Parse(encoding[0].Split(' ')[3].TrimEnd(':'), System.Globalization.CultureInfo.InvariantCulture);
+        Assert.IsTrue(passes > 1, encoding[0]);
+        StringAssert.StartsWith(encoding[0], $"pass 1 of {passes}: reading the input blocks (");
+        CollectionAssert.Contains(encoding, $"pass 1 of {passes}: computing the recovery data");
+        CollectionAssert.Contains(encoding, $"pass {passes} of {passes}: writing the recovery data (40 of 40)");
+        var fractions = create.Fractions[Par3Stages.Encoding];
+        Assert.IsTrue(fractions.Zip(fractions.Skip(1)).All(p => p.Second >= p.First), "the encoding bar never goes back");
+        Assert.AreEqual(1.0, fractions[^1], 1e-9);
+        CollectionAssert.Contains(create.Details[Par3Stages.WritingRecovery], "recovery block headers (40 of 40)");
+        StringAssert.StartsWith(create.Details[Par3Stages.WritingRecovery][^1], "copies of the set's description (recovery file ");
+
+        // The checksums were built while writing (no read back): every recovery block is accepted.
+        var verify = Par3Verifier.Verify(new Par3VerifyOptions { Par3Path = dir["set.par3"] });
+        Assert.IsTrue(verify.AllFilesComplete);
+        Assert.AreEqual(40, verify.RecoveryBlocksAvailable);
+
+        // Repair in passes too.
+        var damaged = (byte[])content.Clone();
+        Array.Clear(damaged, 10 * 4096, 30 * 4096);
+        File.WriteAllBytes(path, damaged);
+        var repairing = new RecordingObserver();
+        var report = Par3Verifier.Verify(new Par3VerifyOptions { Par3Path = dir["set.par3"] });
+        var repair = Par3Repairer.Repair(report, new Par3RepairOptions { PurgeBackups = true }, new OperationContext { Observer = repairing, MemoryBudget = 200_000 });
+        Assert.IsTrue(repair.Success, repair.Message);
+        CollectionAssert.AreEqual(content, dir.Read("a.bin"));
+        var rebuilding = repairing.Details[RepairStages.Reconstructing];
+        Assert.IsTrue(rebuilding.Any(d => d.EndsWith(": computing the missing blocks", StringComparison.Ordinal)), string.Join(" | ", rebuilding));
+        Assert.IsTrue(rebuilding.Any(d => d.Contains(": writing the rebuilt blocks (30 of 30)", StringComparison.Ordinal)), string.Join(" | ", rebuilding));
+        Assert.IsTrue(rebuilding.Any(d => d.Contains(": reading the input blocks (", StringComparison.Ordinal)), string.Join(" | ", rebuilding));
+    }
+
+    [TestMethod]
+    public void PassProgress_SharesFollowTheMeasuredTimes_AndTheValueNeverGoesBack()
+    {
+        var reports = new DetailRecorder();
+        var progress = new FftPassProgress(reports, 2, "computing the recovery data", "writing the recovery data");
+        CollectionAssert.AreEqual(new[] { 0.5, 0.3, 0.2 }, progress.Shares.ToArray(), "a guess for the first pass");
+        progress.StartPass();
+        progress.Reading(1, 2);
+        progress.Begin(FftPassProgress.Phase.Computing);
+        Thread.Sleep(60); // computing takes longest
+        progress.Computing(0.5);
+        progress.Computing(0.25); // a late report from another thread
+        progress.Begin(FftPassProgress.Phase.Writing);
+        progress.Writing(1, 1);
+        progress.EndPass();
+        Assert.AreEqual(0.5, reports.Values[^1], 1e-12, "a pass is exactly 1/passes");
+
+        progress.StartPass();
+        Assert.IsTrue(progress.Shares[1] > progress.Shares[0] && progress.Shares[1] > progress.Shares[2] && Math.Abs(progress.Shares.Sum() - 1) < 1e-9,
+            "from the second pass on, the shares are the measured times: " + string.Join(", ", progress.Shares));
+        progress.Writing(1, 1);
+        progress.EndPass();
+        Assert.AreEqual(1.0, reports.Values[^1], 1e-12);
+        Assert.IsTrue(reports.Values.Zip(reports.Values.Skip(1)).All(p => p.Second >= p.First), string.Join(", ", reports.Values));
+        Assert.AreEqual("pass 1 of 2: reading the input blocks (1 of 2)", reports.Details[0]);
+        Assert.AreEqual("pass 1 of 2: computing the recovery data", reports.Details[1]);
+        Assert.AreEqual("pass 2 of 2: writing the recovery data (1 of 1)", reports.Details[^1]);
+
+        var single = new DetailRecorder();
+        var one = new FftPassProgress(single, 1, "computing the missing blocks", "writing the rebuilt blocks");
+        one.StartPass();
+        one.Computing(1);
+        Assert.AreEqual("computing the missing blocks", single.Details[0], "one pass: no pass number");
+        new FftPassProgress(null, 1, "c", "w").Computing(0.5); // nobody listens
+    }
+
+    [TestMethod]
+    public void RecoverySink_BuildsTheChecksumWhileWriting_OrReadsBackWhenOutOfOrder()
+    {
+        using var dir = new TempDir();
+        const int BlockSize = 1000;
+        var data = TestData.Random(7, BlockSize);
+        byte[] Checksum(bool inOrder, out long readBack)
+        {
+            using var stream = new FileStream(dir[inOrder ? "in-order.bin" : "out-of-order.bin"], FileMode.Create, FileAccess.ReadWrite);
+            var header = Enumerable.Range(0, 88).Select(i => (byte)i).ToArray();
+            stream.SetLength(header.Length + BlockSize);
+            var sink = new Par3Creator.RecoverySink([(stream, header.Length, header)], BlockSize, new BlockStateMap(1, 1));
+            (int Offset, int Length)[] slices = inOrder ? [(0, 400), (400, 400), (800, 200)] : [(0, 400), (800, 200), (400, 400)];
+            foreach (var (offset, length) in slices)
+            {
+                sink.Write(0, offset, data.AsSpan(offset, length));
+            }
+
+            Assert.AreEqual(inOrder ? 0 : BlockSize, sink.ReadBackBytes(0));
+            readBack = sink.Complete(0);
+            Assert.AreEqual(0, sink.Complete(0), "complete now");
+            return header[8..24];
+        }
+
+        var built = Checksum(inOrder: true, out long none);
+        var readBackSum = Checksum(inOrder: false, out long read);
+        Assert.AreEqual(0, none);
+        Assert.AreEqual(BlockSize, read);
+        CollectionAssert.AreEqual(built, readBackSum, "the same checksum either way");
+        var expected = new byte[16];
+        var hasher = new Core.Hashing.Blake3Hasher();
+        hasher.Update(Enumerable.Range(0, 88).Select(i => (byte)i).ToArray().AsSpan(24));
+        hasher.Update(data);
+        hasher.Finalize(expected);
+        CollectionAssert.AreEqual(expected, built);
+    }
+
+    private sealed class DetailRecorder : IDetailedProgress
+    {
+        public List<double> Values { get; } = [];
+
+        public List<string> Details { get; } = [];
+
+        public void Report(double value) => Values.Add(value);
+
+        public void Report(double value, string? detail)
+        {
+            Values.Add(value);
+            if (detail != null)
+            {
+                Details.Add(detail);
+            }
+        }
+    }
+}

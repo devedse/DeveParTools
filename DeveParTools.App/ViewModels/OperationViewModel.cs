@@ -102,6 +102,10 @@ public sealed partial class StageRowViewModel : ObservableObject
     [ObservableProperty]
     private double _percent;
 
+    /// <summary>What the active step is doing right now, e.g. "pass 3 of 9: computing the recovery data" (null when idle).</summary>
+    [ObservableProperty]
+    private string? _detail;
+
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsActive), nameof(IsDone), nameof(IsPending), nameof(IsSkipped), nameof(PercentText))]
     private StageStatus _status;
@@ -307,6 +311,7 @@ public abstract partial class OperationViewModel : ObservableObject, IParOperati
             row.ShareText = st.Status == StageStatus.Skipped || weight <= 0 ? string.Empty : $"≈ {Math.Max(0.1, 100 * st.Weight / weight):0.#}% of the work";
             row.Percent = 100 * (st.Status == StageStatus.Done ? 1 : st.Fraction);
             row.Status = st.Status;
+            row.Detail = st.Status == StageStatus.Active ? _pendingDetail : null;
         }
 
         Progress = 100 * total;

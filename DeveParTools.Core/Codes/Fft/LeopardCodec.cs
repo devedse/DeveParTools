@@ -103,13 +103,18 @@ public static unsafe class LeopardCodec
     /// On return, recovery block i is in <c>work[i]</c>. <paramref name="work"/> needs
     /// <see cref="EncodeWorkCount"/> buffers.
     /// </summary>
-    public static void Encode(LeopardField field, ReadOnlySpan<nint> originals, int recoveryCount, ReadOnlySpan<nint> work, long bytes, int threads = 1)
+    /// <param name="progress">Called with the fraction done (0..1) after each transform of each thread's part, from those threads.</param>
+    public static void Encode(LeopardField field, ReadOnlySpan<nint> originals, int recoveryCount, ReadOnlySpan<nint> work, long bytes, int threads = 1, Action<double>? progress = null)
     {
         int k = originals.Length;
         Validate(field, k, recoveryCount);
         var orig = originals.ToArray();
         var w = work.ToArray();
-        RunParallel(bytes, threads, (ofs, len) => EncodeRange(field, orig, recoveryCount, w, ofs, len));
+
+        // Steps per part: one transform per group of m originals, then the final FFT (or one copy/XOR step).
+        int steps = k == 1 || recoveryCount == 1 ? 1 : (k + NextPow2(recoveryCount) - 1) / NextPow2(recoveryCount) + 1;
+        var counter = StepCounter.For(progress, RangeCount(bytes, threads) * steps);
+        RunParallel(bytes, threads, (ofs, len) => EncodeRange(field, orig, recoveryCount, w, ofs, len, counter));
     }
 
     /// <summary>
@@ -117,7 +122,8 @@ public static unsafe class LeopardCodec
     /// blocks (0 = missing). Recovered original i is written to <c>work[i]</c>. <paramref name="work"/> needs
     /// <see cref="DecodeWorkCount"/> buffers. Requires missing originals ≤ available recovery blocks.
     /// </summary>
-    public static void Decode(LeopardField field, ReadOnlySpan<nint> originals, ReadOnlySpan<nint> recovery, ReadOnlySpan<nint> work, long bytes, int threads = 1)
+    /// <param name="progress">Called with the fraction done (0..1) as each thread's part gets through the transforms, from those threads.</param>
+    public static void Decode(LeopardField field, ReadOnlySpan<nint> originals, ReadOnlySpan<nint> recovery, ReadOnlySpan<nint> work, long bytes, int threads = 1, Action<double>? progress = null)
     {
         int k = originals.Length;
         int rc = recovery.Length;
@@ -150,7 +156,12 @@ public static unsafe class LeopardCodec
         {
             // Every recovery block is a copy of the single original.
             nint src = rec.First(r => r != 0);
-            RunParallel(bytes, threads, (ofs, len) => Copy((byte*)w[0] + ofs, (byte*)src + ofs, len));
+            var copied = StepCounter.For(progress, RangeCount(bytes, threads));
+            RunParallel(bytes, threads, (ofs, len) =>
+            {
+                Copy((byte*)w[0] + ofs, (byte*)src + ofs, len);
+                copied?.Step();
+            });
             return;
         }
 
@@ -158,6 +169,7 @@ public static unsafe class LeopardCodec
         {
             // The single recovery block is the XOR of all originals.
             int lost = Array.IndexOf(orig, (nint)0);
+            var xored = StepCounter.For(progress, RangeCount(bytes, threads));
             RunParallel(bytes, threads, (ofs, len) =>
             {
                 Copy((byte*)w[lost] + ofs, (byte*)rec[0] + ofs, len);
@@ -168,6 +180,8 @@ public static unsafe class LeopardCodec
                         Xor((byte*)w[lost] + ofs, (byte*)orig[i] + ofs, len);
                     }
                 }
+
+                xored?.Step();
             });
             return;
         }
@@ -175,7 +189,26 @@ public static unsafe class LeopardCodec
         int m = NextPow2(rc);
         int n = NextPow2(m + k);
         var errorLocations = ComputeErrorLocations(field, orig, rec, m);
-        RunParallel(bytes, threads, (ofs, len) => DecodeRange(field, orig, rec, w, m, n, errorLocations, ofs, len));
+
+        // Per part: the IFFT and the FFT are nearly all the work; the derivative and the last multiply are quick.
+        var counter = StepCounter.For(progress, RangeCount(bytes, threads) * DecodeStepWeight);
+        RunParallel(bytes, threads, (ofs, len) => DecodeRange(field, orig, rec, w, m, n, errorLocations, ofs, len, counter));
+    }
+
+    /// <summary>Weight of one part's decode: 9 (prepare + IFFT) + 1 (derivative) + 9 (FFT) + 1 (reveal).</summary>
+    private const int DecodeStepWeight = 20;
+
+    /// <summary>
+    /// Counts finished steps of all threads' parts and reports them as a fraction (thread-safe). Null without a
+    /// progress callback, so the codec pays nothing then.
+    /// </summary>
+    private sealed class StepCounter(Action<double> progress, long total)
+    {
+        private long _done;
+
+        public static StepCounter? For(Action<double>? progress, long total) => progress == null ? null : new StepCounter(progress, Math.Max(1, total));
+
+        public void Step(int weight = 1) => progress(Math.Min(1, (double)Interlocked.Add(ref _done, weight) / total));
     }
 
     /// <summary>
@@ -216,13 +249,21 @@ public static unsafe class LeopardCodec
         return err;
     }
 
-    private static void RunParallel(long bytes, int threads, Action<long, long> body)
+    /// <summary>How many parts <see cref="RunParallel"/> splits <paramref name="bytes"/> into, and how long each is.</summary>
+    private static (int Count, long Per) Ranges(long bytes, int threads)
     {
-        // Split into independent ranges: a multiple of 64 bytes (and of the symbol size).
+        // Independent ranges: a multiple of 64 bytes (and of the symbol size).
         long chunks = Math.Max(1, Math.Min(Math.Max(1, threads), bytes / 4096));
         long per = (bytes + chunks - 1) / chunks;
         per = (per + 63) / 64 * 64;
-        int count = (int)((bytes + per - 1) / per);
+        return ((int)((bytes + per - 1) / per), per);
+    }
+
+    private static int RangeCount(long bytes, int threads) => Math.Max(1, Ranges(bytes, threads).Count);
+
+    private static void RunParallel(long bytes, int threads, Action<long, long> body)
+    {
+        var (count, per) = Ranges(bytes, threads);
         if (count <= 1)
         {
             body(0, bytes);
@@ -238,7 +279,7 @@ public static unsafe class LeopardCodec
 
     // ------------------------------------------------------------------ encode
 
-    private static void EncodeRange(LeopardField field, nint[] originals, int recoveryCount, nint[] work, long ofs, long len)
+    private static void EncodeRange(LeopardField field, nint[] originals, int recoveryCount, nint[] work, long ofs, long len, StepCounter? counter)
     {
         int k = originals.Length;
         if (k == 1)
@@ -248,6 +289,7 @@ public static unsafe class LeopardCodec
                 Copy((byte*)work[i] + ofs, (byte*)originals[0] + ofs, len);
             }
 
+            counter?.Step();
             return;
         }
 
@@ -259,6 +301,7 @@ public static unsafe class LeopardCodec
                 Xor((byte*)work[0] + ofs, (byte*)originals[i] + ofs, len);
             }
 
+            counter?.Step();
             return;
         }
 
@@ -268,6 +311,7 @@ public static unsafe class LeopardCodec
 
         // work[0..m) = IFFT(first group of originals)
         IfftDitEncoder(ops, originals, 0, Math.Min(k, m), work, 0, xorInto: false, m, skew);
+        counter?.Step();
         int lastCount = k % m;
         if (m < k)
         {
@@ -278,6 +322,7 @@ public static unsafe class LeopardCodec
                 skew += m;
                 // work[m..2m) = IFFT(next group); work[0..m) ^= work[m..2m)
                 IfftDitEncoder(ops, originals, dataIndex, m, work, m, xorInto: true, m, skew);
+                counter?.Step();
             }
 
             if (lastCount != 0)
@@ -285,11 +330,13 @@ public static unsafe class LeopardCodec
                 dataIndex += m;
                 skew += m;
                 IfftDitEncoder(ops, originals, dataIndex, lastCount, work, m, xorInto: true, m, skew);
+                counter?.Step();
             }
         }
 
         // recovery = FFT(work) truncated to recoveryCount outputs.
         FftDit(ops, work, 0, recoveryCount, m, -1);
+        counter?.Step();
     }
 
     private static void IfftDitEncoder(RegionOps ops, nint[] data, int dataIndex, int mTruncated, nint[] work, int workIndex, bool xorInto, int m, int skew)
@@ -462,7 +509,7 @@ public static unsafe class LeopardCodec
 
     // ------------------------------------------------------------------ decode
 
-    private static void DecodeRange(LeopardField field, nint[] originals, nint[] recovery, nint[] work, int m, int n, int[] err, long ofs, long len)
+    private static void DecodeRange(LeopardField field, nint[] originals, nint[] recovery, nint[] work, int m, int n, int[] err, long ofs, long len, StepCounter? counter)
     {
         var ops = new RegionOps(field, ofs, len);
         int k = originals.Length;
@@ -504,6 +551,7 @@ public static unsafe class LeopardCodec
         }
 
         IfftDitCore(ops, work, 0, m + k, n, -1);
+        counter?.Step(9);
 
         // Formal derivative: in the novel polynomial basis this is a fixed XOR pattern.
         for (int i = 1; i < n; i++)
@@ -515,7 +563,9 @@ public static unsafe class LeopardCodec
             }
         }
 
+        counter?.Step(1);
         FftDit(ops, work, 0, m + k, n, -1);
+        counter?.Step(9);
 
         // Reveal erasures: divide by the locator value.
         for (int i = 0; i < k; i++)
@@ -525,6 +575,8 @@ public static unsafe class LeopardCodec
                 ops.Mul(work[i], work[i + m], field.Modulus - err[i + m]);
             }
         }
+
+        counter?.Step(1);
     }
 
     // ------------------------------------------------------------------ region helpers

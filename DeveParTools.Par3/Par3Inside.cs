@@ -596,19 +596,14 @@ public static class Par3Inside
             }
 
             // Recovery data: Cauchy code with par3cmdline's x_I = I, like par3cmdline's insert.
-            var done = new bool[plan.RecoveryBlocks];
             var map = context.CreateBlockMap((int)plan.InputBlocks, plan.RecoveryBlocks);
-            var sink = new Par3Creator.RecoverySink(outputs, bs, done, map);
+            var sink = new Par3Creator.RecoverySink(outputs, bs, map);
             var progress = context.Observer.ToProgress();
             Par3Fields.With(Generator(plan), new Par3Creator.CauchyEncode(plan.InputBlocks, recoveryIndices, packets.Blocks, sink, bs, context.Combine.Create(progress), Par3CauchyConvention.Par3cmdline));
             for (int r = 0; r < plan.RecoveryBlocks; r++)
             {
                 var (_, dataOffset, header) = outputs[r];
-                if (!done[r])
-                {
-                    Par3Creator.FinishChecksumFromDisk(fs, dataOffset, header, bs);
-                }
-
+                sink.Complete(r);
                 RandomAccess.Write(fs.SafeFileHandle, header, dataOffset - header.Length);
             }
         }
