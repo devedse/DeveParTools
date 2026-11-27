@@ -3,6 +3,7 @@
     <IsPackable>false</IsPackable>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="..\DeveParTools.Par1\DeveParTools.Par1.csproj" />
     <ProjectReference Include="..\DeveParTools.Par2\DeveParTools.Par2.csproj" />
     <ProjectReference Include="..\DeveParTools.Par3\DeveParTools.Par3.csproj" />
   </ItemGroup>
