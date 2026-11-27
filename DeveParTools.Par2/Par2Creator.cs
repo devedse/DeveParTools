@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using DeveParTools.Core.Codes;
 using DeveParTools.Core.Galois;
@@ -12,13 +13,20 @@ namespace DeveParTools.Par2;
 /// <summary>How recovery slices are distributed over the .volXX+YY.par2 files.</summary>
 public enum Par2VolumeScheme
 {
-    /// <summary>1, 2, 4, 8, ... slices per file (par2cmdline default).</summary>
+    /// <summary>
+    /// 1, 2, 4, 8, ... slices per file (par2cmdline default). With <see cref="Par2CreateOptions.VolumeCount"/> = n,
+    /// exactly n files: low, 2·low, 4·low, ... with the smallest power of two "low" for which they hold everything
+    /// (par2cmdline -n).
+    /// </summary>
     Exponential,
 
     /// <summary>The same number of slices in every file (see <see cref="Par2CreateOptions.VolumeCount"/>).</summary>
     Uniform,
 
-    /// <summary>Exponential, but no file holds more data than the largest input file.</summary>
+    /// <summary>
+    /// Exponential, but no file holds more data than the largest input file (so the number of slices per file is
+    /// capped at largest file ÷ slice size). <see cref="Par2CreateOptions.VolumeCount"/> is not used.
+    /// </summary>
     LimitSize,
 }
 
@@ -47,7 +55,11 @@ public sealed class Par2CreateOptions
 
     public Par2VolumeScheme Scheme { get; init; } = Par2VolumeScheme.Exponential;
 
-    /// <summary>Number of volume files for <see cref="Par2VolumeScheme.Uniform"/>.</summary>
+    /// <summary>
+    /// Number of volume files for <see cref="Par2VolumeScheme.Uniform"/> (default 1) and
+    /// <see cref="Par2VolumeScheme.Exponential"/> (default: as many as the doubling needs). At most one file per
+    /// recovery slice.
+    /// </summary>
     public int? VolumeCount { get; init; }
 
     public string? Comment { get; init; }
@@ -100,25 +112,22 @@ public static class Par2Creator
     {
         context ??= OperationContext.Default;
         var observer = context.Observer;
-        var token = context.CancellationToken;
         var outputPath = Path.GetFullPath(options.OutputPath);
         var baseDir = Path.GetFullPath(options.BaseDirectory ?? Path.GetDirectoryName(outputPath)!);
 
-        // 1. Inputs: names, lengths, MD5 of the first 16 KiB, File IDs.
+        // 1. Inputs: names, lengths, MD5 of the first 16 KiB, File IDs. The same file given twice (also spelled
+        //    differently, e.g. "x/../a" for "a", or on Windows with the base directory part in other letter case)
+        //    gets the same stored name and is used once; different files always get different names (relative
+        //    paths below one base directory).
         observer.Stage("Preparing");
         var inputs = options.InputFiles
             .Select(p => Path.GetFullPath(p))
-            .Distinct(StringComparer.Ordinal)
             .Select(p => new InputFile { Path = p, Name = PathSafety.ToStoredName(baseDir, p), Length = new FileInfo(p).Length })
+            .DistinctBy(i => i.Name, StringComparer.Ordinal)
             .ToList();
         if (inputs.Count == 0)
         {
             throw new ArgumentException("No input files.");
-        }
-
-        if (inputs.Select(i => i.Name).Distinct(StringComparer.Ordinal).Count() != inputs.Count)
-        {
-            throw new ArgumentException("Input file names must be unique.");
         }
 
         long sliceSize = options.SliceSize ?? ChooseSliceSize(inputs.Select(i => i.Length).ToList(), options.SliceCount);
@@ -136,8 +145,17 @@ public static class Par2Creator
             f.FileId = Par2PacketWriter.ComputeFileId(f.Hash16k, f.Length, f.Name);
         }
 
-        // 2. Slice numbering: files in File ID order, slices in file order.
-        inputs.Sort((a, b) => a.FileId.CompareTo(b.FileId));
+        // 2. Empty files have no slices and go into the non-recovery set (like MultiPar): par2cmdline skips empty
+        //    inputs when creating and reports an empty file of the recovery set as damaged when verifying. Their
+        //    description packets still record them, so Verify checks them and Repair can recreate them.
+        //    Slice numbering: files in File ID order, slices in file order.
+        var empty = inputs.Where(i => i.Length == 0).OrderBy(i => i.FileId).ToList();
+        foreach (var f in empty)
+        {
+            f.FileHash = f.Hash16k;
+        }
+
+        inputs = inputs.Where(i => i.Length > 0).OrderBy(i => i.FileId).ToList();
         int totalSlices = 0;
         foreach (var f in inputs)
         {
@@ -157,8 +175,7 @@ public static class Par2Creator
             throw new ArgumentException("Recovery slice exponents must lie in [0, 65535).");
         }
 
-        var fileIds = inputs.Select(i => i.FileId).ToList();
-        var mainBody = Par2PacketWriter.MainBody(sliceSize, fileIds, []);
+        var mainBody = Par2PacketWriter.MainBody(sliceSize, inputs.Select(i => i.FileId).ToList(), empty.Select(i => i.FileId).ToList());
         var setId = Md5Hash.Compute(mainBody);
         var map = context.CreateBlockMap(totalSlices, recoveryCount);
         foreach (var f in inputs)
@@ -171,7 +188,7 @@ public static class Par2Creator
         }
 
         // 3. Volume files.
-        var volumes = PlanVolumes(outputPath, options, recoveryCount, sliceSize, inputs.Max(i => i.Length));
+        var volumes = PlanVolumes(outputPath, options, recoveryCount, sliceSize, inputs.Select(i => i.Length).DefaultIfEmpty(0).Max());
         for (int v = 0; v < volumes.Count; v++)
         {
             for (int k = 0; k < volumes[v].Count; k++)
@@ -196,7 +213,6 @@ public static class Par2Creator
             HashInputs(inputs, sliceSize, sliceHashes, sliceCrc, handles, context, map);
         }
 
-        var recoveryHeaders = new List<(string File, long Offset, byte[] Header)>();
         var recoveryDone = new bool[recoveryCount];
         if (recoveryCount > 0)
         {
@@ -205,15 +221,15 @@ public static class Par2Creator
                 new FileStream(v.Path, FileMode.Create, FileAccess.ReadWrite, FileShare.Read, 1, FileOptions.RandomAccess));
             try
             {
-                var outputs = new List<(SafeHandleWrapper Handle, long DataOffset, byte[] Header)>();
+                // Recovery packet j (exponent FirstExponent + j) lives in its volume at DataOffset − header length.
+                var outputs = new List<(FileStream Stream, long DataOffset, byte[] Header)>();
                 foreach (var v in volumes)
                 {
                     long pos = 0;
                     for (int k = 0; k < v.Count; k++)
                     {
                         var header = Par2PacketWriter.RecoverySliceHeader(setId, (uint)(v.FirstExponent + k), sliceSize);
-                        recoveryHeaders.Add((v.Path, pos, header));
-                        outputs.Add((new SafeHandleWrapper(volumeStreams[v]), pos + header.Length, header));
+                        outputs.Add((volumeStreams[v], pos + header.Length, header));
                         pos += header.Length + sliceSize;
                     }
 
@@ -254,10 +270,10 @@ public static class Par2Creator
                 {
                     if (!recoveryDone[j])
                     {
-                        FinishRecoveryPacketFromDisk(outputs[j].Handle.Stream, outputs[j].DataOffset, outputs[j].Header, sliceSize);
+                        FinishRecoveryPacketFromDisk(outputs[j].Stream, outputs[j].DataOffset, outputs[j].Header, sliceSize);
                     }
 
-                    RandomAccess.Write(outputs[j].Handle.Stream.SafeFileHandle, outputs[j].Header, outputs[j].DataOffset - outputs[j].Header.Length);
+                    RandomAccess.Write(outputs[j].Stream.SafeFileHandle, outputs[j].Header, outputs[j].DataOffset - outputs[j].Header.Length);
                     map.SetRecovery(j, RecoveryBlockState.Created);
                 }
             }
@@ -283,6 +299,11 @@ public static class Par2Creator
             }
 
             critical.Add(Par2PacketWriter.SliceChecksum(setId, f.FileId, slices));
+        }
+
+        foreach (var f in empty)
+        {
+            critical.Add(Par2PacketWriter.FileDescription(setId, f.FileId, f.FileHash, f.Hash16k, 0, f.Name));
         }
 
         if (!string.IsNullOrEmpty(options.Comment))
@@ -331,8 +352,16 @@ public static class Par2Creator
 
     /// <summary>
     /// Smallest slice size (multiple of 4) for which the slice count (each file rounded up separately) does not
-    /// exceed <paramref name="targetCount"/> (and 32768).
+    /// exceed <paramref name="targetCount"/> (and 32768). When even one slice per file is more than the target,
+    /// the smallest size that gives one slice per file.
     /// </summary>
+    /// <remarks>
+    /// The count only falls as the size grows, so the answer lies between <c>lo = total / target</c> (any smaller size
+    /// needs more than target slices) and <c>hi</c> = the largest file (one slice per file, the fewest possible), and
+    /// is found by bisection. Examples: one file of 1001 bytes, target 10 → lo = 100 gives 11 slices, so the answer is
+    /// 104 (10 slices). Three files of 10 bytes, target 1 → hi = 12 (3 slices; 28 = total / target would also give 3
+    /// slices, but larger recovery slices).
+    /// </remarks>
     public static long ChooseSliceSize(IReadOnlyList<long> lengths, int targetCount)
     {
         targetCount = Math.Clamp(targetCount, 1, Par2Math.MaxInputSlices);
@@ -344,7 +373,12 @@ public static class Par2Creator
 
         long Count(long size) => lengths.Sum(l => (l + size - 1) / size);
         long lo = Math.Max(4, (total / targetCount) / 4 * 4);
-        long hi = Math.Max(lo, (lengths.Max() + 3) / 4 * 4);
+        long hi = Math.Max(4, (lengths.Max() + 3) / 4 * 4);
+        if (lo >= hi)
+        {
+            return hi;
+        }
+
         if (Count(lo) <= targetCount)
         {
             return lo;
@@ -366,49 +400,40 @@ public static class Par2Creator
         return hi;
     }
 
+    /// <summary>
+    /// Distributes the recovery slices over volume files and names them like par2cmdline:
+    /// "set.vol{first exponent}+{count}.par2", both numbers zero-padded to the widest value that occurs (the
+    /// exponent after the last file included).
+    /// </summary>
+    /// <remarks>
+    /// Slices per file for 10 recovery slices (first exponent 0):
+    /// <code>
+    /// Exponential               1, 2, 4, 3      set.vol00+1.par2, set.vol01+2.par2, set.vol03+4.par2, set.vol07+3.par2
+    /// Exponential, 2 volumes    4, 6            low = 4: the smallest power of two with low·(2² − 1) ≥ 10
+    /// Uniform, 3 volumes        4, 3, 3
+    /// LimitSize, largest input = 3 slices:      1, 2, 3, 3, 1
+    /// </code>
+    /// </remarks>
     private static List<Volume> PlanVolumes(string outputPath, Par2CreateOptions options, int recoveryCount, long sliceSize, long largestFile)
     {
-        var counts = new List<int>();
-        int remaining = recoveryCount;
-        switch (options.Scheme)
+        var volumes = new List<Volume>();
+        if (recoveryCount == 0)
         {
-            case Par2VolumeScheme.Uniform:
-            {
-                int n = Math.Clamp(options.VolumeCount ?? 1, 1, Math.Max(1, recoveryCount));
-                for (int i = 0; i < n && remaining > 0; i++)
-                {
-                    int c = (remaining + (n - i) - 1) / (n - i);
-                    counts.Add(c);
-                    remaining -= c;
-                }
-
-                break;
-            }
-
-            default:
-            {
-                int limit = options.Scheme == Par2VolumeScheme.LimitSize ? (int)Math.Max(1, Math.Min(int.MaxValue, largestFile / sliceSize)) : int.MaxValue;
-                int next = 1;
-                while (remaining > 0)
-                {
-                    int c = Math.Min(Math.Min(next, remaining), limit);
-                    counts.Add(c);
-                    remaining -= c;
-                    next = (int)Math.Min(int.MaxValue / 2, (long)next * 2);
-                }
-
-                break;
-            }
+            return volumes;
         }
+
+        var counts = options.Scheme == Par2VolumeScheme.Uniform
+            ? UniformCounts(recoveryCount, options.VolumeCount ?? 1)
+            : ExponentialCounts(recoveryCount, options.Scheme == Par2VolumeScheme.LimitSize ? null : options.VolumeCount,
+                options.Scheme == Par2VolumeScheme.LimitSize ? (int)Math.Max(1, Math.Min(int.MaxValue, largestFile / sliceSize)) : int.MaxValue);
 
         var baseName = outputPath.EndsWith(".par2", StringComparison.OrdinalIgnoreCase) ? outputPath[..^5] : outputPath;
         int lowDigits = Digits(options.FirstExponent + recoveryCount);
-        int countDigits = Digits(counts.Count == 0 ? 0 : counts.Max());
-        var volumes = new List<Volume>();
+        int countDigits = Digits(counts.Max());
         int exp = options.FirstExponent;
         foreach (var c in counts)
         {
-            var name = $"{baseName}.vol{exp.ToString().PadLeft(lowDigits, '0')}+{c.ToString().PadLeft(countDigits, '0')}.par2";
+            var name = $"{baseName}.vol{exp.ToString(CultureInfo.InvariantCulture).PadLeft(lowDigits, '0')}+{c.ToString(CultureInfo.InvariantCulture).PadLeft(countDigits, '0')}.par2";
             volumes.Add(new Volume(name, exp, c));
             exp += c;
         }
@@ -416,7 +441,51 @@ public static class Par2Creator
         return volumes;
     }
 
-    private static int Digits(int v) => Math.Max(1, v.ToString().Length);
+    /// <summary>n files (at most one per slice), the first ones one slice larger: 10 in 3 → 4, 3, 3.</summary>
+    private static List<int> UniformCounts(int recoveryCount, int volumeCount)
+    {
+        int n = Math.Clamp(volumeCount, 1, recoveryCount);
+        var counts = new List<int>(n);
+        int remaining = recoveryCount;
+        for (int i = 0; i < n; i++)
+        {
+            int c = (remaining + (n - i) - 1) / (n - i);
+            counts.Add(c);
+            remaining -= c;
+        }
+
+        return counts;
+    }
+
+    /// <summary>
+    /// low, 2·low, 4·low, ... (each at most <paramref name="limit"/>) until all slices are placed. low = 1, or for
+    /// a given file count n the smallest power of two with low·(2^n − 1) ≥ the slice count (as par2cmdline -n).
+    /// </summary>
+    private static List<int> ExponentialCounts(int recoveryCount, int? volumeCount, int limit)
+    {
+        long next = 1;
+        if (volumeCount is int n)
+        {
+            long capacity = (1L << Math.Clamp(n, 1, 31)) - 1;
+            while (next * capacity < recoveryCount)
+            {
+                next *= 2;
+            }
+        }
+
+        var counts = new List<int>();
+        for (int remaining = recoveryCount; remaining > 0;)
+        {
+            int c = (int)Math.Min(Math.Min(next, remaining), limit);
+            counts.Add(c);
+            remaining -= c;
+            next = Math.Min(int.MaxValue, next * 2);
+        }
+
+        return counts;
+    }
+
+    private static int Digits(int v) => v.ToString(CultureInfo.InvariantCulture).Length;
 
     private static void HashInputs(List<InputFile> inputs, long sliceSize, Md5Hash[] sliceHashes, uint[] sliceCrc, FileHandleCache handles, OperationContext context, BlockStateMap map)
     {
@@ -457,12 +526,6 @@ public static class Par2Creator
         }
 
         md5.GetHashAndReset().CopyTo(header, 16);
-    }
-
-    /// <summary>Wraps a FileStream so the sink can write positionally to its handle.</summary>
-    private sealed class SafeHandleWrapper(FileStream stream)
-    {
-        public FileStream Stream { get; } = stream;
     }
 
     /// <summary>Coefficient (j, i) = base_i ^ exponent_j.</summary>
@@ -527,12 +590,12 @@ public static class Par2Creator
     }
 
     /// <summary>Writes recovery data into the volume files and, when a whole slice arrives at once, its packet MD5.</summary>
-    private sealed class RecoverySink(List<(SafeHandleWrapper Handle, long DataOffset, byte[] Header)> outputs, long sliceSize, bool[] done, BlockStateMap map) : IRegionSink
+    private sealed class RecoverySink(List<(FileStream Stream, long DataOffset, byte[] Header)> outputs, long sliceSize, bool[] done, BlockStateMap map) : IRegionSink
     {
         public void Write(int index, long offset, ReadOnlySpan<byte> source)
         {
-            var (h, dataOffset, header) = outputs[index];
-            RandomAccess.Write(h.Stream.SafeFileHandle, source, dataOffset + offset);
+            var (stream, dataOffset, header) = outputs[index];
+            RandomAccess.Write(stream.SafeFileHandle, source, dataOffset + offset);
             if (offset == 0 && source.Length == sliceSize)
             {
                 using var md5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5);

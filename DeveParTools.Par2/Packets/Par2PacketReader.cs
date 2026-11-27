@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
+using DeveParTools.Core.IO;
 using Microsoft.Win32.SafeHandles;
 
 namespace DeveParTools.Par2.Packets;
@@ -12,7 +13,10 @@ public sealed class Par2FileReadResult
 
     public List<Par2Packet> Packets { get; } = new();
 
-    /// <summary>Number of byte ranges that looked like packets but failed their checksum.</summary>
+    /// <summary>
+    /// Number of byte ranges that looked like packets but could not be used: a failed checksum, an impossible
+    /// length, or a body that does not fit its packet type.
+    /// </summary>
     public int DamagedPackets { get; set; }
 }
 
@@ -20,10 +24,37 @@ public sealed class Par2FileReadResult
 /// Reads packets from a PAR2 file. Damaged files are handled by searching for the next magic sequence, so every
 /// intact packet is recovered even when parts of the file are corrupt.
 /// </summary>
+/// <remarks>
+/// <para>The file is walked packet by packet. A packet whose MD5 matches is trusted, including its length field, so
+/// the walk jumps over its whole body: packets of unknown types (e.g. from newer clients) are ignored that way, as
+/// the specification requires, and so is a packet of a known type whose body cannot be parsed (it is counted in
+/// <see cref="Par2FileReadResult.DamagedPackets"/>).</para>
+/// <para>Anything else (garbage, a damaged packet, a truncated packet at the end) is skipped by searching for the
+/// next magic sequence from the following byte on, like par2cmdline does:</para>
+/// <code>
+/// [packet A ok][packet B, damaged    ][junk][packet C ok]
+///  ^ jump      ^ MD5 fails → search from B+1 ...  ^ found magic
+/// </code>
+/// </remarks>
 public static class Par2PacketReader
 {
     private const int SearchChunk = 1 << 20;
     private const long MaxNonDataPacket = 64L << 20;
+
+    private enum ReadOutcome
+    {
+        /// <summary>MD5 ok and parsed.</summary>
+        Packet,
+
+        /// <summary>MD5 ok, but the type is unknown: skipped.</summary>
+        Unknown,
+
+        /// <summary>MD5 ok, but the body does not fit the type's layout.</summary>
+        Malformed,
+
+        /// <summary>MD5 mismatch, or too large to be a non-recovery packet.</summary>
+        Damaged,
+    }
 
     public static Par2FileReadResult ReadFile(string path, CancellationToken cancellationToken = default)
     {
@@ -35,22 +66,30 @@ public static class Par2PacketReader
         while (pos + Par2PacketTypes.HeaderSize <= fileLen)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            ReadExactly(handle, pos, header);
+            FileHandleCache.ReadPadded(handle, pos, header);
             if (header[..8].SequenceEqual(Par2PacketTypes.Magic))
             {
-                long length = (long)BinaryPrimitives.ReadUInt64LittleEndian(header[8..]);
-                if (length >= Par2PacketTypes.HeaderSize && length % 4 == 0 && pos + length <= fileLen)
+                // Compared as unsigned and against the bytes left: a damaged length of 2^63 or more must neither turn
+                // negative nor overflow "pos + length".
+                ulong length = BinaryPrimitives.ReadUInt64LittleEndian(header[8..]);
+                Par2Packet? packet = null;
+                var outcome = length >= Par2PacketTypes.HeaderSize && length % 4 == 0 && length <= (ulong)(fileLen - pos)
+                    ? TryReadPacket(handle, path, pos, (long)length, header, out packet)
+                    : ReadOutcome.Damaged;
+                if (packet != null)
                 {
-                    var packet = TryReadPacket(handle, path, pos, length, header);
-                    if (packet != null)
-                    {
-                        result.Packets.Add(packet);
-                        pos += length;
-                        continue;
-                    }
+                    result.Packets.Add(packet);
+                }
+                else if (outcome != ReadOutcome.Unknown)
+                {
+                    result.DamagedPackets++;
                 }
 
-                result.DamagedPackets++;
+                if (outcome != ReadOutcome.Damaged)
+                {
+                    pos += (long)length;
+                    continue;
+                }
             }
 
             long next = FindMagic(handle, pos + 1, fileLen);
@@ -65,8 +104,9 @@ public static class Par2PacketReader
         return result;
     }
 
-    private static Par2Packet? TryReadPacket(SafeFileHandle handle, string path, long pos, long length, ReadOnlySpan<byte> header)
+    private static ReadOutcome TryReadPacket(SafeFileHandle handle, string path, long pos, long length, ReadOnlySpan<byte> header, out Par2Packet? packet)
     {
+        packet = null;
         var expectedMd5 = header.Slice(16, 16);
         var setId = Md5Hash.FromBytes(header.Slice(32, 16));
         var type = header.Slice(48, 16);
@@ -75,28 +115,28 @@ public static class Par2PacketReader
         bool isRecovery = type.SequenceEqual(Par2PacketTypes.RecoverySlice);
         if (!isRecovery && bodyLen > MaxNonDataPacket)
         {
-            return null;
+            return ReadOutcome.Damaged;
         }
 
-        // Verify the packet MD5 over [setId .. end of body], streaming for large packets.
+        // Verify the packet MD5 over [setId .. end of body], streaming for (large) recovery packets, whose data
+        // stays on disk.
         using var md5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
         md5.AppendData(header[32..]);
         byte[]? body = null;
         if (!isRecovery)
         {
             body = new byte[bodyLen];
-            ReadExactly(handle, pos + Par2PacketTypes.HeaderSize, body);
+            FileHandleCache.ReadPadded(handle, pos + Par2PacketTypes.HeaderSize, body);
             md5.AppendData(body);
         }
         else
         {
-            var buf = new byte[(int)Math.Min(bodyLen, 1 << 20)];
+            var buf = new byte[(int)Math.Min(bodyLen, SearchChunk)];
             long off = pos + Par2PacketTypes.HeaderSize;
-            long left = bodyLen;
-            while (left > 0)
+            for (long left = bodyLen; left > 0;)
             {
                 int n = (int)Math.Min(left, buf.Length);
-                ReadExactly(handle, off, buf.AsSpan(0, n));
+                FileHandleCache.ReadPadded(handle, off, buf.AsSpan(0, n));
                 md5.AppendData(buf.AsSpan(0, n));
                 off += n;
                 left -= n;
@@ -107,23 +147,35 @@ public static class Par2PacketReader
         md5.GetHashAndReset(actual);
         if (!actual.SequenceEqual(expectedMd5))
         {
-            return null;
+            return ReadOutcome.Damaged;
         }
 
         if (isRecovery)
         {
             if (bodyLen < 4)
             {
-                return null;
+                return ReadOutcome.Malformed;
             }
 
             Span<byte> exp = stackalloc byte[4];
-            ReadExactly(handle, pos + Par2PacketTypes.HeaderSize, exp);
-            return new Par2RecoverySlicePacket(setId, BinaryPrimitives.ReadUInt32LittleEndian(exp), path, pos + Par2PacketTypes.HeaderSize + 4, bodyLen - 4);
+            FileHandleCache.ReadPadded(handle, pos + Par2PacketTypes.HeaderSize, exp);
+            packet = new Par2RecoverySlicePacket(setId, BinaryPrimitives.ReadUInt32LittleEndian(exp), path, pos + Par2PacketTypes.HeaderSize + 4, bodyLen - 4);
+            return ReadOutcome.Packet;
         }
 
-        return Parse(setId, type, body!);
+        if (!IsKnownType(type))
+        {
+            return ReadOutcome.Unknown;
+        }
+
+        packet = Parse(setId, type, body!);
+        return packet != null ? ReadOutcome.Packet : ReadOutcome.Malformed;
     }
+
+    private static bool IsKnownType(ReadOnlySpan<byte> type)
+        => type.SequenceEqual(Par2PacketTypes.Main) || type.SequenceEqual(Par2PacketTypes.FileDescription) || type.SequenceEqual(Par2PacketTypes.SliceChecksum)
+           || type.SequenceEqual(Par2PacketTypes.Creator) || type.SequenceEqual(Par2PacketTypes.UnicodeFilename) || type.SequenceEqual(Par2PacketTypes.AsciiComment)
+           || type.SequenceEqual(Par2PacketTypes.UnicodeComment);
 
     /// <summary>Parse the body of a non-recovery packet. Unknown types return null (they are ignored).</summary>
     internal static Par2Packet? Parse(Md5Hash setId, ReadOnlySpan<byte> type, byte[] body)
@@ -239,48 +291,29 @@ public static class Par2PacketReader
         return Encoding.UTF8.GetString(bytes[..end]);
     }
 
+    /// <summary>
+    /// Offset of the next magic sequence at or after <paramref name="start"/>, or -1. The file is searched in chunks
+    /// that overlap by 7 bytes, so a magic sequence across a chunk boundary is found as well.
+    /// </summary>
     private static long FindMagic(SafeFileHandle handle, long start, long fileLen)
     {
         var buf = new byte[SearchChunk + 7];
-        long pos = start;
-        while (pos < fileLen)
+        for (long pos = start; ; )
         {
-            int want = (int)Math.Min(buf.Length, fileLen - pos);
-            int got = RandomAccess.Read(handle, buf.AsSpan(0, want), pos);
-            if (got <= 0)
-            {
-                return -1;
-            }
-
+            int got = FileHandleCache.ReadPadded(handle, pos, buf.AsSpan(0, (int)Math.Clamp(fileLen - pos, 0, buf.Length)));
             int idx = buf.AsSpan(0, got).IndexOf(Par2PacketTypes.Magic);
             if (idx >= 0)
             {
                 return pos + idx;
             }
 
-            if (got < 8)
+            if (got < buf.Length)
             {
+                // That was the end of the file.
                 return -1;
             }
 
             pos += got - 7;
-        }
-
-        return -1;
-    }
-
-    private static void ReadExactly(SafeFileHandle handle, long offset, Span<byte> destination)
-    {
-        int total = 0;
-        while (total < destination.Length)
-        {
-            int n = RandomAccess.Read(handle, destination[total..], offset + total);
-            if (n <= 0)
-            {
-                throw new EndOfStreamException();
-            }
-
-            total += n;
         }
     }
 }

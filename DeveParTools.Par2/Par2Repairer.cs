@@ -66,60 +66,100 @@ public static class Par2Repairer
             };
         }
 
-        var toRebuild = verify.Files.Where(f => f.Status != Par2FileStatus.Complete && f.TargetPath.Length > 0).ToList();
+        // Files whose stored name was rejected as unsafe (empty target) are never written; see Par2Verifier.
+        // Non-recovery files have no slices: an empty one is recreated, another one only from a complete copy.
+        static bool Restorable(Par2FileVerification f) => f.File.InRecoverySet || f.File.Length == 0 || f.FoundAs != null;
+        var broken = verify.Files.Where(f => f.Status != Par2FileStatus.Complete).ToList();
+        var toRebuild = broken.Where(f => f.TargetPath.Length > 0 && Restorable(f)).ToList();
+        var unsafeNames = broken.Where(f => f.TargetPath.Length == 0).Select(f => f.File.Name).ToList();
+        var unprotected = broken.Where(f => f.TargetPath.Length > 0 && !Restorable(f)).Select(f => f.TargetPath).ToList();
         var missing = Enumerable.Range(0, set.TotalSlices).Where(i => verify.SliceSources[i] == null).ToList();
         observer.Stage("Repairing");
 
-        // Temporary output files, pre-filled with every slice that exists somewhere.
+        // Choose the recovery slices first, so nothing is written when the matrix cannot be inverted.
+        var selection = missing.Count > 0 ? ChooseRecoverySlices(set, missing, context.CancellationToken) : null;
+        if (missing.Count > 0 && selection == null)
+        {
+            return new Par2RepairResult
+            {
+                Success = false,
+                Message = $"Repair not possible: no invertible selection of {missing.Count} out of {verify.RecoverySlicesAvailable} recovery slice(s) was found.",
+            };
+        }
+
+        // Temporary output files, pre-filled with every slice that exists somewhere. When anything fails (I/O error,
+        // cancellation), they are removed again and the original files stay as they were.
         var temp = new Dictionary<Par2FileVerification, FileStream>();
         using var handles = new FileHandleCache();
+        bool rebuilt = false;
         try
         {
             foreach (var fv in toRebuild)
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(fv.TargetPath)!);
-                var tmpPath = fv.TargetPath + ".deveparttools.tmp";
-                var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.ReadWrite, FileShare.Read, 1, FileOptions.RandomAccess);
-                fs.SetLength(fv.File.Length);
+                var fs = new FileStream(TempPathOf(fv), FileMode.Create, FileAccess.ReadWrite, FileShare.Read, 1, FileOptions.RandomAccess);
                 temp[fv] = fs;
+                fs.SetLength(fv.File.Length);
             }
 
             Parallel.ForEach(toRebuild, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, context.Threads), CancellationToken = context.CancellationToken }, fv =>
             {
+                if (!fv.File.InRecoverySet)
+                {
+                    if (fv.FoundAs != null)
+                    {
+                        using var copy = File.OpenRead(fv.FoundAs);
+                        copy.CopyTo(temp[fv]);
+                    }
+
+                    return;
+                }
+
                 var buf = new byte[set.SliceSize];
                 for (int s = 0; s < fv.File.SliceCount; s++)
                 {
                     int idx = fv.File.FirstSlice + s;
                     if (verify.SliceSources[idx] is { } src)
                     {
+                        // A source can be shorter than the slice: e.g. a file truncated inside a slice that ends
+                        // in zeros still matches (checksums are over the zero-padded slice). The missing part is
+                        // zeros, not whatever the buffer held from the previous slice.
                         long offset = s * set.SliceSize;
                         int len = (int)Math.Min(set.SliceSize, fv.File.Length - offset);
-                        handles.ReadPadded(src.Path, src.Offset, buf.AsSpan(0, Math.Min(len, src.Length)));
+                        int have = Math.Min(len, src.Length);
+                        handles.ReadPadded(src.Path, src.Offset, buf.AsSpan(0, have));
+                        buf.AsSpan(have, len - have).Clear();
                         RandomAccess.Write(temp[fv].SafeFileHandle, buf.AsSpan(0, len), offset);
                     }
                 }
             });
 
-            if (missing.Count > 0)
+            if (selection is { } sel)
             {
                 foreach (var m in missing)
                 {
                     map?.Set(m, BlockState.Repairing);
                 }
 
-                Reconstruct(verify, missing, temp, handles, context);
+                Reconstruct(verify, missing, sel.Exponents, sel.Inverse, temp, handles, context);
             }
 
             foreach (var fs in temp.Values)
             {
                 fs.Flush(true);
             }
+
+            rebuilt = true;
         }
         finally
         {
-            foreach (var fs in temp.Values)
+            foreach (var (fv, fs) in temp)
             {
                 fs.Dispose();
+                if (!rebuilt)
+                {
+                    File.Delete(TempPathOf(fv));
+                }
             }
         }
 
@@ -129,7 +169,7 @@ public static class Par2Repairer
         var failed = new List<string>();
         foreach (var fv in toRebuild)
         {
-            var tmpPath = fv.TargetPath + ".deveparttools.tmp";
+            var tmpPath = TempPathOf(fv);
             Md5Hash hash;
             using (var fs = File.OpenRead(tmpPath))
             {
@@ -169,15 +209,34 @@ public static class Par2Repairer
             }
         }
 
+        var messages = new List<string>();
+        if (failed.Count > 0)
+        {
+            messages.Add($"{failed.Count} file(s) failed verification after repair.");
+        }
+
+        if (unsafeNames.Count > 0)
+        {
+            messages.Add($"{unsafeNames.Count} file(s) with an unsafe name were not restored: {string.Join(", ", unsafeNames)}.");
+        }
+
+        if (unprotected.Count > 0)
+        {
+            messages.Add($"{unprotected.Count} file(s) are not protected by recovery data and were not restored: {string.Join(", ", unprotected)}.");
+        }
+
         return new Par2RepairResult
         {
-            Success = failed.Count == 0,
+            Success = messages.Count == 0,
             RepairedFiles = repaired,
-            FailedFiles = failed,
+            FailedFiles = [.. failed, .. unsafeNames, .. unprotected],
             SlicesReconstructed = missing.Count,
-            Message = failed.Count == 0 ? $"Repaired {repaired.Count} file(s)." : $"{failed.Count} file(s) failed verification after repair.",
+            Message = messages.Count == 0 ? $"Repaired {repaired.Count} file(s)." : string.Join(" ", messages),
         };
     }
+
+    /// <summary>The temporary file a target is rebuilt in, next to it: "name.deveparttools.tmp".</summary>
+    private static string TempPathOf(Par2FileVerification fv) => fv.TargetPath + ".deveparttools.tmp";
 
     /// <summary>"name.1", "name.2", ... (first that does not exist), like par2cmdline.</summary>
     public static string NextBackupName(string path)
@@ -192,19 +251,23 @@ public static class Par2Repairer
         }
     }
 
-    private static void Reconstruct(Par2VerifyResult verify, List<int> missing, Dictionary<Par2FileVerification, FileStream> temp, FileHandleCache handles, OperationContext context)
+    /// <summary>
+    /// Chooses L = |missing| recovery slices whose matrix <c>A[r][c] = base_missing[c] ^ e_r</c> is invertible: the
+    /// first L exponents, else the window slides along the sorted exponents. Returns null when no window works.
+    /// </summary>
+    /// <example>
+    /// Missing slices 0 and 2 (bases 2^1 and 2^4) with exponents {0, 21845, 30000}: the window {0, 21845} is
+    /// singular, because <c>det = 2^21845·(16^21845 − 2^21845)·…</c> vanishes when (16/2)^21845 = 8^21845 = 1, and
+    /// 8 = 2^3 has order 65535/3 = 21845. The next window {21845, 30000} is invertible and is used.
+    /// </example>
+    internal static (List<uint> Exponents, GfMatrix<ushort> Inverse)? ChooseRecoverySlices(Par2RecoverySet set, List<int> missing, CancellationToken cancellationToken)
     {
-        var set = verify.Set;
         var field = new Gf16Field(Par2Math.Field);
         int l = missing.Count;
         var exponents = set.RecoverySlices.Keys.ToList();
-
-        // Choose L recovery slices whose matrix is invertible (first L; on failure slide the window).
-        GfMatrix<ushort>? inverse = null;
-        List<uint>? chosen = null;
-        for (int start = 0; start + l <= exponents.Count && inverse == null; start++)
+        for (int start = 0; start + l <= exponents.Count; start++)
         {
-            var candidate = exponents.Skip(start).Take(l).ToList();
+            var candidate = exponents.GetRange(start, l);
             var a = new GfMatrix<ushort>(l, l, field);
             for (int r = 0; r < l; r++)
             {
@@ -214,18 +277,20 @@ public static class Par2Repairer
                 }
             }
 
-            if (a.TryInvert(context.CancellationToken))
+            if (a.TryInvert(cancellationToken))
             {
-                inverse = a;
-                chosen = candidate;
+                return (candidate, a);
             }
         }
 
-        if (inverse == null || chosen == null)
-        {
-            throw new InvalidOperationException("No invertible selection of recovery slices was found.");
-        }
+        return null;
+    }
 
+    private static void Reconstruct(Par2VerifyResult verify, List<int> missing, List<uint> chosen, GfMatrix<ushort> inverse, Dictionary<Par2FileVerification, FileStream> temp, FileHandleCache handles, OperationContext context)
+    {
+        var set = verify.Set;
+        var field = new Gf16Field(Par2Math.Field);
+        int l = missing.Count;
         var missingSet = new HashSet<int>(missing);
         var known = Enumerable.Range(0, set.TotalSlices).Where(i => !missingSet.Contains(i)).ToList();
         int n = known.Count + l;
@@ -234,13 +299,14 @@ public static class Par2Repairer
         var source = new RepairSource(verify, known, chosen.Select(e => set.RecoverySlices[e]).ToList(), handles);
         var coefficients = new Pass1Coefficients(known, chosen);
 
-        // Owners of the missing slices for pass 2 output.
+        // Owners of the missing slices for pass 2 output. A slice of a file that is not rebuilt (unsafe name) still
+        // has to be solved for, but gets length 0, so TargetSink drops it.
         var targets = new (FileStream Stream, long Offset, long Length)[l];
         for (int j = 0; j < l; j++)
         {
             var fv = verify.Files.First(f => missing[j] >= f.File.FirstSlice && missing[j] < f.File.FirstSlice + f.File.SliceCount);
             long off = (missing[j] - fv.File.FirstSlice) * set.SliceSize;
-            targets[j] = (temp[fv], off, Math.Min(set.SliceSize, fv.File.Length - off));
+            targets[j] = temp.TryGetValue(fv, out var stream) ? (stream, off, Math.Min(set.SliceSize, fv.File.Length - off)) : (null!, 0, 0);
         }
 
         var options = context.Combine.Create(new Progress<double>(p => context.Observer.Progress(p, "Reconstructing")), context.MemoryBudget / 3);
@@ -311,6 +377,10 @@ public static class Par2Repairer
         }
     }
 
+    /// <summary>
+    /// Writes rebuilt slice data into the temporary files. Only the slice's real length is written: the zero padding
+    /// of a last slice (and everything of a length-0 target) is dropped.
+    /// </summary>
     private sealed class TargetSink((FileStream Stream, long Offset, long Length)[] targets, long rangeOffset) : IRegionSink
     {
         public void Write(int index, long offset, ReadOnlySpan<byte> source)

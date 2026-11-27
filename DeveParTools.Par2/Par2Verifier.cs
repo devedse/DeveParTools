@@ -63,6 +63,11 @@ public sealed class Par2VerifyResult
 
     public required string BaseDirectory { get; init; }
 
+    /// <summary>
+    /// The files of the recovery set in set order, then the non-recovery files that have a description packet.
+    /// Non-recovery files are not protected by recovery data: an empty one can always be recreated, another one
+    /// only from a complete copy found elsewhere (<see cref="Par2FileVerification.FoundAs"/>).
+    /// </summary>
     public required IReadOnlyList<Par2FileVerification> Files { get; init; }
 
     /// <summary>Per input slice: where intact data exists, or null when missing.</summary>
@@ -72,11 +77,20 @@ public sealed class Par2VerifyResult
 
     public int RecoverySlicesAvailable => Set.RecoverySlices.Count;
 
-    /// <summary>All critical information (descriptions, checksums) is present.</summary>
-    public bool CriticalDataComplete => Set.Files.All(f => f.HasDescription && f.SliceChecksums != null);
+    /// <summary>
+    /// Every file of the recovery set has its description packet, so all names, lengths and the slice numbering are
+    /// known: what repair needs. Slice checksum packets are optional, as in par2cmdline: without one, a complete file
+    /// is still recognised by its MD5, but the intact slices of a damaged file cannot be located, so all of its
+    /// slices count as missing.
+    /// </summary>
+    public bool CriticalDataComplete => Set.Files.All(f => f.HasDescription);
 
     public bool AllFilesComplete => Files.All(f => f.Status == Par2FileStatus.Complete);
 
+    /// <summary>
+    /// The recovery set can be rebuilt: critical data complete and no more missing slices than recovery slices.
+    /// Non-recovery files do not count here (as in par2cmdline); one that cannot be restored is reported by the repair.
+    /// </summary>
     public bool RepairPossible => CriticalDataComplete && MissingSlices <= RecoverySlicesAvailable;
 }
 
@@ -111,8 +125,10 @@ public static class Par2Verifier
             rIdx++;
         }
 
+        // Non-recovery files (e.g. empty files) are checked too, but only when their description says what to
+        // check; they have no slices.
         var files = new List<Par2FileVerification>();
-        foreach (var f in set.Files)
+        foreach (var f in set.Files.Concat(set.NonRecoveryFiles.Where(n => n.HasDescription)))
         {
             string target = string.Empty;
             if (f.HasDescription)
@@ -154,7 +170,7 @@ public static class Par2Verifier
 
             long len = new FileInfo(fv.TargetPath).Length;
             map.SetRange(fv.File.FirstSlice, fv.File.SliceCount, BlockState.Scanning);
-            bool complete = CheckInPlace(fv, set, matcher, sources, handles, map);
+            bool complete = CheckInPlace(fv, set, sources, handles, map);
             if (complete)
             {
                 fv.Status = Par2FileStatus.Complete;
@@ -164,7 +180,7 @@ public static class Par2Verifier
                 fv.Status = Par2FileStatus.Damaged;
                 foreach (var hit in BlockScanner.Scan(fv.TargetPath, matcher, handles, scanThreads, token))
                 {
-                    Record(hit, fv.TargetPath, set, matcher, sources, map, files);
+                    Record(hit, fv.TargetPath, matcher, sources, map, files);
                 }
             }
 
@@ -183,14 +199,16 @@ public static class Par2Verifier
             observer.Log(ParLogLevel.Info, $"Scanning extra file {extra}");
             foreach (var hit in BlockScanner.Scan(extra, matcher, handles, scanThreads, token))
             {
-                Record(hit, extra, set, matcher, sources, map, files);
+                Record(hit, extra, matcher, sources, map, files);
             }
 
-            // A complete copy of a damaged/missing file under another name?
+            // A complete copy of a damaged/missing file under another name? (MD5 only when a length matches.)
             long len = new FileInfo(extra).Length;
+            Md5Hash? extraMd5 = null;
             foreach (var fv in files.Where(f => f.Status != Par2FileStatus.Complete && f.File.Length == len && f.FoundAs == null))
             {
-                if (Md5OfFile(extra) == fv.File.FileHash)
+                extraMd5 ??= Md5OfFile(extra);
+                if (extraMd5.Value == fv.File.FileHash)
                 {
                     fv.FoundAs = extra;
                 }
@@ -228,14 +246,17 @@ public static class Par2Verifier
         return result;
     }
 
-    /// <summary>Reads the file sequentially, checking every slice at its expected offset. Returns true if complete.</summary>
-    private static bool CheckInPlace(Par2FileVerification fv, Par2RecoverySet set, Par2SliceMatcher matcher, SliceLocation?[] sources, FileHandleCache handles, BlockStateMap map)
+    /// <summary>
+    /// Reads the file sequentially, checking every slice at its expected offset, and returns true when the file is
+    /// complete (right length and whole-file MD5). A complete file vouches for all of its slices, also when its
+    /// slice checksum packet is missing.
+    /// </summary>
+    private static bool CheckInPlace(Par2FileVerification fv, Par2RecoverySet set, SliceLocation?[] sources, FileHandleCache handles, BlockStateMap map)
     {
         var f = fv.File;
         long len = new FileInfo(fv.TargetPath).Length;
         using var fileMd5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
         var buf = new byte[set.SliceSize];
-        bool allSlices = f.SliceChecksums != null;
         long sliceCountInFile = (len + set.SliceSize - 1) / set.SliceSize;
         for (long s = 0; s < sliceCountInFile; s++)
         {
@@ -243,7 +264,7 @@ public static class Par2Verifier
             fileMd5.AppendData(buf, 0, n);
             if (s >= f.SliceCount || f.SliceChecksums == null)
             {
-                allSlices = false;
+                // Data beyond the expected end, or nothing to compare with.
                 continue;
             }
 
@@ -256,16 +277,30 @@ public static class Par2Verifier
             }
             else
             {
-                allSlices = false;
                 map.Set(idx, BlockState.Damaged);
             }
         }
 
         var hash = Md5Hash.FromBytes(fileMd5.GetHashAndReset());
-        return len == f.Length && hash == f.FileHash && (allSlices || f.SliceCount == 0);
+        if (len != f.Length || hash != f.FileHash)
+        {
+            return false;
+        }
+
+        for (int s = 0; s < f.SliceCount; s++)
+        {
+            int idx = f.FirstSlice + s;
+            if (sources[idx] == null)
+            {
+                sources[idx] = new SliceLocation(fv.TargetPath, s * set.SliceSize, (int)Math.Min(set.SliceSize, len - s * set.SliceSize));
+                map.Set(idx, BlockState.Found);
+            }
+        }
+
+        return true;
     }
 
-    private static void Record(FoundBlock hit, string path, Par2RecoverySet set, Par2SliceMatcher matcher, SliceLocation?[] sources, BlockStateMap map, List<Par2FileVerification> files)
+    private static void Record(FoundBlock hit, string path, Par2SliceMatcher matcher, SliceLocation?[] sources, BlockStateMap map, List<Par2FileVerification> files)
     {
         // The matcher reports a representative; every slice with identical contents is satisfied by this data.
         foreach (int idx in matcher.SlicesWithSameContent(hit.BlockIndex))
@@ -275,17 +310,12 @@ public static class Par2Verifier
                 continue;
             }
 
+            // A slice at its own place in its own file was already found by CheckInPlace (same bytes, same zero
+            // padding at the end), so a hit here is either in the owner's file at another offset or elsewhere.
             sources[idx] = new SliceLocation(path, hit.Offset, hit.Length);
             var owner = files.First(f => idx >= f.File.FirstSlice && idx < f.File.FirstSlice + f.File.SliceCount);
-            long expectedOffset = (idx - owner.File.FirstSlice) * set.SliceSize;
-            var state = string.Equals(owner.TargetPath, path, StringComparison.Ordinal)
-                ? (hit.Offset == expectedOffset ? BlockState.Found : BlockState.FoundMoved)
-                : BlockState.FoundElsewhere;
-            map.Set(idx, state);
-            if (state != BlockState.Found)
-            {
-                map.FoundAt[idx] = new BlockLocation(path, hit.Offset, hit.Length);
-            }
+            map.Set(idx, string.Equals(owner.TargetPath, path, StringComparison.Ordinal) ? BlockState.FoundMoved : BlockState.FoundElsewhere);
+            map.FoundAt[idx] = new BlockLocation(path, hit.Offset, hit.Length);
         }
     }
 
@@ -304,7 +334,6 @@ internal sealed class Par2SliceMatcher : IBlockMatcher
 {
     private readonly Dictionary<uint, List<int>> _byCrc = new();
     private readonly (Md5Hash Md5, uint Crc)[] _checks;
-    private readonly bool[] _isTail;
     private readonly Dictionary<(Md5Hash, uint), List<int>> _groups = new();
     private readonly Dictionary<int, List<int>> _tailsByLength = new();
     private readonly ulong[] _filter = new ulong[1 << 14]; // 2^20 bit membership filter on the CRC
@@ -317,7 +346,6 @@ internal sealed class Par2SliceMatcher : IBlockMatcher
         BlockSize = (int)set.SliceSize;
         _roll = new RollingCrc32(BlockSize);
         _checks = new (Md5Hash, uint)[set.TotalSlices];
-        _isTail = new bool[set.TotalSlices];
         foreach (var f in set.Files)
         {
             if (f.SliceChecksums == null)
@@ -325,7 +353,8 @@ internal sealed class Par2SliceMatcher : IBlockMatcher
                 continue;
             }
 
-            for (int s = 0; s < f.SliceCount && s < f.SliceChecksums.Count; s++)
+            // Par2RecoverySet.Assemble only keeps checksum packets with one entry per slice.
+            for (int s = 0; s < f.SliceCount; s++)
             {
                 int idx = f.FirstSlice + s;
                 var c = f.SliceChecksums[s];
@@ -347,7 +376,6 @@ internal sealed class Par2SliceMatcher : IBlockMatcher
                 long tailLen = f.Length - s * set.SliceSize;
                 if (lastSlice && tailLen > 0 && tailLen < set.SliceSize)
                 {
-                    _isTail[idx] = true;
                     if (!_tailsByLength.TryGetValue((int)tailLen, out var t))
                     {
                         _tailsByLength[(int)tailLen] = t = new List<int>();
@@ -407,7 +435,7 @@ internal sealed class Par2SliceMatcher : IBlockMatcher
             }
 
             md5 ??= Md5Hash.Compute(padded);
-            if (_checks[idx].Md5 == md5)
+            if (_checks[idx].Md5 == md5.Value)
             {
                 return idx;
             }
