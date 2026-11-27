@@ -5,25 +5,72 @@ using DeveParTools.Core.Operations;
 
 namespace DeveParTools.App.ViewModels;
 
+/// <summary>
+/// One protected file in the Verify page's list: live while verifying (from the states of its blocks), then with the
+/// verification's result.
+/// </summary>
 public sealed partial class FileRowViewModel : ObservableObject
 {
-    public required ParFileReport Report { get; init; }
-
-    public string Name => Report.Name;
-
-    public string Size => Formatting.Bytes(Report.Size);
-
-    public string StatusText => Report.FoundAs != null ? $"{Report.Status} (found as {System.IO.Path.GetFileName(Report.FoundAs)})" : Report.Status.ToString();
-
-    public bool IsOk => Report.Status == ParFileStatus.Complete;
-
-    public string StatusBrushKey => Report.Status switch
+    public FileRowViewModel(string name, string path, string size)
     {
-        ParFileStatus.Complete => "BlockFoundBrush",
-        ParFileStatus.Damaged => "BlockDamagedBrush",
-        _ => "BlockMissingBrush",
-    };
+        Name = name;
+        Path = path;
+        Size = size;
+    }
+
+    /// <summary>A row for a verified file (<paramref name="blocks"/>: its block states, for the damage counts).</summary>
+    public static FileRowViewModel From(ParFileReport report, BlockCounts? blocks = null)
+    {
+        var row = new FileRowViewModel(report.Name, report.Path, Formatting.Bytes(report.Size)) { Report = report, IsOk = report.Status == ParFileStatus.Complete };
+        string status = report.FoundAs != null ? $"{report.Status} (found as {System.IO.Path.GetFileName(report.FoundAs)})" : report.Status.ToString();
+        row.StatusText = blocks is { Total: > 0, Bad: > 0 } b && report.Status != ParFileStatus.Complete ? $"{status}: {b.Bad:N0} of {b.Total:N0} blocks bad ({100.0 * b.Bad / b.Total:0.##}%)" : status;
+        row.StatusBrushKey = report.Status switch
+        {
+            ParFileStatus.Complete => "BlockFoundBrush",
+            ParFileStatus.Damaged => "BlockDamagedBrush",
+            _ => "BlockMissingBrush",
+        };
+        row.CheckedPercent = 100;
+        return row;
+    }
+
+    /// <summary>The verification's result for the file (null while it is still being checked).</summary>
+    public ParFileReport? Report { get; private init; }
+
+    public string Name { get; }
+
+    public string Path { get; }
+
+    public string Size { get; }
+
+    [ObservableProperty]
+    private string _statusText = "Waiting to be checked";
+
+    [ObservableProperty]
+    private string _statusBrushKey = "BlockUnknownBrush";
+
+    [ObservableProperty]
+    private bool _isOk;
+
+    /// <summary>How much of the file has been checked so far (0–100).</summary>
+    [ObservableProperty]
+    private double _checkedPercent;
+
+    /// <summary>While verifying: updates the row from its blocks' current states.</summary>
+    public void Update(BlockCounts counts)
+    {
+        int checkedBlocks = counts.Total - counts.Unchecked;
+        CheckedPercent = counts.Total == 0 ? 100 : 100.0 * checkedBlocks / counts.Total;
+        StatusText = checkedBlocks < counts.Total
+            ? $"Checking… {CheckedPercent:0}%" + (counts.Bad > 0 ? $", {counts.Bad:N0} bad block(s) so far" : string.Empty)
+            : counts.Bad == 0 ? "All blocks found" : $"{counts.Bad:N0} of {counts.Total:N0} blocks bad ({100.0 * counts.Bad / counts.Total:0.##}%)";
+        StatusBrushKey = counts.Bad > 0 ? "BlockDamagedBrush" : checkedBlocks < counts.Total ? "BlockScanningBrush" : "BlockFoundBrush";
+        IsOk = counts.Bad == 0 && checkedBlocks == counts.Total;
+    }
 }
+
+/// <summary>A file's blocks by state: all of them, those not checked yet, and those damaged or missing.</summary>
+public readonly record struct BlockCounts(int Total, int Unchecked, int Bad);
 
 /// <summary>Verify &amp; repair page: pick a .par/.par2/.par3 file, see every file and block, repair.</summary>
 public sealed partial class VerifyViewModel : OperationViewModel
@@ -35,6 +82,7 @@ public sealed partial class VerifyViewModel : OperationViewModel
         {
             if (e.PropertyName == nameof(IsBusy))
             {
+                OnPropertyChanged(nameof(Headline));
                 ExtendCommand.NotifyCanExecuteChanged();
                 RemoveInsideCommand.NotifyCanExecuteChanged();
             }
@@ -145,6 +193,7 @@ public sealed partial class VerifyViewModel : OperationViewModel
 
     public string Headline => Report switch
     {
+        null when IsBusy => "Checking your files…",
         null => "Open a PAR file to check your files.",
         { AllFilesComplete: true, MissingBlocks: 0 } when Map?.CountStates()[(int)BlockState.Repaired] > 0 => "Repaired: all files are correct again.",
         { AllFilesComplete: true } => "All files are correct.",
@@ -179,10 +228,12 @@ public sealed partial class VerifyViewModel : OperationViewModel
 
     partial void OnReportChanged(ParVerifyReport? value)
     {
+        _blockToRow = null;
+        var byPath = Map != null && value != null ? CountsByFile(Map) : null;
         Files.Clear();
         foreach (var f in value?.Files ?? [])
         {
-            Files.Add(new FileRowViewModel { Report = f });
+            Files.Add(FileRowViewModel.From(f, byPath?.GetValueOrDefault(f.Path)));
         }
 
         ExtendCommand.NotifyCanExecuteChanged();
@@ -193,6 +244,107 @@ public sealed partial class VerifyViewModel : OperationViewModel
         }
     }
 
+    // ---------------------------------------------------------------- live file rows while verifying
+
+    private int[]? _blockToRow;
+    private byte[] _states = [];
+    private int _ticks;
+
+    /// <summary>
+    /// While verifying: one row per protected file, built from the block map's owners as soon as the files are being
+    /// checked, and updated a few times a second from the block states.
+    /// </summary>
+    protected override void OnTick()
+    {
+        if (!IsBusy || Report != null || Map is not { } map)
+        {
+            return;
+        }
+
+        if (_blockToRow == null)
+        {
+            if (Stage != VerifyStages.Verifying || map.Ownership.IsEmpty)
+            {
+                return;
+            }
+
+            // Every block belongs to (the first of) its owners' file; rows in name order.
+            var paths = map.Ownership.Values.Select(o => o[0].File).Distinct().Order(StringComparer.Ordinal).ToList();
+            var rowOf = paths.Select((p, i) => (p, i)).ToDictionary(x => x.p, x => x.i);
+            _blockToRow = new int[map.InputBlockCount];
+            Array.Fill(_blockToRow, -1);
+            foreach (var (block, owners) in map.Ownership)
+            {
+                _blockToRow[block] = rowOf[owners[0].File];
+            }
+
+            Files.Clear();
+            foreach (var p in paths)
+            {
+                Files.Add(new FileRowViewModel(System.IO.Path.GetFileName(p), p, File.Exists(p) ? Formatting.Bytes(new FileInfo(p).Length) : "missing"));
+            }
+        }
+
+        if (_ticks++ % 8 == 0)
+        {
+            var counts = Count(map, _blockToRow, Files.Count);
+            for (int r = 0; r < Files.Count; r++)
+            {
+                Files[r].Update(counts[r]);
+            }
+        }
+    }
+
+    private BlockCounts[] Count(BlockStateMap map, int[] blockToRow, int rows)
+    {
+        if (_states.Length != map.InputBlockCount)
+        {
+            _states = new byte[map.InputBlockCount];
+        }
+
+        map.CopyStates(_states);
+        var total = new int[rows];
+        var unchecked_ = new int[rows];
+        var bad = new int[rows];
+        for (int b = 0; b < _states.Length; b++)
+        {
+            int r = blockToRow[b];
+            if (r < 0)
+            {
+                continue;
+            }
+
+            total[r]++;
+            switch ((BlockState)_states[b])
+            {
+                case BlockState.Unknown or BlockState.Scanning:
+                    unchecked_[r]++;
+                    break;
+                case BlockState.Damaged or BlockState.Missing or BlockState.Recoverable or BlockState.Unrecoverable:
+                    bad[r]++;
+                    break;
+            }
+        }
+
+        return Enumerable.Range(0, rows).Select(r => new BlockCounts(total[r], unchecked_[r], bad[r])).ToArray();
+    }
+
+    /// <summary>Block counts per file path, from the map's owners (for the rows of the finished verification).</summary>
+    private Dictionary<string, BlockCounts> CountsByFile(BlockStateMap map)
+    {
+        var paths = map.Ownership.Values.Select(o => o[0].File).Distinct().ToList();
+        var rowOf = paths.Select((p, i) => (p, i)).ToDictionary(x => x.p, x => x.i);
+        var blockToRow = new int[map.InputBlockCount];
+        Array.Fill(blockToRow, -1);
+        foreach (var (block, owners) in map.Ownership)
+        {
+            blockToRow[block] = rowOf[owners[0].File];
+        }
+
+        var counts = Count(map, blockToRow, paths.Count);
+        return paths.Select((p, i) => (p, counts[i])).ToDictionary(x => x.p, x => x.Item2, StringComparer.Ordinal);
+    }
+
     partial void OnSelectedFileChanged(FileRowViewModel? value)
     {
         if (value == null || Map == null)
@@ -201,7 +353,7 @@ public sealed partial class VerifyViewModel : OperationViewModel
             return;
         }
 
-        var path = value.Report.Path;
+        var path = value.Path;
         Highlight = Map.Ownership.Where(kv => kv.Value.Any(o => string.Equals(o.File, path, StringComparison.Ordinal))).Select(kv => kv.Key).ToHashSet();
     }
 

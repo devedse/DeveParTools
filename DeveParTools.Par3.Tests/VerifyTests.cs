@@ -202,7 +202,7 @@ public sealed class VerifyTests
         var r = Par3Files.Verify(dir["set.par3"], context);
         Assert.AreEqual(0, r.MissingBlocks);
         Assert.AreEqual(0, r.Tails.Count);
-        Assert.AreEqual(BlockState.FoundElsewhere, context.Blocks!.Get(1));
+        Assert.AreEqual(BlockState.FoundStored, context.Blocks!.Get(1), "the damaged tail block comes from the stored data");
         Assert.AreEqual(BlockState.Found, context.Blocks.Get(0));
         Assert.IsTrue(Par3Repairer.Repair(r, new Par3RepairOptions { PurgeBackups = true }).Success);
         CollectionAssert.AreEqual(a, dir.Read("a.bin"));

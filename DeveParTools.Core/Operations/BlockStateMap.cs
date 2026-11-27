@@ -40,6 +40,9 @@ public enum BlockState : byte
 
     /// <summary>Block is computed or written (create).</summary>
     Processed,
+
+    /// <summary>Not found in the files, but stored in the PAR files themselves (PAR3 "store data"): repair copies it back.</summary>
+    FoundStored,
 }
 
 /// <summary>State of one recovery block.</summary>

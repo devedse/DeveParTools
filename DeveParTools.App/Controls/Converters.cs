@@ -55,3 +55,13 @@ public sealed class ResourceIconSourceConverter : IValueConverter
 
     public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) => throw new NotSupportedException();
 }
+
+/// <summary>True while a number is below a limit (e.g. a progress bar shown until 100%).</summary>
+public sealed class LessThanConverter(double limit) : IValueConverter
+{
+    public static readonly LessThanConverter Hundred = new(100);
+
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture) => value is double d && d < limit;
+
+    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) => throw new NotSupportedException();
+}

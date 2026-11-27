@@ -160,27 +160,26 @@ public static class Par3Verifier
         long totalBytes = Math.Max(1, files.Where(f => File.Exists(f.TargetPath)).Sum(f => new FileInfo(f.TargetPath).Length));
         observer.Plan(VerifyStages.Plan(parBytes, totalBytes, 0));
         observer.Stage(VerifyStages.Verifying);
-        long doneBytes = 0;
-        var damaged = new List<string>();
-        foreach (var fv in files)
+        // The files are checked in parallel (one per thread); progress is how far each one has got. Blocks and
+        // tails can be shared between files (packed tails), so writing them is guarded by one lock.
+        var present = files.Where(fv => fv.TargetPath.Length > 0 && File.Exists(fv.TargetPath)).ToList();
+        var checkedUpTo = new long[present.Count];
+        var sync = new Lock();
+        Parallel.For(0, present.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, context.Threads), CancellationToken = token }, i =>
         {
-            token.ThrowIfCancellationRequested();
-            if (fv.TargetPath.Length == 0 || !File.Exists(fv.TargetPath))
-            {
-                continue;
-            }
-
-            long before = Interlocked.Read(ref doneBytes);
+            var fv = present[i];
             string name = Path.GetFileName(fv.TargetPath);
-            bool complete = CheckInPlace(fv, set, blocks, tails, handles, map, reached => observer.Progress((double)(before + reached) / totalBytes, name));
-            fv.Status = complete ? Par3FileStatus.Complete : Par3FileStatus.Damaged;
-            if (!complete)
+            void Reached(long position)
             {
-                damaged.Add(fv.TargetPath);
+                Volatile.Write(ref checkedUpTo[i], position);
+                observer.Progress(Math.Min(1, (double)checkedUpTo.Sum() / totalBytes), name);
             }
 
-            observer.Progress((double)Interlocked.Add(ref doneBytes, new FileInfo(fv.TargetPath).Length) / totalBytes, Path.GetFileName(fv.TargetPath));
-        }
+            bool complete = CheckInPlace(fv, set, blocks, tails, handles, map, sync, Reached);
+            fv.Status = complete ? Par3FileStatus.Complete : Par3FileStatus.Damaged;
+            Reached(new FileInfo(fv.TargetPath).Length);
+        });
+        var damaged = present.Where(fv => fv.Status == Par3FileStatus.Damaged).Select(fv => fv.TargetPath).ToList();
 
         // Scan damaged files and extra files for blocks and tails anywhere.
         var toScan = damaged.Concat(options.ExtraDataFiles.Select(Path.GetFullPath).Where(File.Exists)).Distinct(StringComparer.Ordinal).ToList();
@@ -217,7 +216,7 @@ public static class Par3Verifier
 
         foreach (var (index, packet) in stored.Where(d => map.Get(d.Index) == BlockState.Unknown))
         {
-            map.Set(index, BlockState.FoundElsewhere);
+            map.Set(index, BlockState.FoundStored);
             map.FoundAt[index] = new BlockLocation(packet.SourceFile!, packet.DataOffset, (int)packet.DataLength);
         }
 
@@ -262,7 +261,7 @@ public static class Par3Verifier
 
     /// <summary>Reads a file in chunk order, checking every block and tail at its expected position.</summary>
     /// <param name="reached">Called now and then with how far into the file the check has got (bytes), for progress.</param>
-    private static bool CheckInPlace(Par3FileVerification fv, Par3InputSet set, BlockAvailability?[] blocks, Dictionary<(Par3FileEntry, Par3Chunk), PieceSource> tails, FileHandleCache handles, BlockStateMap map, Action<long> reached)
+    private static bool CheckInPlace(Par3FileVerification fv, Par3InputSet set, BlockAvailability?[] blocks, Dictionary<(Par3FileEntry, Par3Chunk), PieceSource> tails, FileHandleCache handles, BlockStateMap map, Lock sync, Action<long> reached)
     {
         var f = fv.File;
         long actualLen = new FileInfo(fv.TargetPath).Length;
@@ -301,9 +300,9 @@ public static class Par3Verifier
                 }
                 else if (ok && set.BlockChecksums[idx] is { } expected && expected.Crc64 == crc && expected.Hash == fp)
                 {
-                    if (blocks[idx] == null)
+                    lock (sync)
                     {
-                        blocks[idx] = new BlockAvailability([(0, bs, new PieceSource(fv.TargetPath, pos))]);
+                        blocks[idx] ??= new BlockAvailability([(0, bs, new PieceSource(fv.TargetPath, pos))]);
                     }
 
                     map.Set((int)idx, BlockState.Found);
@@ -311,9 +310,12 @@ public static class Par3Verifier
                 else
                 {
                     allPieces = false;
-                    if (blocks[idx] == null)
+                    lock (sync)
                     {
-                        map.Set((int)idx, BlockState.Damaged);
+                        if (blocks[idx] == null)
+                        {
+                            map.Set((int)idx, BlockState.Damaged);
+                        }
                     }
                 }
             }
@@ -335,7 +337,10 @@ public static class Par3Verifier
                     ok &= Fingerprint.Compute(data) == c.TailHash;
                     if (ok)
                     {
-                        tails.TryAdd((f, c), new PieceSource(fv.TargetPath, pos));
+                        lock (sync)
+                        {
+                            tails.TryAdd((f, c), new PieceSource(fv.TargetPath, pos));
+                        }
                     }
                 }
 
@@ -350,7 +355,11 @@ public static class Par3Verifier
         {
             foreach (var (idx, pos) in unverified)
             {
-                blocks[idx] ??= new BlockAvailability([(0, bs, new PieceSource(fv.TargetPath, pos))]);
+                lock (sync)
+                {
+                    blocks[idx] ??= new BlockAvailability([(0, bs, new PieceSource(fv.TargetPath, pos))]);
+                }
+
                 map.Set((int)idx, BlockState.Found);
             }
         }

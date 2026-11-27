@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.VisualTree;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
@@ -104,7 +105,7 @@ public sealed class BlockGrid : Control
         BlockState.Recoverable => 7,
         BlockState.Repairing => 6,
         BlockState.Repaired => 5,
-        BlockState.FoundElsewhere => 4,
+        BlockState.FoundElsewhere or BlockState.FoundStored => 4,
         BlockState.FoundMoved => 3,
         BlockState.Scanning => 2,
         BlockState.Found or BlockState.Processed => 1,
@@ -116,6 +117,7 @@ public sealed class BlockGrid : Control
         BlockState.Found or BlockState.Processed => "BlockFoundBrush",
         BlockState.FoundMoved => "BlockMovedBrush",
         BlockState.FoundElsewhere => "BlockElsewhereBrush",
+        BlockState.FoundStored => "BlockStoredBrush",
         BlockState.Damaged => "BlockDamagedBrush",
         BlockState.Missing => "BlockMissingBrush",
         BlockState.Recoverable => "BlockRecoverableBrush",
@@ -140,11 +142,61 @@ public sealed class BlockGrid : Control
         return new Size(width, rows * _step);
     }
 
+    /// <summary>The height to fit into: the visible part of the scroll viewer around the grid (or the given height).</summary>
+    private double FitHeight => this.FindAncestorOfType<ScrollViewer>() is { } sv && sv.Bounds.Height > 0 ? sv.Bounds.Height : Math.Max(100, Bounds.Height);
+
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+
+        // Fit follows the space there is: re-measure when the surrounding scroll viewer changes size (window resized).
+        if (this.FindAncestorOfType<ScrollViewer>() is { } sv)
+        {
+            sv.PropertyChanged += (_, args) =>
+            {
+                if (args.Property == BoundsProperty && CellSize < 2)
+                {
+                    InvalidateMeasure();
+                }
+            };
+        }
+    }
+
+    /// <summary>
+    /// Square size, columns and grouping. Fixed size: <see cref="CellSize"/>, with as many blocks per square as needed to
+    /// stay within <see cref="MaxCells"/> squares. Fit (<see cref="CellSize"/> below 2): the largest square from 40 down
+    /// to 3 pixels at which min(blocks, MaxCells) squares fit the width × height; when even 3 pixels are too big, blocks
+    /// are grouped so that what fits is shown. Example: 3,000 blocks in 1,300 × 300 → 12 px (108 × 25 = 2,700 is not
+    /// enough at 12; 11 px: 118 × 27 = 3,186), so 11 px squares, one block each.
+    /// </summary>
     private void Layout(int blocks, double width)
     {
-        _step = Math.Max(2, CellSize);
-        _columns = Math.Max(1, (int)(width / _step));
-        _group = Math.Max(1, (blocks + Math.Max(1, MaxCells) - 1) / Math.Max(1, MaxCells));
+        int maxCells = Math.Max(1, MaxCells);
+        if (CellSize >= 2)
+        {
+            _step = CellSize;
+            _columns = Math.Max(1, (int)(width / _step));
+            _group = Math.Max(1, (blocks + maxCells - 1) / maxCells);
+        }
+        else
+        {
+            double height = FitHeight;
+            int target = Math.Min(blocks, maxCells);
+            _step = 3;
+            for (int s = 40; s >= 3; s--)
+            {
+                if ((long)(int)(width / s) * (int)(height / s) >= target)
+                {
+                    _step = s;
+                    break;
+                }
+            }
+
+            _columns = Math.Max(1, (int)(width / _step));
+            long capacity = Math.Max(1, (long)_columns * Math.Max(1, (int)(height / _step)));
+            _group = (int)Math.Max(1, (blocks + Math.Min(capacity, maxCells) - 1) / Math.Min(capacity, maxCells));
+        }
+
         _cells = (blocks + _group - 1) / _group;
     }
 
@@ -258,6 +310,9 @@ public sealed class BlockGrid : Control
             case BlockState.FoundElsewhere:
                 ctx.DrawEllipse(pen.Brush, null, inner.Center, inner.Width / 4, inner.Height / 4);
                 break;
+            case BlockState.FoundStored:
+                ctx.DrawLine(pen, new Point(inner.Left, inner.Center.Y), new Point(inner.Right, inner.Center.Y));
+                break;
             case BlockState.Damaged:
             case BlockState.Unrecoverable:
                 ctx.DrawLine(pen, inner.TopLeft, inner.BottomRight);
@@ -357,6 +412,7 @@ public sealed class BlockGrid : Control
         BlockState.Found => "Found in place",
         BlockState.FoundMoved => "Found (shifted)",
         BlockState.FoundElsewhere => "Found in another file",
+        BlockState.FoundStored => "Stored in the PAR files",
         BlockState.Recoverable => "Missing, recoverable",
         BlockState.Repairing => "Rebuilding",
         BlockState.Unrecoverable => "Missing, not recoverable",

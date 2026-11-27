@@ -8,6 +8,7 @@
       <SolidColorBrush x:Key="BlockFoundBrush" Color="#2E9E6B" />
       <SolidColorBrush x:Key="BlockMovedBrush" Color="#1D9AAA" />
       <SolidColorBrush x:Key="BlockElsewhereBrush" Color="#3A7BD5" />
+      <SolidColorBrush x:Key="BlockStoredBrush" Color="#5E7FA8" />
       <SolidColorBrush x:Key="BlockDamagedBrush" Color="#E8743B" />
       <SolidColorBrush x:Key="BlockMissingBrush" Color="#D64545" />
       <SolidColorBrush x:Key="BlockRecoverableBrush" Color="#E6A817" />
@@ -24,6 +25,7 @@
       <SolidColorBrush x:Key="BlockFoundBrush" Color="#2BA36F" />
       <SolidColorBrush x:Key="BlockMovedBrush" Color="#25B3C4" />
       <SolidColorBrush x:Key="BlockElsewhereBrush" Color="#5B95E8" />
+      <SolidColorBrush x:Key="BlockStoredBrush" Color="#7F9CC4" />
       <SolidColorBrush x:Key="BlockDamagedBrush" Color="#F08A4B" />
       <SolidColorBrush x:Key="BlockMissingBrush" Color="#E5534B" />
       <SolidColorBrush x:Key="BlockRecoverableBrush" Color="#F2B63D" />

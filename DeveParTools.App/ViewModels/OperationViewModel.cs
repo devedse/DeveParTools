@@ -122,7 +122,7 @@ public abstract partial class OperationViewModel : ObservableObject, IParOperati
     {
         Settings = settings;
         _timer = new DispatcherTimer(TimeSpan.FromMilliseconds(33), DispatcherPriority.Background, (_, _) => Tick());
-        foreach (var s in new[] { BlockState.Found, BlockState.FoundMoved, BlockState.FoundElsewhere, BlockState.Damaged, BlockState.Missing, BlockState.Recoverable, BlockState.Repairing, BlockState.Repaired, BlockState.Unrecoverable, BlockState.Processed })
+        foreach (var s in new[] { BlockState.Found, BlockState.FoundMoved, BlockState.FoundElsewhere, BlockState.FoundStored, BlockState.Damaged, BlockState.Missing, BlockState.Recoverable, BlockState.Repairing, BlockState.Repaired, BlockState.Unrecoverable, BlockState.Processed })
         {
             Legend.Add(new LegendItem(s, UpdateHidden));
         }
@@ -177,8 +177,12 @@ public abstract partial class OperationViewModel : ObservableObject, IParOperati
     [ObservableProperty]
     private string? _selectedBlockInfo;
 
+    /// <summary>Square size of the block grid in pixels; below 2 means "fit" (the default).</summary>
     [ObservableProperty]
-    private double _cellSize = 10;
+    [NotifyPropertyChangedFor(nameof(ZoomText))]
+    private double _cellSize;
+
+    public string ZoomText => CellSize < 2 ? "Zoom: fit" : $"Zoom: {CellSize:0} px";
 
     [ObservableProperty]
     private int _recoveryTotal;
@@ -296,9 +300,15 @@ public abstract partial class OperationViewModel : ObservableObject, IParOperati
         }
     }
 
+    /// <summary>Called on the UI timer while an operation runs (and once at its end), after the stages are updated.</summary>
+    protected virtual void OnTick()
+    {
+    }
+
     private void Tick()
     {
         UpdateStages();
+        OnTick();
         ProgressDetail = _pendingDetail;
         if (Map is { } map && map.Version != _seenVersion)
         {

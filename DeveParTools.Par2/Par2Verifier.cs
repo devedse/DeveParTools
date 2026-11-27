@@ -172,31 +172,26 @@ public static class Par2Verifier
         long totalBytes = Math.Max(1, files.Where(f => File.Exists(f.TargetPath)).Sum(f => new FileInfo(f.TargetPath).Length));
         observer.Plan(VerifyStages.Plan(parBytes, totalBytes, 0));
         observer.Stage(VerifyStages.Verifying);
-        long doneBytes = 0;
+        // The files are checked in parallel (one per thread); every slice belongs to one file, so they share nothing.
         var scanThreads = Math.Max(1, context.Threads);
-        var damaged = new List<Par2FileVerification>();
-        foreach (var fv in files)
+        var present = files.Where(fv => fv.TargetPath.Length > 0 && File.Exists(fv.TargetPath)).ToList();
+        var checkedUpTo = new long[present.Count];
+        Parallel.For(0, present.Count, new ParallelOptions { MaxDegreeOfParallelism = scanThreads, CancellationToken = token }, i =>
         {
-            token.ThrowIfCancellationRequested();
-            if (fv.TargetPath.Length == 0 || !File.Exists(fv.TargetPath))
-            {
-                continue;
-            }
-
-            long len = new FileInfo(fv.TargetPath).Length;
-            map.SetRange(fv.File.FirstSlice, fv.File.SliceCount, BlockState.Scanning);
-            long before = doneBytes;
+            var fv = present[i];
             string name = Path.GetFileName(fv.TargetPath);
-            bool complete = CheckInPlace(fv, set, sources, handles, map, reached => observer.Progress((double)(before + reached) / totalBytes, name));
-            fv.Status = complete ? Par2FileStatus.Complete : Par2FileStatus.Damaged;
-            if (!complete)
+            void Reached(long position)
             {
-                damaged.Add(fv);
+                Volatile.Write(ref checkedUpTo[i], position);
+                observer.Progress(Math.Min(1, (double)checkedUpTo.Sum() / totalBytes), name);
             }
 
-            doneBytes += len;
-            observer.Progress((double)doneBytes / totalBytes, name);
-        }
+            map.SetRange(fv.File.FirstSlice, fv.File.SliceCount, BlockState.Scanning);
+            bool complete = CheckInPlace(fv, set, sources, handles, map, Reached);
+            fv.Status = complete ? Par2FileStatus.Complete : Par2FileStatus.Damaged;
+            Reached(new FileInfo(fv.TargetPath).Length);
+        });
+        var damaged = present.Where(fv => fv.Status == Par2FileStatus.Damaged).ToList();
 
         // Pass 2: search damaged files and extra files (other names, partial copies) for slices anywhere.
         var extras = options.ExtraDataFiles.Select(Path.GetFullPath).Distinct(StringComparer.Ordinal)

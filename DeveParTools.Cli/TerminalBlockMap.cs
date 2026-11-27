@@ -17,6 +17,7 @@ internal static class TerminalBlockMap
         BlockState.Processed => ('█', "32", 1),
         BlockState.FoundMoved => ('▓', "36", 2),
         BlockState.FoundElsewhere => ('▒', "34", 3),
+        BlockState.FoundStored => ('=', "34", 3),
         BlockState.Repaired => ('◆', "92", 4),
         BlockState.Repairing => ('◇', "93", 5),
         BlockState.Recoverable => ('░', "33", 6),
