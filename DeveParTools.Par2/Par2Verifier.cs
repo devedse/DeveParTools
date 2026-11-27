@@ -63,6 +63,11 @@ public sealed class Par2VerifyResult
 
     public required string BaseDirectory { get; init; }
 
+    /// <summary>
+    /// The files of the recovery set in set order, then the non-recovery files that have a description packet.
+    /// Non-recovery files are not protected by recovery data: an empty one can always be recreated, another one
+    /// only from a complete copy found elsewhere (<see cref="Par2FileVerification.FoundAs"/>).
+    /// </summary>
     public required IReadOnlyList<Par2FileVerification> Files { get; init; }
 
     /// <summary>Per input slice: where intact data exists, or null when missing.</summary>
@@ -82,6 +87,10 @@ public sealed class Par2VerifyResult
 
     public bool AllFilesComplete => Files.All(f => f.Status == Par2FileStatus.Complete);
 
+    /// <summary>
+    /// The recovery set can be rebuilt: critical data complete and no more missing slices than recovery slices.
+    /// Non-recovery files do not count here (as in par2cmdline); one that cannot be restored is reported by the repair.
+    /// </summary>
     public bool RepairPossible => CriticalDataComplete && MissingSlices <= RecoverySlicesAvailable;
 }
 
@@ -116,8 +125,10 @@ public static class Par2Verifier
             rIdx++;
         }
 
+        // Non-recovery files (e.g. empty files) are checked too, but only when their description says what to
+        // check; they have no slices.
         var files = new List<Par2FileVerification>();
-        foreach (var f in set.Files)
+        foreach (var f in set.Files.Concat(set.NonRecoveryFiles.Where(n => n.HasDescription)))
         {
             string target = string.Empty;
             if (f.HasDescription)

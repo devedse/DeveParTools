@@ -144,8 +144,17 @@ public static class Par2Creator
             f.FileId = Par2PacketWriter.ComputeFileId(f.Hash16k, f.Length, f.Name);
         }
 
-        // 2. Slice numbering: files in File ID order, slices in file order.
-        inputs.Sort((a, b) => a.FileId.CompareTo(b.FileId));
+        // 2. Empty files have no slices and go into the non-recovery set (like MultiPar): par2cmdline skips empty
+        //    inputs when creating and reports an empty file of the recovery set as damaged when verifying. Their
+        //    description packets still record them, so Verify checks them and Repair can recreate them.
+        //    Slice numbering: files in File ID order, slices in file order.
+        var empty = inputs.Where(i => i.Length == 0).OrderBy(i => i.FileId).ToList();
+        foreach (var f in empty)
+        {
+            f.FileHash = f.Hash16k;
+        }
+
+        inputs = inputs.Where(i => i.Length > 0).OrderBy(i => i.FileId).ToList();
         int totalSlices = 0;
         foreach (var f in inputs)
         {
@@ -165,8 +174,7 @@ public static class Par2Creator
             throw new ArgumentException("Recovery slice exponents must lie in [0, 65535).");
         }
 
-        var fileIds = inputs.Select(i => i.FileId).ToList();
-        var mainBody = Par2PacketWriter.MainBody(sliceSize, fileIds, []);
+        var mainBody = Par2PacketWriter.MainBody(sliceSize, inputs.Select(i => i.FileId).ToList(), empty.Select(i => i.FileId).ToList());
         var setId = Md5Hash.Compute(mainBody);
         var map = context.CreateBlockMap(totalSlices, recoveryCount);
         foreach (var f in inputs)
@@ -179,7 +187,7 @@ public static class Par2Creator
         }
 
         // 3. Volume files.
-        var volumes = PlanVolumes(outputPath, options, recoveryCount, sliceSize, inputs.Max(i => i.Length));
+        var volumes = PlanVolumes(outputPath, options, recoveryCount, sliceSize, inputs.Select(i => i.Length).DefaultIfEmpty(0).Max());
         for (int v = 0; v < volumes.Count; v++)
         {
             for (int k = 0; k < volumes[v].Count; k++)
@@ -290,6 +298,11 @@ public static class Par2Creator
             }
 
             critical.Add(Par2PacketWriter.SliceChecksum(setId, f.FileId, slices));
+        }
+
+        foreach (var f in empty)
+        {
+            critical.Add(Par2PacketWriter.FileDescription(setId, f.FileId, f.FileHash, f.Hash16k, 0, f.Name));
         }
 
         if (!string.IsNullOrEmpty(options.Comment))

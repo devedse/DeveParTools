@@ -70,11 +70,15 @@ public sealed class Par2CreateTests
         var main = index.OfType<Par2MainPacket>().Single();
         Assert.AreEqual(result.SetId, main.SetId);
         Assert.IsTrue(index.All(p => p.SetId == result.SetId));
-        Assert.AreEqual(0, main.NonRecoveryFileIds.Count);
         CollectionAssert.AreEqual(main.RecoveryFileIds.Order().ToArray(), main.RecoveryFileIds.ToArray(), "file IDs are sorted");
-        Assert.AreEqual(result.SetId, Md5Hash.Compute(Par2PacketWriter.MainBody(1024, main.RecoveryFileIds, [])), "set ID = MD5 of the main packet body");
-        CollectionAssert.AreEquivalent(new[] { "a.bin", "sub/b.bin", "empty.bin" }, index.OfType<Par2FileDescriptionPacket>().Select(d => d.Name).ToArray());
-        Assert.AreEqual(3, index.OfType<Par2SliceChecksumPacket>().Count());
+        Assert.AreEqual(result.SetId, Md5Hash.Compute(Par2PacketWriter.MainBody(1024, main.RecoveryFileIds, main.NonRecoveryFileIds)), "set ID = MD5 of the main packet body");
+        var descriptions = index.OfType<Par2FileDescriptionPacket>().ToDictionary(d => d.FileId, d => d.Name);
+        CollectionAssert.AreEquivalent(new[] { "a.bin", "sub/b.bin" }, main.RecoveryFileIds.Select(id => descriptions[id]).ToArray());
+
+        // The empty file has no slices: it is in the non-recovery set (par2cmdline skips empty inputs and would call
+        // an empty recovery-set file damaged), described but without slice checksums.
+        Assert.AreEqual("empty.bin", descriptions[main.NonRecoveryFileIds.Single()]);
+        Assert.AreEqual(2, index.OfType<Par2SliceChecksumPacket>().Count());
         Assert.AreEqual("a comment", index.OfType<Par2CommentPacket>().Single().Text);
         Assert.AreEqual("test creator", index.OfType<Par2CreatorPacket>().Single().Text);
         Assert.AreEqual(0, index.OfType<Par2RecoverySlicePacket>().Count());

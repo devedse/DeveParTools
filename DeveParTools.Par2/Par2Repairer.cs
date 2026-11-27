@@ -67,8 +67,12 @@ public static class Par2Repairer
         }
 
         // Files whose stored name was rejected as unsafe (empty target) are never written; see Par2Verifier.
-        var toRebuild = verify.Files.Where(f => f.Status != Par2FileStatus.Complete && f.TargetPath.Length > 0).ToList();
-        var unsafeNames = verify.Files.Where(f => f.Status != Par2FileStatus.Complete && f.TargetPath.Length == 0).Select(f => f.File.Name).ToList();
+        // Non-recovery files have no slices: an empty one is recreated, another one only from a complete copy.
+        static bool Restorable(Par2FileVerification f) => f.File.InRecoverySet || f.File.Length == 0 || f.FoundAs != null;
+        var broken = verify.Files.Where(f => f.Status != Par2FileStatus.Complete).ToList();
+        var toRebuild = broken.Where(f => f.TargetPath.Length > 0 && Restorable(f)).ToList();
+        var unsafeNames = broken.Where(f => f.TargetPath.Length == 0).Select(f => f.File.Name).ToList();
+        var unprotected = broken.Where(f => f.TargetPath.Length > 0 && !Restorable(f)).Select(f => f.TargetPath).ToList();
         var missing = Enumerable.Range(0, set.TotalSlices).Where(i => verify.SliceSources[i] == null).ToList();
         observer.Stage("Repairing");
 
@@ -100,6 +104,17 @@ public static class Par2Repairer
 
             Parallel.ForEach(toRebuild, new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, context.Threads), CancellationToken = context.CancellationToken }, fv =>
             {
+                if (!fv.File.InRecoverySet)
+                {
+                    if (fv.FoundAs != null)
+                    {
+                        using var copy = File.OpenRead(fv.FoundAs);
+                        copy.CopyTo(temp[fv]);
+                    }
+
+                    return;
+                }
+
                 var buf = new byte[set.SliceSize];
                 for (int s = 0; s < fv.File.SliceCount; s++)
                 {
@@ -205,11 +220,16 @@ public static class Par2Repairer
             messages.Add($"{unsafeNames.Count} file(s) with an unsafe name were not restored: {string.Join(", ", unsafeNames)}.");
         }
 
+        if (unprotected.Count > 0)
+        {
+            messages.Add($"{unprotected.Count} file(s) are not protected by recovery data and were not restored: {string.Join(", ", unprotected)}.");
+        }
+
         return new Par2RepairResult
         {
             Success = messages.Count == 0,
             RepairedFiles = repaired,
-            FailedFiles = [.. failed, .. unsafeNames],
+            FailedFiles = [.. failed, .. unsafeNames, .. unprotected],
             SlicesReconstructed = missing.Count,
             Message = messages.Count == 0 ? $"Repaired {repaired.Count} file(s)." : string.Join(" ", messages),
         };

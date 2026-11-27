@@ -237,6 +237,83 @@ public sealed class Par2RepairTests
         CollectionAssert.AreEqual(data, File.ReadAllBytes(z));
     }
 
+    /// <summary>Adds a non-recovery file (described, not protected) to every main packet of a created set.</summary>
+    private static void AddNonRecoveryFile(Par2CreateResult created, string name, byte[] data)
+    {
+        var hash16k = Md5Hash.Compute(data.AsSpan(0, Math.Min(data.Length, 16384)));
+        var id = Par2PacketWriter.ComputeFileId(hash16k, data.Length, name);
+        PacketSurgery.RewriteAll(created, p =>
+        {
+            if (!PacketSurgery.Is(p, Par2PacketTypes.Main))
+            {
+                return [p];
+            }
+
+            var main = (Par2MainPacket)Par2PacketReader.Parse(PacketSurgery.SetId(p), Par2PacketTypes.Main, PacketSurgery.Body(p))!;
+            return [PacketSurgery.WithBody(p, Par2PacketWriter.MainBody(main.SliceSize, main.RecoveryFileIds, [id])),
+                Par2PacketWriter.FileDescription(main.SetId, id, Md5Hash.Compute(data), hash16k, data.Length, name)];
+        });
+    }
+
+    [TestMethod]
+    public void EmptyFiles_AreNonRecoveryFiles_ThatAreVerifiedAndRecreated()
+    {
+        using var dir = new TempDir();
+        var files = TestData.WriteFiles(dir, 4, ("data.bin", 5000), ("empty-1", 0), ("sub/empty-2", 0));
+        TestData.Create(dir, files.Keys, SliceSize, recovery: 2);
+        var verify = TestData.Verify(dir);
+        Assert.AreEqual(1, verify.Set.Files.Count);
+        Assert.AreEqual(2, verify.Set.NonRecoveryFiles.Count);
+        Assert.AreEqual(3, verify.Files.Count);
+        Assert.IsTrue(verify.AllFilesComplete);
+
+        Directory.Delete(dir["sub"], recursive: true);
+        dir.Write("empty-1", [1, 2, 3]);
+        verify = TestData.Verify(dir);
+        Assert.AreEqual(Par2FileStatus.Damaged, verify.Files.Single(f => f.File.Name == "empty-1").Status);
+        Assert.AreEqual(Par2FileStatus.Missing, verify.Files.Single(f => f.File.Name == "sub/empty-2").Status);
+        Assert.AreEqual(0, verify.MissingSlices);
+        Assert.IsTrue(verify.RepairPossible);
+        var repair = Par2Repairer.Repair(verify);
+        Assert.IsTrue(repair.Success, repair.Message);
+        TestData.AssertFiles(files);
+    }
+
+    [TestMethod]
+    public void NonEmptyNonRecoveryFiles_AreOnlyRestoredFromACopy()
+    {
+        using var dir = new TempDir();
+        var files = TestData.WriteFiles(dir, 5, ("data.bin", 5000), ("readme.txt", 777));
+        var created = TestData.Create(dir, [dir["data.bin"]], SliceSize, recovery: 2);
+        AddNonRecoveryFile(created, "readme.txt", files[dir["readme.txt"]]);
+
+        var verify = TestData.Verify(dir);
+        var readme = verify.Files.Single(f => f.File.Name == "readme.txt");
+        Assert.IsFalse(readme.File.InRecoverySet);
+        Assert.IsTrue(verify.AllFilesComplete);
+
+        // Damaged and not protected: the rest of the set is repaired, the file is reported.
+        TestData.Corrupt(dir["readme.txt"], 10);
+        TestData.Corrupt(dir["data.bin"], 10);
+        var damaged = dir.Read("readme.txt");
+        verify = TestData.Verify(dir);
+        Assert.IsTrue(verify.RepairPossible, "only the recovery set counts");
+        var repair = Par2Repairer.Repair(verify);
+        Assert.IsFalse(repair.Success);
+        Assert.AreEqual($"1 file(s) are not protected by recovery data and were not restored: {dir["readme.txt"]}.", repair.Message);
+        CollectionAssert.AreEqual(new[] { dir["readme.txt"] }, repair.FailedFiles.ToArray());
+        CollectionAssert.AreEqual(new[] { dir["data.bin"] }, repair.RepairedFiles.ToArray());
+        CollectionAssert.AreEqual(damaged, dir.Read("readme.txt"));
+
+        // A complete copy elsewhere restores it.
+        var copy = dir.Write("backup/readme.copy", files[dir["readme.txt"]]);
+        verify = Par2Verifier.Verify(new Par2VerifyOptions { Par2Path = dir["set.par2"], ExtraDataFiles = [copy] });
+        Assert.AreEqual(copy, verify.Files.Single(f => f.File.Name == "readme.txt").FoundAs);
+        repair = Par2Repairer.Repair(verify);
+        Assert.IsTrue(repair.Success, repair.Message);
+        TestData.AssertFiles(files);
+    }
+
     [TestMethod]
     public void NextBackupName_SkipsExistingBackups()
     {
