@@ -86,6 +86,10 @@ Check(ExplorerContextMenu.ExecutableOf(entries[0].Command) == ProgramFilesExe &&
 var shell = new ShellViewModel();
 var window = new MainWindow { DataContext = shell, Width = 1440, Height = 900 };
 window.Show();
+Dispatcher.UIThread.RunJobs();
+Check(window.Title == "DeveParTools " + DeveParTools.App.Services.AppInfo.Version && shell.FooterPages[0].Title == "Version " + DeveParTools.App.Services.AppInfo.Version, "the version is in the title bar and above Settings: " + window.Title);
+shell.SelectedNavigation = shell.FooterPages[0];
+Check(shell.Page == AppPage.Verify && !shell.FooterPages[0].Selectable, "the version entry is not a page");
 
 // Create page with inputs, then create a PAR3 set through the view model.
 shell.Page = AppPage.Create;

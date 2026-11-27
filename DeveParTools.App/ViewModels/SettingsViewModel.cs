@@ -212,7 +212,7 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     public int MaxThreads => Environment.ProcessorCount;
 
-    public string Version => typeof(ShellViewModel).Assembly.GetName().Version?.ToString(3) ?? "1.0.0";
+    public string Version => AppInfo.Version;
 
     public string Runtime => $"{RuntimeInformation.FrameworkDescription} · {RuntimeInformation.OSDescription} · {RuntimeInformation.ProcessArchitecture}";
 

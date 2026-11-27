@@ -1,4 +1,5 @@
 using CommunityToolkit.Mvvm.ComponentModel;
+using DeveParTools.App.Services;
 
 namespace DeveParTools.App.ViewModels;
 
@@ -11,8 +12,13 @@ public enum AppPage
 }
 
 /// <summary>One entry of the navigation pane.</summary>
+/// <param name="Page">The page it opens; null for an entry that only shows something (the version).</param>
 /// <param name="IconKey">Resource key of its icon (Themes/Icons.axaml).</param>
-public sealed record NavigationItem(AppPage Page, string Title, string IconKey);
+public sealed record NavigationItem(AppPage? Page, string Title, string IconKey)
+{
+    /// <summary>Whether clicking it selects it (false for the version entry).</summary>
+    public bool Selectable => Page != null;
+}
 
 /// <summary>The window's view model: navigation between pages that share one settings object.</summary>
 public sealed partial class ShellViewModel : ObservableObject
@@ -25,8 +31,15 @@ public sealed partial class ShellViewModel : ObservableObject
         new(AppPage.Benchmark, "Benchmark", "IconActivity"),
     ];
 
-    /// <summary>The pages at the bottom of the navigation pane.</summary>
-    public IReadOnlyList<NavigationItem> FooterPages { get; } = [new(AppPage.Settings, "Settings", "IconSettings")];
+    /// <summary>The bottom of the navigation pane: the version (not clickable), then Settings.</summary>
+    public IReadOnlyList<NavigationItem> FooterPages { get; } =
+    [
+        new(null, "Version " + AppInfo.Version, "IconInfo"),
+        new(AppPage.Settings, "Settings", "IconSettings"),
+    ];
+
+    /// <summary>The window title, with the version: "DeveParTools 1.0.33".</summary>
+    public string Title => AppInfo.Title;
 
     /// <summary>The navigation pane's selection: always the entry of <see cref="Page"/>.</summary>
     public NavigationItem SelectedNavigation
@@ -34,9 +47,9 @@ public sealed partial class ShellViewModel : ObservableObject
         get => MenuPages.Concat(FooterPages).First(p => p.Page == Page);
         set
         {
-            if (value != null)
+            if (value?.Page is AppPage page)
             {
-                Page = value.Page;
+                Page = page;
             }
         }
     }
