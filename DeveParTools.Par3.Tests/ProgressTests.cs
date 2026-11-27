@@ -101,4 +101,20 @@ public sealed class ProgressTests
         DeveParTools.Par3.Packets.Par3PacketReader.ReadFile(volume, default, positions.Add);
         Assert.IsTrue(positions.Count >= 1 && positions.SequenceEqual(positions.Order()) && positions[^1] < new FileInfo(volume).Length, string.Join(", ", positions));
     }
+
+    [TestMethod]
+    public void Repair_ManyMissingBlocks_ReportsCheckingProgress()
+    {
+        using var dir = new TempDir();
+        var content = TestData.Random(31, 300 * 1024);
+        var path = dir.Write("a.bin", content);
+        Par3Creator.Create(new Par3CreateOptions { Inputs = [path], OutputPath = dir["set.par3"], BlockSize = 1024, RecoveryBlockCount = 300, Code = Par3Code.Fft });
+        File.Delete(path);
+        var verify = Par3Verifier.Verify(new Par3VerifyOptions { Par3Path = dir["set.par3"] });
+        var observer = new RecordingObserver();
+        var repair = Par3Repairer.Repair(verify, new Par3RepairOptions { PurgeBackups = true }, new OperationContext { Observer = observer });
+        Assert.IsTrue(repair.Success, repair.Message);
+        Assert.IsTrue(observer.Fractions[RepairStages.Checking].Any(f => f is > 0 and < 1), "300 rebuilt blocks are checked with progress");
+        CollectionAssert.AreEqual(content, dir.Read("a.bin"));
+    }
 }

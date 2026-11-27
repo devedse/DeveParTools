@@ -352,4 +352,15 @@ public sealed class Par2CreateTests
         Assert.AreEqual(files.Keys.Single(), ctx.Blocks.Ownership[9][0].File);
         Assert.AreEqual(45_000, ctx.Blocks.Ownership[9][0].Offset);
     }
+
+    [TestMethod]
+    public void Preparing_ManyFiles_ReportsProgress()
+    {
+        using var dir = new TempDir();
+        var inputs = Enumerable.Range(0, 70).Select(i => dir.WriteRandom($"f{i:00}.bin", 100 + i, i)).ToList();
+        var observer = new RecordingObserver();
+        Par2Creator.Create(new Par2CreateOptions { InputFiles = inputs, OutputPath = dir["set.par2"], RecoverySliceCount = 2 }, new OperationContext { Observer = observer });
+        Assert.IsTrue(observer.Fractions.Any(f => f is > 0 and < 1), "preparing 70 files reports on the way");
+        observer.AssertStagesFollowThePlan();
+    }
 }

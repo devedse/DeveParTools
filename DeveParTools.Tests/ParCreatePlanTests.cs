@@ -149,6 +149,9 @@ public sealed class ParCreatePlanTests
         Assert.IsTrue(large > 0.9, $"large blocks {large:P1}");
         Assert.IsNull(ParClient.Plan(new ParCreateRequest { Inputs = files, OutputPath = Path.Combine(_dir, "e.par3") }, withFileSizes: false).OutputFiles, "sizes only when asked");
         Assert.IsNull(ParClient.Plan(new ParCreateRequest { Inputs = files, OutputPath = Path.Combine(_dir, "e.par3"), BlockSize = 12 }).OutputFiles, "no sizes when Create would refuse");
+        var elsewhere = Directory.CreateDirectory(Path.Combine(_dir, "elsewhere")).FullName;
+        var outside = ParClient.Plan(new ParCreateRequest { Inputs = files, OutputPath = Path.Combine(_dir, "e.par2"), BaseDirectory = elsewhere });
+        Assert.IsTrue(outside.OutputFiles == null && outside.InputBlocks > 0, "inputs outside the base folder: Create would refuse, so no sizes, but still a block plan");
         var scanned = ParClient.ScanInputs(new ParCreateRequest { Inputs = files, OutputPath = Path.Combine(_dir, "e.par3") });
         File.Delete(files[0]);
         Assert.IsNull(ParClient.Plan(new ParCreateRequest { Inputs = files, OutputPath = Path.Combine(_dir, "e.par2") }, scanned).OutputFiles, "an input that disappeared: no sizes, but still a block plan");
