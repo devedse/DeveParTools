@@ -1,3 +1,4 @@
+using DeveParTools.Core.Codes;
 using DeveParTools.Core.Codes.Fft;
 
 namespace DeveParTools.Core.Tests.Codes.Fft;
@@ -218,6 +219,77 @@ public sealed class LeopardTests
         Assert.AreEqual(5, LeopardCodec.DecodeWorkCount(5, 1));
         Assert.AreEqual(1, LeopardCodec.DecodeWorkCount(1, 1));
         Assert.AreEqual(32, LeopardCodec.DecodeWorkCount(20, 5));
+    }
+
+    /// <summary>
+    /// The generator rows give every recovery block as a combination of the originals, which is what the PAR3 repair's
+    /// matrix path relies on: checked against real encodes, also with more originals than one encode of unit
+    /// originals covers (1,024) and for the two special codes (one original, one recovery block).
+    /// </summary>
+    [TestMethod]
+    [DataRow(8, 20, 6)]
+    [DataRow(16, 1500, 4)]
+    [DataRow(16, 1, 1)]
+    [DataRow(16, 300, 1)]
+    public void GeneratorRows_GiveEveryRecoveryBlockAsACombinationOfTheOriginals(int bits, int k, int rc)
+    {
+        var f = bits == 8 ? LeopardField.FF8 : LeopardField.FF16;
+        var rnd = new Random(k);
+        const int bytes = 64;
+        var orig = Enumerable.Range(0, k).Select(_ => TestData.RandomBytes(rnd, bytes)).ToArray();
+        var recovery = Encode(f, orig, rc, bytes, rnd);
+        var g = LeopardCodec.GeneratorRows(f, k, rc, Enumerable.Range(0, rc).ToList(), threads: 2);
+        int sym = f.SymbolSize;
+        int Symbol(byte[] data, int pos) => sym == 2 ? data[2 * pos] | (data[2 * pos + 1] << 8) : data[pos];
+        for (int r = 0; r < rc; r++)
+        {
+            for (int pos = 0; pos < bytes / sym; pos++)
+            {
+                int expected = 0;
+                for (int i = 0; i < k; i++)
+                {
+                    expected ^= f.Mul(g[r][i], Symbol(orig[i], pos));
+                }
+
+                Assert.AreEqual(expected, Symbol(recovery[r], pos), $"recovery {r}, symbol {pos}");
+            }
+        }
+    }
+
+    [TestMethod]
+    public void Gf16_IsLeopardsFieldForMatricesAndTheCombiner()
+    {
+        var f = LeopardField.FF16;
+        var g = f.Gf16;
+        Assert.AreSame(g, f.Gf16);
+        Assert.AreSame(f, g.Inner);
+        CollectionAssert.AreEqual(new byte[] { 0x2D, 0x00 }, g.GeneratorBytes);
+        for (int a = 1; a < f.Order; a++)
+        {
+            Assert.AreEqual(1, g.Mul((ushort)a, g.Inv((ushort)a)));
+        }
+
+        Assert.ThrowsExactly<DivideByZeroException>(() => f.Inv(0));
+        Assert.ThrowsExactly<InvalidOperationException>(() => LeopardField.FF8.Gf16);
+
+        // A matrix inverse in this representation.
+        var rnd = new Random(16);
+        var m = new GfMatrix<ushort>(3, 3, g);
+        for (int i = 0; i < 9; i++)
+        {
+            m.Data[i] = (ushort)rnd.Next(1, f.Order);
+        }
+
+        var inverse = m.Clone();
+        Assert.IsTrue(inverse.TryInvert());
+        var identity = m.Multiply(inverse);
+        for (int r = 0; r < 3; r++)
+        {
+            for (int c = 0; c < 3; c++)
+            {
+                Assert.AreEqual(r == c ? 1 : 0, identity[r, c]);
+            }
+        }
     }
 
     [TestMethod]

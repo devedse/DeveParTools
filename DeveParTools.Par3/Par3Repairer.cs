@@ -168,12 +168,13 @@ public static class Par3Repairer
             foreach (var fv in toRebuild)
             {
                 context.CancellationToken.ThrowIfCancellationRequested();
-                observer.Progress((double)written / rebuildBytes, Path.GetFileName(fv.TargetPath));
+                string name = Path.GetFileName(fv.TargetPath);
+                long before = written;
+                observer.Progress((double)written / rebuildBytes, name);
                 written += (long)fv.File.Length;
                 var tmp = fv.TargetPath + ".deveparttools.tmp";
                 Directory.CreateDirectory(Path.GetDirectoryName(fv.TargetPath)!);
-                WriteFile(fv, verify, tmp, blockFile, rebuilt, handles);
-                if (!FileHashMatches(tmp, fv.File))
+                if (!WriteFile(fv, verify, tmp, blockFile, rebuilt, handles, context, p => observer.Progress((double)(before + p) / rebuildBytes, name)))
                 {
                     failed.Add(fv.TargetPath);
                     File.Delete(tmp);
@@ -553,28 +554,50 @@ public static class Par3Repairer
         public void Write(int index, long offset, ReadOnlySpan<byte> source) => RandomAccess.Write(stream.SafeFileHandle, source, positions[index] + offset);
     }
 
-    private static void WriteFile(Par3FileVerification fv, Par3VerifyResult verify, string tmp, string? blockFile, Dictionary<int, long> rebuilt, FileHandleCache handles)
+    /// <summary>The most of a file <see cref="WriteFile"/> puts together at once (less with a small memory budget, at least 4 MiB).</summary>
+    private const long WriteWindow = 64L << 20;
+
+    /// <summary>
+    /// Writes a file of the set to <paramref name="tmp"/> from its blocks (found or rebuilt) and tails, hashing it on the
+    /// way, and returns whether the file hash matches.
+    /// </summary>
+    /// <remarks>
+    /// Full blocks go in windows of whole blocks (up to 64 MiB): the blocks of a window are read in parallel, then the
+    /// window is hashed (BLAKE3 spreads a large piece over the cores) while it is written. It used to be one block
+    /// after the other on one thread, and then the whole file was read back to hash it: 1.5 to 2 seconds for a
+    /// 2 GB file with about 2 cores busy.
+    /// </remarks>
+    /// <param name="reached">Called with how far into the file writing has got (bytes), for progress.</param>
+    private static bool WriteFile(Par3FileVerification fv, Par3VerifyResult verify, string tmp, string? blockFile, Dictionary<int, long> rebuilt, FileHandleCache handles, OperationContext context, Action<long> reached)
     {
+        long windowBytes = Math.Clamp(context.MemoryBudget / 2, 4L << 20, WriteWindow);
         var set = verify.Set;
         ulong bs = set.BlockSize;
         var f = fv.File;
-        using var outStream = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20);
+        var hasher = new Par3FileHasher(f);
+        using var outStream = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 1);
         outStream.SetLength((long)f.Length);
-        var buf = new byte[(int)Math.Min(bs, 1 << 24)];
+        var output = outStream.SafeFileHandle;
+        var parallel = new ParallelOptions { MaxDegreeOfParallelism = Math.Max(1, context.Threads), CancellationToken = context.CancellationToken };
+        byte[]? piece = null;
+        byte[]? window = null;
         bool oldExists = File.Exists(fv.TargetPath);
         ulong offset = 0;
         foreach (var c in f.Chunks)
         {
             if (!c.Protected)
             {
-                // Not protected: keep whatever the existing file has at this position (zeros otherwise).
+                // Not protected: keep whatever the existing file has at this position (zeros otherwise). It counts in
+                // the file hash only as unprotected bytes (see Par3FileHasher).
+                hasher.Unprotected(c.Length);
                 if (oldExists)
                 {
+                    piece ??= new byte[1 << 20];
                     for (ulong done = 0; done < c.Length;)
                     {
-                        int n = (int)Math.Min(c.Length - done, (ulong)buf.Length);
-                        handles.ReadPadded(fv.TargetPath, (long)(offset + done), buf.AsSpan(0, n));
-                        RandomAccess.Write(outStream.SafeFileHandle, buf.AsSpan(0, n), (long)(offset + done));
+                        int n = (int)Math.Min(c.Length - done, (ulong)piece.Length);
+                        handles.ReadPadded(fv.TargetPath, (long)(offset + done), piece.AsSpan(0, n));
+                        RandomAccess.Write(output, piece.AsSpan(0, n), (long)(offset + done));
                         done += (ulong)n;
                     }
                 }
@@ -584,9 +607,34 @@ public static class Par3Repairer
             }
 
             ulong full = c.FullBlocks(bs);
-            for (ulong b = 0; b < full; b++)
+            if (bs <= (ulong)windowBytes)
             {
-                CopyFromBlock((int)(c.FirstBlock + b), 0, bs, (long)(offset + b * bs));
+                ulong per = Math.Min((ulong)(windowBytes / (long)bs), Math.Max(1, full));
+                if (window == null || (ulong)window.LongLength < per * bs)
+                {
+                    window = GC.AllocateUninitializedArray<byte>((int)(per * bs));
+                }
+
+                for (ulong first = 0; first < full; first += per)
+                {
+                    int n = (int)Math.Min(per, full - first);
+                    var buffer = window;
+                    ulong firstBlock = c.FirstBlock + first;
+                    Parallel.For(0, n, parallel, j => ReadBlock((int)(firstBlock + (ulong)j), 0, buffer.AsSpan((int)((ulong)j * bs), (int)bs)));
+                    long dst = (long)(offset + first * bs);
+                    int length = (int)((ulong)n * bs);
+                    Parallel.Invoke(parallel, () => hasher.Protected(buffer.AsSpan(0, length)), () => RandomAccess.Write(output, buffer.AsSpan(0, length), dst));
+                    reached(dst + length);
+                }
+            }
+            else
+            {
+                // Blocks larger than a window: one at a time, in pieces.
+                for (ulong b = 0; b < full; b++)
+                {
+                    CopyFromBlock((int)(c.FirstBlock + b), 0, bs, (long)(offset + b * bs));
+                    reached((long)(offset + (b + 1) * bs));
+                }
             }
 
             ulong tail = c.TailLength(bs);
@@ -595,13 +643,15 @@ public static class Par3Repairer
                 long dst = (long)(offset + full * bs);
                 if (tail < Par3Chunk.InlineLimit)
                 {
-                    RandomAccess.Write(outStream.SafeFileHandle, c.InlineTail, dst);
+                    RandomAccess.Write(output, c.InlineTail, dst);
+                    hasher.Protected(c.InlineTail);
                 }
                 else if (verify.Tails.TryGetValue((f, c), out var src))
                 {
                     var data = new byte[tail];
                     handles.ReadPadded(src.Path, src.Offset, data);
-                    RandomAccess.Write(outStream.SafeFileHandle, data, dst);
+                    RandomAccess.Write(output, data, dst);
+                    hasher.Protected(data);
                 }
                 else
                 {
@@ -612,51 +662,34 @@ public static class Par3Repairer
             offset += c.Length;
         }
 
+        return hasher.Matches(f.Packet.FileHash);
+
+        // Bytes [blockOffset, blockOffset + destination.Length) of a block: from the rebuilt blocks or where it was found.
+        void ReadBlock(int block, long blockOffset, Span<byte> destination)
+        {
+            if (rebuilt.TryGetValue(block, out var pos))
+            {
+                handles.ReadPadded(blockFile!, pos + blockOffset, destination);
+            }
+            else
+            {
+                new Par3BlockSource([verify.Blocks[block]!.Pieces], handles).Read(0, blockOffset, destination);
+            }
+        }
+
         void CopyFromBlock(int block, long blockOffset, ulong length, long dst)
         {
+            piece ??= new byte[1 << 20];
             for (ulong done = 0; done < length;)
             {
-                int n = (int)Math.Min(length - done, (ulong)buf.Length);
-                var span = buf.AsSpan(0, n);
-                if (rebuilt.TryGetValue(block, out var pos))
-                {
-                    handles.ReadPadded(blockFile!, pos + blockOffset + (long)done, span);
-                }
-                else
-                {
-                    new Par3BlockSource([verify.Blocks[block]!.Pieces], handles).Read(0, blockOffset + (long)done, span);
-                }
-
-                RandomAccess.Write(outStream.SafeFileHandle, span, dst + (long)done);
+                int n = (int)Math.Min(length - done, (ulong)piece.Length);
+                var span = piece.AsSpan(0, n);
+                ReadBlock(block, blockOffset + (long)done, span);
+                RandomAccess.Write(output, span, dst + (long)done);
+                hasher.Protected(span);
                 done += (ulong)n;
             }
         }
-    }
-
-    private static bool FileHashMatches(string path, Par3FileEntry file)
-    {
-        var hasher = new Par3FileHasher(file);
-        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20, FileOptions.SequentialScan);
-        var buf = new byte[1 << 20];
-        foreach (var c in file.Chunks)
-        {
-            if (!c.Protected)
-            {
-                fs.Seek((long)c.Length, SeekOrigin.Current);
-                hasher.Unprotected(c.Length);
-                continue;
-            }
-
-            for (ulong done = 0; done < c.Length;)
-            {
-                int n = (int)Math.Min(c.Length - done, (ulong)buf.Length);
-                fs.ReadExactly(buf, 0, n);
-                hasher.Protected(buf.AsSpan(0, n));
-                done += (ulong)n;
-            }
-        }
-
-        return hasher.Matches(file.Packet.FileHash);
     }
 
 }

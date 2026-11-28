@@ -162,13 +162,25 @@ public sealed class Gf8Field : IPreparedRegionField<byte>
 
 public sealed class Gf16Field : IPreparedRegionField<ushort>
 {
+    private readonly Func<ushort, ushort> _inverse;
+
     public Gf16Field(GaloisField16 field)
+        : this(field, field.Inv, [(byte)field.Polynomial, (byte)(field.Polynomial >> 8)])
     {
-        Inner = field;
-        GeneratorBytes = [(byte)field.Polynomial, (byte)(field.Polynomial >> 8)];
     }
 
-    public GaloisField16 Inner { get; }
+    /// <summary>
+    /// GF(2^16) in another representation, e.g. Leopard's (<see cref="Codes.Fft.LeopardField.Gf16"/>): its
+    /// multiplication and inverse. The region kernels work for any representation (see <see cref="IGf16Multiplier"/>).
+    /// </summary>
+    public Gf16Field(IGf16Multiplier multiplier, Func<ushort, ushort> inverse, byte[] generatorBytes)
+    {
+        Inner = multiplier;
+        _inverse = inverse;
+        GeneratorBytes = generatorBytes;
+    }
+
+    public IGf16Multiplier Inner { get; }
 
     public int SymbolSize => 2;
 
@@ -182,7 +194,7 @@ public sealed class Gf16Field : IPreparedRegionField<ushort>
 
     public ushort Mul(ushort a, ushort b) => Inner.Mul(a, b);
 
-    public ushort Inv(ushort a) => Inner.Inv(a);
+    public ushort Inv(ushort a) => _inverse(a);
 
     public bool IsZero(ushort a) => a == 0;
 
@@ -213,7 +225,7 @@ public sealed class Gf16Field : IPreparedRegionField<ushort>
         => Gf16Kernels.MulAddMulti(((Tables)tables).Inner, first, count, sources, destination, length, overwrite);
 
     /// <summary>The kernel of one SIMD level with its prepared layout (see <see cref="Gf16Kernels.Prepare"/>).</summary>
-    private sealed unsafe class Kernel(GaloisField16 field, SimdLevel level) : IPreparedKernel<ushort>
+    private sealed unsafe class Kernel(IGf16Multiplier field, SimdLevel level) : IPreparedKernel<ushort>
     {
         private readonly byte[] _basis = Gf16Kernels.Basis(field, level);
 

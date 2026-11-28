@@ -91,6 +91,27 @@ public sealed class LeopardField : IGf16Multiplier, IGf8Multiplier
 
     public int Mul(int a, int b) => a == 0 || b == 0 ? 0 : ExpLut[AddMod(LogLut[a], LogLut[b])];
 
+    /// <summary>The multiplicative inverse of <paramref name="a"/> (not 0). The identity is 1 in this representation too.</summary>
+    public int Inv(int a)
+    {
+        if (a == 0)
+        {
+            throw new DivideByZeroException("0 has no inverse.");
+        }
+
+        return ExpLut[SubMod(0, LogLut[a])];
+    }
+
+    /// <summary>
+    /// GF(2^16) in Leopard's representation as an <see cref="Galois.IGaloisField{T}"/>, for matrix arithmetic and the
+    /// linear combiner on Leopard-coded blocks (16-bit fields only).
+    /// </summary>
+    public Galois.Gf16Field Gf16 => _gf16 ??= Bits == 16
+        ? new Galois.Gf16Field(this, a => (ushort)Inv(a), [(byte)Polynomial, (byte)(Polynomial >> 8)])
+        : throw new InvalidOperationException("Only the 16-bit Leopard field is a GF(2^16).");
+
+    private Galois.Gf16Field? _gf16;
+
     ushort IGf16Multiplier.Mul(ushort a, ushort b) => (ushort)Mul(a, b);
 
     byte IGf8Multiplier.Mul(byte a, byte b) => (byte)Mul(a, b);

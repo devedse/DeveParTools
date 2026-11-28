@@ -1,6 +1,8 @@
+using System.Numerics;
 using System.Runtime.InteropServices;
 using DeveParTools.Core.Codes;
 using DeveParTools.Core.Codes.Fft;
+using DeveParTools.Core.Operations;
 using DeveParTools.Par3.Packets;
 
 namespace DeveParTools.Par3;
@@ -256,15 +258,12 @@ public static unsafe class Par3Fft
         // A cohort reads its available blocks and as many recovery blocks as it misses: never more than its blocks.
         long slice = SliceLength(options.MemoryBudget, Present(layout, blockCount, 0), workCount, blockSize);
         long slices = (blockSize + slice - 1) / slice;
-        int cohortsWithWork = Enumerable.Range(0, c).Count(cohort => MissingInCohort(layout, blockCount, available, cohort).Count > 0);
-        var progress = new FftPassProgress(options.Progress, (int)(cohortsWithWork * slices), "computing the missing blocks", "writing the rebuilt blocks");
-        for (int cohort = 0; cohort < c; cohort++)
+        var withWork = Enumerable.Range(0, c).Where(cohort => MissingInCohort(layout, blockCount, available, cohort).Count > 0).ToList();
+        for (int done = 0; done < withWork.Count; done++)
         {
+            int cohort = withWork[done];
             var missingLocal = MissingInCohort(layout, blockCount, available, cohort);
-            if (missingLocal.Count == 0)
-            {
-                continue;
-            }
+            var share = new ShareProgress(options.Progress, (double)done / withWork.Count, 1.0 / withWork.Count);
 
             // Local recovery index → reader index.
             var recLocal = UsableInCohort(layout, recovery.Keys, cohort).ToDictionary(g => (int)(g / (ulong)c), g => recovery[g]);
@@ -278,10 +277,18 @@ public static unsafe class Par3Fft
             // 201 blocks missing from a set with 5,316 recovery blocks: reading them all doubled the time of the repair.)
             var usedRecovery = recLocal.OrderBy(r => r.Key).Take(missingLocal.Count).ToList();
 
-            // What a pass reads: the cohort's available blocks (local positions), then the recovery blocks used.
+            // What is read: the cohort's available blocks (local positions), then the recovery blocks used.
             int present = Present(layout, blockCount, cohort);
             var knownLocal = Enumerable.Range(0, present).Where(j => available[(ulong)j * (ulong)c + (ulong)cohort]).ToList();
             int inputCount = knownLocal.Count + usedRecovery.Count;
+            if (layout.Field.Bits == 16 && MatrixIsCheaper(missingLocal.Count, inputCount, workCount))
+            {
+                share.Detail = "computing the missing blocks (few are missing: directly, without the FFT)";
+                DecodeByMatrix(layout, cohort, missingLocal, knownLocal, usedRecovery, blocks, recoveryReader, sink, blockSize, options, share);
+                continue;
+            }
+
+            var progress = new FftPassProgress(share, (int)slices, "computing the missing blocks", "writing the rebuilt blocks");
             var work = Alloc(workCount, slice);
             try
             {
@@ -338,6 +345,99 @@ public static unsafe class Par3Fft
                 Free(work);
             }
         }
+    }
+
+    /// <summary>
+    /// Whether rebuilding <paramref name="missing"/> blocks from <paramref name="inputs"/> blocks (the known ones and
+    /// the recovery blocks used) is cheaper the way PAR2 does it (<see cref="DecodeByMatrix"/>) than with the FFT
+    /// decoder of size <paramref name="n"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>The matrix way costs missing × inputs multiply-adds per byte, so it grows with every missing block. The FFT
+    /// costs about n·log2 n butterflies per byte however many are missing, and a butterfly costs about 8 times a
+    /// multiply-add of the combiner (it is limited by memory, the combiner is not).</para>
+    /// <para>Measured with 16 cores and the AVX2 kernel, 5,316 blocks of 510 KB with 5,316 FFT recovery blocks
+    /// (n = 16,384): rebuilding 200 blocks took 3.1 s the matrix way and 4.8 s with the FFT, 400 blocks 5.4 s and
+    /// 5.0 s, 800 blocks 12.1 s and 6.3 s. The rule puts the switch at 8 · 16,384 · 14 ÷ 5,316 ≈ 345 blocks.</para>
+    /// </remarks>
+    internal static bool MatrixIsCheaper(int missing, int inputs, int n)
+        => (long)missing * inputs < 8L * n * BitOperations.Log2((uint)n);
+
+    /// <summary>
+    /// Rebuilds a cohort's missing blocks directly, as PAR2 does. The FFT code is linear: recovery block r is
+    /// Σ G[r][i] · block i (<see cref="LeopardCodec.GeneratorRows"/>). With A the used recovery blocks' coefficients
+    /// for the missing blocks and B those for the known blocks, A · missing = recovery + B · known, so
+    /// missing = A⁻¹ · recovery + A⁻¹B · known: one linear combination of the blocks read, for the combiner.
+    /// </summary>
+    private static void DecodeByMatrix(Layout layout, int cohort, List<int> missingLocal, List<int> knownLocal, List<KeyValuePair<int, int>> usedRecovery,
+        IRegionSource blocks, IRegionSource recoveryReader, IRegionSink sink, long blockSize, LinearCombineOptions options, IProgress<double> progress)
+    {
+        var leopard = layout.Field!;
+        var field = leopard.Gf16;
+        int c = layout.Cohorts, missing = missingLocal.Count, known = knownLocal.Count;
+        var g = LeopardCodec.GeneratorRows(leopard, layout.LeopardOriginals, layout.M, usedRecovery.Select(r => r.Key).ToList(), options.Threads);
+        var a = new GfMatrix<ushort>(missing, missing, field);
+        var b = new GfMatrix<ushort>(missing, known, field);
+        for (int t = 0; t < missing; t++)
+        {
+            for (int j = 0; j < missing; j++)
+            {
+                a[t, j] = (ushort)g[t][missingLocal[j]];
+            }
+
+            for (int i = 0; i < known; i++)
+            {
+                b[t, i] = (ushort)g[t][knownLocal[i]];
+            }
+        }
+
+        // The FFT code is MDS: any recovery blocks of the cohort determine as many missing blocks, so A is invertible.
+        _ = a.TryInvert(options.CancellationToken) ? 0 : throw new InvalidOperationException($"Cohort {cohort}: the recovery blocks do not determine the missing blocks.");
+
+        var ab = a.Multiply(b);
+        var coefficients = new GfMatrix<ushort>(missing, known + missing, field);
+        for (int j = 0; j < missing; j++)
+        {
+            ab.Row(j).CopyTo(coefficients.Row(j));
+            a.Row(j).CopyTo(coefficients.Row(j)[known..]);
+        }
+
+        var source = new CohortSource(blocks, recoveryReader, knownLocal.Select(j => (int)((ulong)j * (ulong)c + (ulong)cohort)).ToList(), usedRecovery.Select(r => r.Value).ToList());
+        var target = new CohortSink(sink, missingLocal.Select(j => (int)((ulong)j * (ulong)c + (ulong)cohort)).ToList());
+        LinearCombiner.Combine(field, new MatrixCoefficients<ushort>(coefficients), known + missing, missing, source, target, blockSize,
+            new LinearCombineOptions { MemoryBudget = options.MemoryBudget, Threads = options.Threads, CancellationToken = options.CancellationToken, Progress = progress });
+    }
+
+    /// <summary>A cohort's known blocks (global indices), then its recovery blocks used (reader indices).</summary>
+    private sealed class CohortSource(IRegionSource blocks, IRegionSource recovery, List<int> known, List<int> recoveryReaders) : IRegionSource
+    {
+        public void Read(int index, long offset, Span<byte> destination)
+        {
+            if (index < known.Count)
+            {
+                blocks.Read(known[index], offset, destination);
+            }
+            else
+            {
+                recovery.Read(recoveryReaders[index - known.Count], offset, destination);
+            }
+        }
+    }
+
+    /// <summary>Output j of the combination is missing block <c>missing[j]</c> (global index).</summary>
+    private sealed class CohortSink(IRegionSink sink, List<int> missing) : IRegionSink
+    {
+        public void Write(int index, long offset, ReadOnlySpan<byte> source) => sink.Write(missing[index], offset, source);
+    }
+
+    /// <summary>One cohort's share [start, start + share) of the progress; <see cref="Detail"/> for reports without one.</summary>
+    private sealed class ShareProgress(IProgress<double>? inner, double start, double share) : IDetailedProgress
+    {
+        public string? Detail { get; set; }
+
+        public void Report(double value) => Report(value, Detail);
+
+        public void Report(double value, string? detail) => inner.ReportDetail(start + share * Math.Clamp(value, 0, 1), detail);
     }
 
     /// <summary>The input blocks cohort <paramref name="cohort"/> really has (at most k2; the rest are zero padding).</summary>

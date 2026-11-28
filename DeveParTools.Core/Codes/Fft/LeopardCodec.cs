@@ -286,6 +286,79 @@ public static unsafe class LeopardCodec
         });
     }
 
+    /// <summary>Symbol positions <see cref="GeneratorRows"/> encodes at once.</summary>
+    private const int GeneratorChunk = 1024;
+
+    /// <summary>
+    /// Rows of the code's generator matrix: <c>result[t][i]</c> is the coefficient of original i in recovery block
+    /// <paramref name="recoveryRows"/>[t]. The code is linear, so recovery r = Σ_i G[r][i] · original i, which lets a
+    /// repair with few missing blocks solve for them directly (as PAR2 does) instead of running the FFT decoder.
+    /// </summary>
+    /// <remarks>
+    /// Found by encoding "unit" originals: in regions of P symbols, original i holds the symbol 1 at position i − p0 and
+    /// zeros elsewhere, so recovery r holds G[r][i] at that position. P = 1,024 positions per encode (the other
+    /// originals are one shared zero region), so for 8,192 originals and 8,192 recovery blocks that is 8 encodes of
+    /// 2 KiB regions, a fraction of a second.
+    /// </remarks>
+    public static int[][] GeneratorRows(LeopardField field, int originalCount, int recoveryCount, IReadOnlyList<int> recoveryRows, int threads = 1)
+    {
+        Validate(field, originalCount, recoveryCount);
+        int sym = field.SymbolSize;
+        int per = Math.Min(GeneratorChunk, originalCount);
+        long bytes = ((long)per * sym + 63) / 64 * 64;
+        var rows = recoveryRows.Select(_ => new int[originalCount]).ToArray();
+        var units = new nint[per];
+        var work = new nint[EncodeWorkCount(originalCount, recoveryCount)];
+        nint zero = (nint)NativeMemory.AlignedAlloc((nuint)bytes, 64);
+        try
+        {
+            new Span<byte>((void*)zero, (int)bytes).Clear();
+            for (int i = 0; i < units.Length; i++)
+            {
+                units[i] = (nint)NativeMemory.AlignedAlloc((nuint)bytes, 64);
+            }
+
+            for (int i = 0; i < work.Length; i++)
+            {
+                work[i] = (nint)NativeMemory.AlignedAlloc((nuint)bytes, 64);
+            }
+
+            var originals = new nint[originalCount];
+            for (int first = 0; first < originalCount; first += per)
+            {
+                int count = Math.Min(per, originalCount - first);
+                Array.Fill(originals, zero);
+                for (int j = 0; j < count; j++)
+                {
+                    var unit = new Span<byte>((void*)units[j], (int)bytes);
+                    unit.Clear();
+                    unit[j * sym] = 1; // the symbol 1 (little-endian), the field's identity
+                    originals[first + j] = units[j];
+                }
+
+                Encode(field, originals, recoveryCount, work, bytes, threads);
+                for (int t = 0; t < recoveryRows.Count; t++)
+                {
+                    byte* r = (byte*)work[recoveryRows[t]];
+                    for (int j = 0; j < count; j++)
+                    {
+                        rows[t][first + j] = sym == 2 ? r[2 * j] | (r[2 * j + 1] << 8) : r[j];
+                    }
+                }
+            }
+        }
+        finally
+        {
+            NativeMemory.AlignedFree((void*)zero);
+            foreach (var b in units.Concat(work))
+            {
+                NativeMemory.AlignedFree((void*)b);
+            }
+        }
+
+        return rows;
+    }
+
     // ------------------------------------------------------------------ encode
 
     private static void EncodeRange(LeopardField field, nint[] originals, int recoveryCount, nint[] work, long ofs, long len, StepCounter? counter)

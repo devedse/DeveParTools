@@ -349,6 +349,53 @@ public sealed class FftTests
         }
     }
 
+    /// <summary>
+    /// With few blocks missing the cohort is rebuilt directly, the way PAR2 does it (see Par3Fft.MatrixIsCheaper); with
+    /// many, by the FFT decoder. Both must give the original blocks back.
+    /// </summary>
+    [TestMethod]
+    [DataRow(40, 5, "without the FFT", DisplayName = "5 of 600 missing: directly")]
+    [DataRow(320, 310, "writing the rebuilt blocks", DisplayName = "310 of 600 missing: FFT")]
+    public void Decode_FewMissingDirectly_ManyMissingWithTheFft(int recoveryCount, int lost, string detail)
+    {
+        const int count = 600, size = 256;
+        var data = Blocks(count, size, 90);
+        var layout = Par3Fft.Plan(count, recoveryCount, 1);
+        Assert.AreEqual(16, layout.Field!.Bits);
+        var indices = Enumerable.Range(0, recoveryCount).Select(i => (ulong)i).ToList();
+        var recovery = new Memory(Empty(recoveryCount, size));
+        Par3Fft.Encode(layout, count, indices, new Memory(data), recovery, size, Options());
+
+        var available = Enumerable.Repeat(true, count).ToArray();
+        for (int i = 0; i < lost; i++)
+        {
+            available[i * count / lost] = false;
+        }
+
+        var damaged = data.Select((b, i) => available[i] ? b : new byte[size]).ToArray();
+        var output = new Memory(Empty(count, size));
+        var progress = new DetailRecorder();
+        var options = new LinearCombineOptions { MemoryBudget = 1 << 20, Threads = 2, Progress = progress };
+        Par3Fft.Decode(layout, count, available, indices.ToDictionary(r => r, r => (int)r), new Memory(damaged), recovery, output, size, options);
+        for (int i = 0; i < count; i++)
+        {
+            if (!available[i])
+            {
+                CollectionAssert.AreEqual(data[i], output.Blocks[i], $"block {i}");
+            }
+        }
+
+        Assert.IsTrue(progress.Details.Any(d => d.Contains(detail, StringComparison.Ordinal)), string.Join("\n", progress.Details.Distinct()));
+    }
+
+    [TestMethod]
+    public void MatrixIsCheaper_SwitchesWhereTheMeasurementsSay()
+    {
+        // 5,316 blocks with 5,316 FFT recovery blocks (n = 16,384): 8 · 16,384 · 14 ÷ 5,316 ≈ 345.
+        Assert.IsTrue(Par3Fft.MatrixIsCheaper(345, 5316, 16384));
+        Assert.IsFalse(Par3Fft.MatrixIsCheaper(346, 5316, 16384));
+    }
+
     [TestMethod]
     public void Encode_OnlyRequestedRecoveryIndices()
     {
